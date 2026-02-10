@@ -2,7 +2,7 @@ from PyQt6.QtGui import QPixmap
 from PyQt6 import uic, QtWidgets
 from PyQt6.QtCore import QTimer
 import cv2
-
+import numpy as np
 from logic.CameraManager import CameraManager
 from logic.DisplayManager import DisplayManager
 

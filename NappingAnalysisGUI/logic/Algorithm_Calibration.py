@@ -32,20 +32,26 @@ class Calibration:
         self.image_height = image_background.shape[0]
 
     def run(self):
-        self.timer.start(16)  # Rafraîchir environ 30 FPS (1000ms / 30 ≈ 33ms)
+        self.timer.start(33)  # Rafraîchir environ 30 FPS (1000ms / 30 ≈ 33ms)
         return False
 
     def update_frame(self, last_frame = None):
 
         if last_frame is not None:        
             self.parent.display_manager.show_frame(last_frame)
-        else:
-            self.frame = self.parent.camera_manager.get_frame()
-            if self.frame is None:
-                print("Erreur : Impossible de capturer une image de la caméra.")
-                self.timer.stop()
-                return self.frame
-            self.parent.display_manager.show_frame(self.frame)
+            return last_frame
+        frame = self.parent.camera_manager.get_frame()
+        if frame is None:
+            print("Erreur : Impossible de capturer une image de la caméra.")
+            self.timer.stop()
+            return None
+        # garde l’original pour la calibration
+        self.frame = frame
+
+        # preview légère pour Qt
+        frame_small = cv2.resize(frame, (1280, 720), interpolation=cv2.INTER_AREA)
+        self.parent.display_manager.show_frame(frame_small)
+        return frame
 
     def save_calib(self):
         print("Sauvegarde des matrices d'homographie...")
@@ -94,8 +100,16 @@ class Calibration:
         homography = HomographyTransformer()
         Projec_point = ProjectorPoint()
         drawer = DrawUtils()
+        if self.frame is None:
+            # force une capture au moins une fois
+            self.update_frame()
+            if self.frame is None:
+                raise Exception("Aucune frame caméra disponible pour calibrer.")
 
         proj_points = quadrilateral_detector.detect_quadrilateral_from_aruco(self.frame)
+        if proj_points is None or len(proj_points) != 4:
+            raise Exception("Impossible de détecter les 4 marqueurs ArUco de calibration.")
+
         image = drawer.draw_points_linked(proj_points, self.frame, "Quadrilatère détecté")
         self.proj_points = proj_points
         self.update_frame(last_frame = image)
