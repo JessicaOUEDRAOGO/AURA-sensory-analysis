@@ -1,0 +1,225 @@
+{
+    "marker_44": [
+        {
+            "type": "circle",
+            "relative_position": {
+                "x": 0.0,
+                "y": -0.0023999999999999964
+            },
+            "relative_size": {
+                "radius": 1.2266666666666666,
+                "thickness": 0.1333333333333333
+            },
+            "color": "#ff0000",
+            "fill": false
+        }
+    ],
+    "marker_45": [
+        {
+            "type": "line",
+            "relative_position": {
+                "x1": 0.94,
+                "y1": 1.0,
+                "x2": -0.94,
+                "y2": 1.0
+            },
+            "color": "#0000ff",
+            "thickness": 0.1333333333333333
+        },
+        {
+            "type": "line",
+            "relative_position": {
+                "x1": 0.94,
+                "y1": -1.0,
+                "x2": -0.94,
+                "y2": -1.0
+            },
+            "color": "#0000ff",
+            "thickness": 0.1333333333333333
+        },
+        {
+            "type": "line",
+            "relative_position": {
+                "x1": 1.0,
+                "y1": -1.0,
+                "x2": 1.0,
+                "y2": 1.0
+            },
+            "color": "#0000ff",
+            "thickness": 0.1333333333333333
+        },
+        {
+            "type": "line",
+            "relative_position": {
+                "x1": -1.0,
+                "y1": -1.0,
+                "x2": -1.0,
+                "y2": 1.0
+            },
+            "color": "#0000ff",
+            "thickness": 0.1333333333333333
+        }
+    ],
+    "marker_46": [
+        {
+            "type": "line",
+            "relative_position": {
+                "x1": 1.0,
+                "y1": -0.8,
+                "x2": -1.0,
+                "y2": -0.8
+            },
+            "color": "#00ff00",
+            "thickness": 0.1333333333333333
+        },
+        {
+            "type": "line",
+            "relative_position": {
+                "x1": 0.0,
+                "y1": 1.2,
+                "x2": -1.0,
+                "y2": -0.8
+            },
+            "color": "#00ff00",
+            "thickness": 0.1333333333333333
+        },
+        {
+            "type": "line",
+            "relative_position": {
+                "x1": 0.0,
+                "y1": 1.2,
+                "x2": 1.0,
+                "y2": -0.8
+            },
+            "color": "#00ff00",
+            "thickness": 0.1333333333333333
+        }
+    ],
+    "marker_47": [
+        {
+            "type": "line",
+            "relative_position": {
+                "x1": 0.0,
+                "y1": 1.2,
+                "x2": 1.2,
+                "y2": 0.0
+            },
+            "color": "#ff00ff",
+            "thickness": 0.1333333333333333
+        },
+        {
+            "type": "line",
+            "relative_position": {
+                "x1": 1.2,
+                "y1": 0.0,
+                "x2": 0.0,
+                "y2": -1.2
+            },
+            "color": "#ff00ff",
+            "thickness": 0.1333333333333333
+        },
+        {
+            "type": "line",
+            "relative_position": {
+                "x1": 0.0,
+                "y1": -1.2,
+                "x2": -1.2,
+                "y2": 0.0
+            },
+            "color": "#ff00ff",
+            "thickness": 0.1333333333333333
+        },
+        {
+            "type": "line",
+            "relative_position": {
+                "x1": -1.2,
+                "y1": 0.0,
+                "x2": 0.0,
+                "y2": 1.2
+            },
+            "color": "#ff00ff",
+            "thickness": 0.1333333333333333
+        }
+    ],
+    "marker_48": [
+        {
+            "type": "line",
+            "relative_position": {
+                "x1": -1.2,
+                "y1": -1.2,
+                "x2": 1.2,
+                "y2": 1.2
+            },
+            "color": "#ffa500",
+            "thickness": 0.1333333333333333
+        },
+        {
+            "type": "line",
+            "relative_position": {
+                "x1": -1.2,
+                "y1": 1.2,
+                "x2": 1.2,
+                "y2": -1.2
+            },
+            "color": "#ffa500",
+            "thickness": 0.1333333333333333
+        }
+    ],
+    "marker_49": [
+        {
+            "type": "line",
+            "relative_position": {
+                "x1": 0.0,
+                "y1": 1.2,
+                "x2": 1.14132,
+                "y2": 0.3708
+            },
+            "color": "#00ffff",
+            "thickness": 0.1333333333333333
+        },
+        {
+            "type": "line",
+            "relative_position": {
+                "x1": 1.14132,
+                "y1": 0.3708,
+                "x2": 0.70536,
+                "y2": -0.9708
+            },
+            "color": "#00ffff",
+            "thickness": 0.1333333333333333
+        },
+        {
+            "type": "line",
+            "relative_position": {
+                "x1": 0.70536,
+                "y1": -0.9708,
+                "x2": -0.70536,
+                "y2": -0.9708
+            },
+            "color": "#00ffff",
+            "thickness": 0.1333333333333333
+        },
+        {
+            "type": "line",
+            "relative_position": {
+                "x1": -0.70536,
+                "y1": -0.9708,
+                "x2": -1.14132,
+                "y2": 0.3708
+            },
+            "color": "#00ffff",
+            "thickness": 0.1333333333333333
+        },
+        {
+            "type": "line",
+            "relative_position": {
+                "x1": -1.14132,
+                "y1": 0.3708,
+                "x2": 0.0,
+                "y2": 1.2
+            },
+            "color": "#00ffff",
+            "thickness": 0.1333333333333333
+        }
+    ]
+}
