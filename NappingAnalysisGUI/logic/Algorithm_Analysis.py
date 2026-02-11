@@ -333,7 +333,7 @@ class Algorithm_Analysis(QObject):
         projected_point /= projected_point[2]  # Normalisation
         x, y = projected_point[:2]
         # Inverser l'axe X (horizontal)
-        x = self.image_width - x
+        x = (self.image_width - 1) - x
         return np.array([x, y])
 
     def transform_to_graph(self, camera_point):

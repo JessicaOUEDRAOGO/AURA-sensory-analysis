@@ -33,7 +33,8 @@ class DisplayManager:
         cv2.namedWindow("Image", cv2.WINDOW_NORMAL)
         cv2.moveWindow("Image", monitor.x, monitor.y)  # Déplacer l'image sur l'écran 3
         cv2.setWindowProperty("Image", cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
-        cv2.imshow("Image", flipped_image)  # Afficher l'image retournée sur l'écran 3
+        
+        cv2.imshow("Image", flipped_image)
 
     def close_display(self):
         if self.label:

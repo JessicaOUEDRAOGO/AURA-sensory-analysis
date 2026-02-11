@@ -114,7 +114,21 @@ class Calibration:
         self.proj_points = proj_points
         self.update_frame(last_frame = image)
         cam_points = Projec_point.setUp_Projector_Point(proj_points, self.image_height, self.image_height)
+        S = self.image_height
+        cam_points = np.array(cam_points, dtype=np.float32)
+
+        # Rotation 180° : (x', y') = (S-1-x, S-1-y)
+        cam_points = np.stack([(S - 1) - cam_points[:, 0], (S - 1) - cam_points[:, 1]], axis=1).astype(np.float32)
+
+
         graph_points = Projec_point.setUp_Projector_Point(proj_points, self.grid_size, self.grid_size)
+        Sg = self.grid_size
+        graph_points = np.array(graph_points, dtype=np.float32)
+
+        # Rotation 180°
+        graph_points = np.stack([(Sg - 1) - graph_points[:, 0], (Sg - 1) - graph_points[:, 1]], axis=1).astype(np.float32)
+
+
         self.H_proj, self.H_inv_proj = homography.find_Invers_Homography(proj_points, cam_points)
         self.H_graph, self.H_inv_graph = homography.find_Invers_Homography(proj_points, graph_points)
         

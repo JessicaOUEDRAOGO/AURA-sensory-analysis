@@ -2,25 +2,52 @@ import cv2
 import numpy as np
 
 class DrawUtils:
+    # @staticmethod
+    # def draw_points_linked(proj_points, image, where):
+    #     """
+    #     Dessine les points projetés et les relie par des lignes.
+    #     :param proj_points: Liste de points (x, y) projetés.
+    #     :param image: Image sur laquelle dessiner.
+    #     :param where: Couleur ou style spécifique.
+    #     """
+    #     # Dessiner les coins
+    #     for x, y in proj_points:
+    #         cv2.circle(image, (int(x), int(y)), 10, (0, 0, 255), -1)
+
+    #     # Relier les coins par des lignes
+    #     for i in range(4):
+    #         pt1 = tuple(proj_points[i])
+    #         pt2 = tuple(proj_points[(i + 1) % 4])  # Boucle circulaire pour relier tous les points
+    #         cv2.line(image, (int(pt1[0]), int(pt1[1])), (int(pt2[0]), int(pt2[1])), (0, 255, 0),
+    #                  5)
+    #     return image
+
     @staticmethod
     def draw_points_linked(proj_points, image, where):
-        """
-        Dessine les points projetés et les relie par des lignes.
-        :param proj_points: Liste de points (x, y) projetés.
-        :param image: Image sur laquelle dessiner.
-        :param where: Couleur ou style spécifique.
-        """
-        # Dessiner les coins
-        for x, y in proj_points:
+
+        for idx, (x, y) in enumerate(proj_points):
+            # cercle
             cv2.circle(image, (int(x), int(y)), 10, (0, 0, 255), -1)
 
-        # Relier les coins par des lignes
+            # afficher l’index du point
+            cv2.putText(
+                image,
+                str(idx),
+                (int(x) + 15, int(y) + 15),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1,
+                (255, 0, 0),
+                2
+            )
+
+        # relier les coins
         for i in range(4):
             pt1 = tuple(proj_points[i])
-            pt2 = tuple(proj_points[(i + 1) % 4])  # Boucle circulaire pour relier tous les points
-            cv2.line(image, (int(pt1[0]), int(pt1[1])), (int(pt2[0]), int(pt2[1])), (0, 255, 0),
-                     5)
+            pt2 = tuple(proj_points[(i + 1) % 4])
+            cv2.line(image, (int(pt1[0]), int(pt1[1])), (int(pt2[0]), int(pt2[1])), (0, 255, 0), 5)
+
         return image
+
     
     @staticmethod
     def draw_2_linked_points(proj_points_1, proj_points_2, image, additional_data=False):
