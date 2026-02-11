@@ -215,10 +215,10 @@ class RecordWindow(QtWidgets.QWidget):
             detected_ids.add(marker_id)
 
             # Vérifier si la checkbox correspondante est cochée
-            checkbox_index = marker_id - 44  # Si tes tags sont 44 à 49
+            checkbox_index = marker_id  # maintenant tes checkboxes sont TAG 0..49
             if 0 <= checkbox_index < len(self.checkboxes) and self.checkboxes[checkbox_index].isChecked():
-                # Ajouter le marqueur à la scène
                 self.scene.add_marker(x, y, marker_id)
+
 
             # Mettre à jour les labels correspondants
             label_posx_nbr = self.findChild(QLabel, f"label_posx_nbr_{marker_id}")
@@ -229,13 +229,15 @@ class RecordWindow(QtWidgets.QWidget):
 
         # Réinitialiser les labels des marqueurs non détectés
         for i in range(len(self.checkboxes)):
-            marker_id = i + 1  # Les IDs commencent à 1
+            marker_id = i  # Les IDs commencent à 0
             if marker_id not in detected_ids:
                 label_posx_nbr = self.findChild(QLabel, f"label_posx_nbr_{marker_id}")
                 label_posy_nbr = self.findChild(QLabel, f"label_posy_nbr_{marker_id}")
                 if label_posx_nbr and label_posy_nbr:
                     label_posx_nbr.setText("?")
                     label_posy_nbr.setText("?")
+        self.graphicsView.viewport().update()
+
 
     def update_frame_label(self):
         """
