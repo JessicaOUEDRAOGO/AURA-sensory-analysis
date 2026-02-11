@@ -323,7 +323,7 @@ class RecordWindow(QtWidgets.QWidget):
         content_layout = QVBoxLayout(content_widget)
         
         # Créer les tags
-        for i in range(44,50):
+        for i in range(0,50):
             # Créer un QHBoxLayout pour chaque élément
             horizontal_layout = QHBoxLayout()
             horizontal_layout.setObjectName(f"horizontalLayout_Tag{i}")
