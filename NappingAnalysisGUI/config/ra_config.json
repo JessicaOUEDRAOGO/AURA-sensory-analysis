@@ -3,87 +3,28 @@
         {
             "type": "circle",
             "relative_position": {
-                "x": 0.022222222222222223,
-                "y": 0.022222222222222223
-            },
-            "relative_size": {
-                "radius": 0.7222222222222222,
-                "thickness": 0.05555555555555555
-            },
-            "color": "#ff0000",
-            "fill": false
-        }
-    ],
-    "marker_1": [
-        {
-            "type": "circle",
-            "relative_position": {
-                "x": 0.022222222222222223,
-                "y": 0.022222222222222223
-            },
-            "relative_size": {
-                "radius": 0.8333333333333334,
-                "thickness": 0.05555555555555555
-            },
-            "color": "#ffb600",
-            "fill": false
-        }
-    ],
-    "marker_3": [
-        {
-            "type": "circle",
-            "relative_position": {
-                "x": -0.5611111111111111,
-                "y": 0.022222222222222223
-            },
-            "relative_size": {
-                "radius": 0.6666666666666666,
-                "thickness": 0.05555555555555555
-            },
-            "color": "#ff9800",
-            "fill": false
-        },
-        {
-            "type": "circle",
-            "relative_position": {
                 "x": -0.2833333333333333,
-                "y": -0.4777777777777778
+                "y": -0.03333333333333333
             },
             "relative_size": {
-                "radius": 0.6666666666666666,
+                "radius": 0.5555555555555556,
                 "thickness": 0.05555555555555555
             },
-            "color": "#ff0000",
+            "color": "#ff6080",
             "fill": false
         },
         {
             "type": "circle",
             "relative_position": {
                 "x": 0.21666666666666667,
-                "y": 0.08888888888888889
+                "y": -0.03333333333333333
             },
             "relative_size": {
-                "radius": 0.6666666666666666,
+                "radius": 0.5555555555555556,
                 "thickness": 0.05555555555555555
             },
-            "color": "#ff00cc",
+            "color": "#ff0000",
             "fill": false
-        }
-    ],
-    "marker_4": [
-        {
-            "type": "text",
-            "relative_position": {
-                "x": -0.016666666666666666,
-                "y": -0.5888888888888889
-            },
-            "text": "Hello",
-            "font_size": 0.1111111111111111,
-            "color": "#008000",
-            "rotation": 0,
-            "bold": true,
-            "italic": false,
-            "underline": false
         }
     ]
 }
