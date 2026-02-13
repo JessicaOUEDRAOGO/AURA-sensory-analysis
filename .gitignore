@@ -88,3 +88,7 @@ config_local.py
 Archive-divers/
 photo-vidéo/
 photo-vid*/
+
+# Jupyter / notebooks
+.ipynb_checkpoints/
+**/.ipynb_checkpoints/
