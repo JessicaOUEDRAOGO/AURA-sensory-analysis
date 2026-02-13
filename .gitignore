@@ -92,3 +92,6 @@ photo-vid*/
 # Jupyter / notebooks
 .ipynb_checkpoints/
 **/.ipynb_checkpoints/
+# Generated backgrounds (user-specific outputs)
+NappingAnalysisGUI/assets/textures/background_*_crop.png
+NappingAnalysisGUI/assets/textures/background_*_final.png
