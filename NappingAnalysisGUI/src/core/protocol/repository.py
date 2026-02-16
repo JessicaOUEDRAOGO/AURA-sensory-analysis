@@ -66,3 +66,19 @@ class ProtocolRepository:
             created_at=r["created_at"],
             version=int(r["version"]),
         )
+
+    def update_fields(self, protocol_id: str, goal: str, hypotheses: str, instruction_type: str) -> None:
+        conn = connect()
+        try:
+            conn.execute(
+                """
+                UPDATE protocols
+                SET goal = ?, hypotheses = ?, instruction_type = ?
+                WHERE id = ?
+                """,
+                (goal, hypotheses, instruction_type, protocol_id)
+            )
+            conn.commit()
+        finally:
+            conn.close()
+

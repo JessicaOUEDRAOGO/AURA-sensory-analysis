@@ -5,6 +5,8 @@ from PyQt6 import QtWidgets
 from PyQt6.QtCore import Qt
 
 from src.core.protocol.service import ProtocolService
+from src.ui.views.ui_protocol_editor import ProtocolEditorWizard
+
 
 
 class ProtocolHomeWindow(QtWidgets.QWidget):
@@ -146,17 +148,35 @@ class ProtocolHomeWindow(QtWidgets.QWidget):
         except ValueError as e:
             QtWidgets.QMessageBox.warning(self, "Protocole", str(e))
             return
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Protocole", f"Erreur création protocole : {e}")
+            return
 
+        # Protocole courant + injection dans RecordWindow
         self.parent.current_protocol = p
         self._apply_protocol_to_record(p)
-        self.parent.stacked_widget.setCurrentWidget(self.parent.record_window)
+
+        # Wizard 2A/2B (édition)
+        try:
+            from src.ui.views.ui_protocol_editor import ProtocolEditorWizard
+            dlg = ProtocolEditorWizard(self.parent, p)
+            res = dlg.exec()
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Protocole", f"Impossible d’ouvrir l’éditeur : {e}")
+            res = None
+
+        # UI refresh
         self.input_new_name.clear()
         self.refresh_list()
 
-        QtWidgets.QMessageBox.information(self, "Protocole", f"Protocole créé : {p.name}")
-        # Ici on peut basculer plus tard vers l'éditeur (wizard). Pour l'instant -> Record
-        if hasattr(self.parent, "record_window"):
+        # Navigation : si l’utilisateur a fini le wizard -> Record
+        if res == QtWidgets.QDialog.DialogCode.Accepted and hasattr(self.parent, "record_window"):
+            QtWidgets.QMessageBox.information(self, "Protocole", f"Protocole créé : {p.name}")
             self.parent.stacked_widget.setCurrentWidget(self.parent.record_window)
+        else:
+            # Si annulé, on reste sur Home (plus safe)
+            self.label_status.setText(f"Protocole créé mais édition annulée : {p.name}")
+
 
     def on_open_clicked(self):
         p = self._get_selected_protocol()
