@@ -134,6 +134,12 @@ class RecordWindow(QtWidgets.QWidget):
         # Build tags UI
         self._init_scrollarea_container()
         self.create_tags()
+        def showEvent(self, event):
+            p = getattr(self.parent, "current_protocol", None)
+            if p and hasattr(self, "label_protocol"):
+                self.label_protocol.setText(f"Protocole : {p.name} (v{p.version})")
+            super().showEvent(event)
+
 
     # ------------------------------------------------------------------
     # Qt events
@@ -182,6 +188,10 @@ class RecordWindow(QtWidgets.QWidget):
     # Recording
     # ------------------------------------------------------------------
     def start_recording(self):
+        if not getattr(self.parent, "current_protocol", None):
+            QtWidgets.QMessageBox.warning(self, "Protocole", "Sélectionne d'abord un protocole (Home).")
+            return
+
         # Sécurité: calibration pas chargée
         if self.calib_data["H"] is None or self.calib_data["H_graph"] is None:
             QtWidgets.QMessageBox.warning(self, "Calibration", "Charge la calibration (Load) ou fais une calibration avant Start.")
@@ -205,6 +215,18 @@ class RecordWindow(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "Session", f"Impossible de créer la session : {e}")
             return
 
+        p = getattr(self.parent, "current_protocol", None)
+        if not p:
+            QtWidgets.QMessageBox.warning(self, "Protocole", "Sélectionne d'abord un protocole.")
+            return
+
+        # (option) participant : si tu as un champ UI pour l’ID participant, utilise-le.
+        participant_id = getattr(self, "active_participant_id", None) or "P001"
+
+        # lancer session DB avec le bon protocol_id (si tu utilises SessionService)
+        self.active_protocol_id = p.id
+        self.active_participant_id = participant_id
+
         # Init algo
         self.algorithm_analysis = Algorithm_Analysis(
             self,
@@ -214,7 +236,8 @@ class RecordWindow(QtWidgets.QWidget):
             self.image_background,
             record_window=self,
             output_dir=self.session_output_dir,        # v2
-            output_name="trajectories"                 # optionnel
+            output_name=p.name,
+            
         )
         self.algorithm_analysis.set_show_grid(self.checkBox_DisplayGrid.isChecked())
 

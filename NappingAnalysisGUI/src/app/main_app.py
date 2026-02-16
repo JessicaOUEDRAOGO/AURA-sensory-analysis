@@ -9,6 +9,7 @@ from src.core.utils.paths import gui_path, asset_path
 from src.core.projection.display_manager import DisplayManager
 from src.core.protocol.repository import ProtocolRepository
 from src.core.protocol.service import ProtocolService
+from src.ui.views.ui_protocol_home import ProtocolHomeWindow
 
 from src.ui.views.ui_record_window import RecordWindow
 from src.ui.views.ui_calibration_menu import CalibrationMenu
@@ -38,7 +39,13 @@ class MainApp(QtWidgets.QMainWindow):
         self.resize(1033, 1061)
 
         self.stacked_widget = QtWidgets.QStackedWidget(self)
+        
         self.setCentralWidget(self.stacked_widget)
+        # Protocol services
+        self.current_protocol = None
+        self.protocol_repo = ProtocolRepository()
+        self.protocol_service = ProtocolService(self.protocol_repo)
+       
 
         # --------------------------------------------------
         # BACKGROUND
@@ -60,6 +67,7 @@ class MainApp(QtWidgets.QMainWindow):
         # UI PAGES
         # --------------------------------------------------
         self.main_menu = MainMenu(self)
+        self.protocol_home = ProtocolHomeWindow(self, self.protocol_service)
 
         nbr_tag = 5
         self.record_window = RecordWindow(
@@ -85,6 +93,7 @@ class MainApp(QtWidgets.QMainWindow):
 
         # Stack
         self.stacked_widget.addWidget(self.main_menu)
+        self.stacked_widget.addWidget(self.protocol_home)
         self.stacked_widget.addWidget(self.record_window)
         self.stacked_widget.addWidget(self.calibration_window)
         self.stacked_widget.addWidget(self.RA_window)
@@ -94,7 +103,13 @@ class MainApp(QtWidgets.QMainWindow):
         # --------------------------------------------------
         # INITIALISATION PROTOCOLE (FIX FOREIGN KEY)
         # --------------------------------------------------
+        self.current_protocol_id = None
         self.init_default_protocol()
+        # Protocole courant → record
+        self.current_protocol_id = self.record_window.active_protocol_id
+        self.current_protocol_locked = False
+
+
 
     # --------------------------------------------------
     # Création automatique d’un protocole par défaut
@@ -112,19 +127,16 @@ class MainApp(QtWidgets.QMainWindow):
                     instruction_type="image"
                 )
                 print("PROTO_TEST créé")
-
             else:
                 print("PROTO_TEST déjà existant")
 
-            # Injection dans RecordWindow
-            self.record_window.active_protocol_id = protocol.id
-            self.record_window.active_participant_id = "P001"
-
-            print("Protocol utilisé :", protocol.id)
+            # Fallback uniquement (si aucun protocole sélectionné)
+            if self.current_protocol is None:
+                self.current_protocol = protocol
+                print("Fallback protocole courant :", protocol.name, protocol.id)
 
         except Exception as e:
             print("Erreur init protocole :", e)
-
 
 # --------------------------------------------------
 # MAIN MENU
@@ -144,8 +156,14 @@ class MainMenu(QtWidgets.QMainWindow):
     def go_to_RA(self):
         self.parent.stacked_widget.setCurrentWidget(self.parent.RA_window)
 
+    # def go_to_record(self):
+    #     self.parent.stacked_widget.setCurrentWidget(self.parent.record_window)
+    
     def go_to_record(self):
-        self.parent.stacked_widget.setCurrentWidget(self.parent.record_window)
+        # passe par le choix protocole
+        self.parent.stacked_widget.setCurrentWidget(self.parent.protocol_home)
+        self.parent.protocol_home.setFocus()
+
 
     def go_to_background(self):
         self.parent.stacked_widget.setCurrentWidget(self.parent.Background_Window)
