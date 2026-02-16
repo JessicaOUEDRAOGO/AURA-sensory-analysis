@@ -45,6 +45,8 @@ logs/
 # DATA GENERÉES (IMPORTANT)
 # =========================
 NappingAnalysisGUI/data/*.csv
+NappingAnalysisGUI/data/
+
 
 # Calibration locale (machine dépendante)
 NappingAnalysisGUI/config/calibration_data.json

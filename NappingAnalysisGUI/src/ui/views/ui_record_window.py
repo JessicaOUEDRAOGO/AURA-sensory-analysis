@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
 import os
 import glob
+from src.core.session.session_service import SessionService
+from src.core.session.event_store import EventStore
+from src.core.session.export_service import ExportService
 
 from PyQt6 import QtWidgets, uic
 from PyQt6.QtCore import Qt, QTimer, QThread
@@ -47,6 +50,18 @@ class RecordWindow(QtWidgets.QWidget):
         self.image_background = image_background
         self.image_background_clean = image_background.copy()
         self.image_background_with_grid = image_background.copy()
+
+        # Session V2 (hybride)
+        self.session_id = None
+        self.session_output_dir = None
+        self.session_service = SessionService()
+        self.event_store = EventStore()
+        self.export_service = ExportService()
+
+        # Temporaire (en attendant UI protocole)
+        self.active_protocol_id = "PROTO_PLACEHOLDER"   # on remplacera par ton protocole réel
+        self.active_participant_id = "P001"            # on remplacera par la dropdown V2
+
 
         # Camera
         self.camera_manager = CameraManager(
@@ -176,6 +191,20 @@ class RecordWindow(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "DisplayManager", "display_manager est None (non injecté depuis MainApp).")
             return
 
+        # --- V2: création session (UI thread) ---
+        try:
+            self.session_id, self.session_output_dir = self.session_service.start_session(
+                protocol_id=self.active_protocol_id,
+                participant_id=self.active_participant_id
+            )
+            self.event_store.log(self.session_id, "session_started", {
+                "protocol_id": self.active_protocol_id,
+                "participant_id": self.active_participant_id
+            })
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Session", f"Impossible de créer la session : {e}")
+            return
+
         # Init algo
         self.algorithm_analysis = Algorithm_Analysis(
             self,
@@ -183,7 +212,9 @@ class RecordWindow(QtWidgets.QWidget):
             self.calib_data["H"], self.calib_data["H_inv"],
             self.calib_data["H_graph"], self.calib_data["H_inv_graph"],
             self.image_background,
-            record_window=self
+            record_window=self,
+            output_dir=self.session_output_dir,        # v2
+            output_name="trajectories"                 # optionnel
         )
         self.algorithm_analysis.set_show_grid(self.checkBox_DisplayGrid.isChecked())
 
@@ -238,6 +269,18 @@ class RecordWindow(QtWidgets.QWidget):
 
         self.timer.stop()
         self.timer_started = False
+
+        # --- V2: clôture session (UI thread) ---
+        if self.session_id:
+            try:
+                self.event_store.log(self.session_id, "session_ended", {})
+                self.session_service.end_session(self.session_id)
+                self.export_service.export_session_minimal(self.session_id)
+            except Exception as e:
+                print(f"[WARNING] Fin session V2 échouée: {e}")
+
+        self.session_id = None
+        self.session_output_dir = None
 
         self.pushButton_Start.setEnabled(True)
         self.pushButton_Stop.setEnabled(False)

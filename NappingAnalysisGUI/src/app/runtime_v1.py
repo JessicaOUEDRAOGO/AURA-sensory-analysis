@@ -25,7 +25,8 @@ class Algorithm_Analysis(QObject):
         H_inv_graph,
         image_background,
         output_name="data",
-        record_window=None
+        record_window=None,
+        output_dir=None
     ):
         super().__init__()
         self.parent = parent
@@ -33,9 +34,18 @@ class Algorithm_Analysis(QObject):
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-        # Dossier data + nom fichier
-        os.makedirs(data_path(), exist_ok=True)
-        self.output_csv = data_path(f"{output_name}_{timestamp}.csv")
+        # # Dossier data + nom fichier
+        # os.makedirs(data_path(), exist_ok=True)
+        # self.output_csv = data_path(f"{output_name}_{timestamp}.csv")
+
+        # Dossier output : V2 si fourni, sinon V1 (data_path)
+        if output_dir is None:
+            os.makedirs(data_path(), exist_ok=True)
+            output_dir = data_path()
+        else:
+            os.makedirs(output_dir, exist_ok=True)
+
+        self.output_csv = os.path.join(output_dir, f"{output_name}_{timestamp}.csv")
 
         self.H_projector = H_projector
         self.H_inv_projector = H_inv_projector
