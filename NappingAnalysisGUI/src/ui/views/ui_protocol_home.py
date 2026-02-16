@@ -149,6 +149,7 @@ class ProtocolHomeWindow(QtWidgets.QWidget):
 
         self.parent.current_protocol = p
         self._apply_protocol_to_record(p)
+        self.parent.stacked_widget.setCurrentWidget(self.parent.record_window)
         self.input_new_name.clear()
         self.refresh_list()
 
@@ -171,6 +172,7 @@ class ProtocolHomeWindow(QtWidgets.QWidget):
 
         self.parent.current_protocol = opened
         self._apply_protocol_to_record(opened)
+        
 
         self.refresh_list()
 

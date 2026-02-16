@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import os
 import glob
+import json
 from src.core.session.session_service import SessionService
 from src.core.session.event_store import EventStore
 from src.core.session.export_service import ExportService
@@ -9,10 +10,10 @@ from PyQt6 import QtWidgets, uic
 from PyQt6.QtCore import Qt, QTimer, QThread
 from PyQt6.QtGui import QPainter
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QCheckBox, QLabel, QHBoxLayout,
+    QWidget, QVBoxLayout, QCheckBox, QFileDialog, QLineEdit, QLabel, QHBoxLayout,
     QGraphicsView, QFrame
 )
-
+from src.core.protocol.repository import ProtocolRepository
 from src.core.utils.paths import gui_path, asset_path
 from src.ui.controllers.key_handler import KeyHandler
 from src.ui.widgets.graphics_scene import GraphicsScene
@@ -51,17 +52,27 @@ class RecordWindow(QtWidgets.QWidget):
         self.image_background_clean = image_background.copy()
         self.image_background_with_grid = image_background.copy()
 
+        #Les ID des particpants 
+        self.active_participant_id = "P001"
+        self.active_protocol_id = None
+        # petit champ en haut (ou où tu veux)
+        self._participant_label = QLabel("Participant ID:", self)
+        self._participant_input = QLineEdit(self)
+        self._participant_input.setText(self.active_participant_id)
+        self._participant_input.editingFinished.connect(self._sync_participant_id)
+
+        # si tu as un layout existant dans ton UI (ex: verticalLayout)
+        # adapte le nom du layout à celui dans Record_Menu.ui
+        if hasattr(self, "verticalLayout"):
+            self.verticalLayout.insertWidget(0, self._participant_label)
+            self.verticalLayout.insertWidget(1, self._participant_input)
+
         # Session V2 (hybride)
         self.session_id = None
         self.session_output_dir = None
         self.session_service = SessionService()
         self.event_store = EventStore()
         self.export_service = ExportService()
-
-        # Temporaire (en attendant UI protocole)
-        self.active_protocol_id = "PROTO_PLACEHOLDER"   # on remplacera par ton protocole réel
-        self.active_participant_id = "P001"            # on remplacera par la dropdown V2
-
 
         # Camera
         self.camera_manager = CameraManager(
@@ -134,13 +145,18 @@ class RecordWindow(QtWidgets.QWidget):
         # Build tags UI
         self._init_scrollarea_container()
         self.create_tags()
-        def showEvent(self, event):
+        
+
+    def _sync_participant_id(self):
+        pid = (self._participant_input.text() or "").strip()
+        if pid:
+            self.active_participant_id = pid
+
+    def showEvent(self, event):
             p = getattr(self.parent, "current_protocol", None)
             if p and hasattr(self, "label_protocol"):
                 self.label_protocol.setText(f"Protocole : {p.name} (v{p.version})")
             super().showEvent(event)
-
-
     # ------------------------------------------------------------------
     # Qt events
     # ------------------------------------------------------------------
@@ -184,14 +200,33 @@ class RecordWindow(QtWidgets.QWidget):
             return None
         return max(files, key=os.path.getctime)
 
+    def _sanitize_filename(self, s: str) -> str:
+        # évite caractères interdits Windows: \ / : * ? " < > |
+        bad = '\\/:*?"<>|'
+        for c in bad:
+            s = s.replace(c, "_")
+        return s.strip().replace(" ", "_")
+
+    def get_export_basename(self) -> str:
+        p = getattr(self.parent, "current_protocol", None)
+        proto_name = p.name if p else "UNKNOWN_PROTOCOL"
+        participant_id = getattr(self, "active_participant_id", "P001")
+
+        proto_name = self._sanitize_filename(proto_name)
+        participant_id = self._sanitize_filename(participant_id)
+
+        return f"{proto_name}_{participant_id}"
+
     # ------------------------------------------------------------------
     # Recording
     # ------------------------------------------------------------------
     def start_recording(self):
-        if not getattr(self.parent, "current_protocol", None):
+        p = getattr(self.parent, "current_protocol", None)
+        if not p:
             QtWidgets.QMessageBox.warning(self, "Protocole", "Sélectionne d'abord un protocole (Home).")
             return
 
+        
         # Sécurité: calibration pas chargée
         if self.calib_data["H"] is None or self.calib_data["H_graph"] is None:
             QtWidgets.QMessageBox.warning(self, "Calibration", "Charge la calibration (Load) ou fais une calibration avant Start.")
@@ -201,12 +236,18 @@ class RecordWindow(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "DisplayManager", "display_manager est None (non injecté depuis MainApp).")
             return
 
-        # --- V2: création session (UI thread) ---
+        participant_id = getattr(self, "active_participant_id", None) or "P001"
+        self.active_protocol_id = p.id
+        self.active_participant_id = participant_id
+
+        # maintenant seulement on crée la session
         try:
             self.session_id, self.session_output_dir = self.session_service.start_session(
-                protocol_id=self.active_protocol_id,
-                participant_id=self.active_participant_id
+            protocol_id=self.active_protocol_id,
+            participant_id=self.active_participant_id,
+            protocol_name=p.name
             )
+
             self.event_store.log(self.session_id, "session_started", {
                 "protocol_id": self.active_protocol_id,
                 "participant_id": self.active_participant_id
@@ -220,13 +261,6 @@ class RecordWindow(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "Protocole", "Sélectionne d'abord un protocole.")
             return
 
-        # (option) participant : si tu as un champ UI pour l’ID participant, utilise-le.
-        participant_id = getattr(self, "active_participant_id", None) or "P001"
-
-        # lancer session DB avec le bon protocol_id (si tu utilises SessionService)
-        self.active_protocol_id = p.id
-        self.active_participant_id = participant_id
-
         # Init algo
         self.algorithm_analysis = Algorithm_Analysis(
             self,
@@ -236,7 +270,7 @@ class RecordWindow(QtWidgets.QWidget):
             self.image_background,
             record_window=self,
             output_dir=self.session_output_dir,        # v2
-            output_name=p.name,
+            output_name=self.get_export_basename(),
             
         )
         self.algorithm_analysis.set_show_grid(self.checkBox_DisplayGrid.isChecked())
@@ -299,6 +333,7 @@ class RecordWindow(QtWidgets.QWidget):
                 self.event_store.log(self.session_id, "session_ended", {})
                 self.session_service.end_session(self.session_id)
                 self.export_service.export_session_minimal(self.session_id)
+
             except Exception as e:
                 print(f"[WARNING] Fin session V2 échouée: {e}")
 
@@ -506,3 +541,51 @@ class RecordWindow(QtWidgets.QWidget):
     def connect_checkbox_to_algorithm(self):
         if self.algorithm_analysis:
             self.checkBox_Visu_Cam.stateChanged.connect(self.algorithm_analysis.state_popUpCamera_changed)
+    
+    def export_session_summary(self, session_id: str):
+        # 1) récupérer infos courantes
+        protocol_id = getattr(self, "active_protocol_id", None)
+        participant_id = getattr(self, "active_participant_id", "P001")
+
+        protocol_name = "UNKNOWN_PROTOCOL"
+        if protocol_id:
+            repo = ProtocolRepository()
+            # tu n’as pas get_by_id -> soit tu ajoutes get_by_id, soit tu fais une requête rapide:
+            from src.core.storage.db import connect
+            conn = connect()
+            try:
+                row = conn.execute("SELECT name FROM protocols WHERE id = ?", (protocol_id,)).fetchone()
+                if row:
+                    protocol_name = row["name"]
+            finally:
+                conn.close()
+
+        # 2) proposer un nom de fichier par défaut
+        safe_proto = protocol_name.replace(" ", "_")
+        safe_pid = participant_id.replace(" ", "_")
+        default_name = f"{safe_proto}_{safe_pid}.json"
+
+        # 3) ouvrir boîte de dialogue pour choisir le nom
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Exporter la session",
+            os.path.join(os.getcwd(), default_name),
+            "JSON (*.json)"
+        )
+        if not path:
+            return  # user cancel
+
+        # 4) contenu export
+        payload = {
+            "session_id": session_id,
+            "protocol_id": protocol_id,
+            "protocol_name": protocol_name,
+            "participant_id": participant_id,
+            "exported_at": __import__("datetime").datetime.now().isoformat(timespec="seconds")
+        }
+
+        # 5) écrire le fichier
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, ensure_ascii=False)
+
+        QtWidgets.QMessageBox.information(self, "Export", f"Export OK:\n{path}")
