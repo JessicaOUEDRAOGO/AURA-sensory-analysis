@@ -276,10 +276,7 @@ class RecordWindow(QtWidgets.QWidget):
     # Recording
     # ------------------------------------------------------------------
     def start_recording(self):
-        p = getattr(self.parent, "current_protocol", None)
-        if not p:
-            QtWidgets.QMessageBox.warning(self, "Protocole", "Sélectionne d'abord un protocole (Home).")
-            return
+       
         
         repo = ProtocolRepository()
 
@@ -290,8 +287,8 @@ class RecordWindow(QtWidgets.QWidget):
 
         # si tu veux être encore plus sûr : proto_id = self.active_protocol_id or proto_id
 
-        p = repo.get_by_id(proto_id) if proto_id else None
-        if not p:
+        p_db = repo.get_by_id(proto_id) if proto_id else None
+        if not p_db:
             QtWidgets.QMessageBox.warning(self, "Protocole", "Protocole introuvable en base.")
             return
         
@@ -309,7 +306,7 @@ class RecordWindow(QtWidgets.QWidget):
             participant_id = (self._participant_combo.currentText() or "").strip()
         participant_id = participant_id or getattr(self, "active_participant_id", None) or "P001"
 
-        self.active_protocol_id = p.id
+        self.active_protocol_id = p_db.id
         self.active_participant_id = participant_id
 
         # maintenant seulement on crée la session
@@ -317,7 +314,7 @@ class RecordWindow(QtWidgets.QWidget):
             self.session_id, self.session_output_dir = self.session_service.start_session(
             protocol_id=self.active_protocol_id,
             participant_id=self.active_participant_id,
-            protocol_name=p.name
+            protocol_name=p_db.name
             )
 
             self.event_store.log(self.session_id, "session_started", {
@@ -337,11 +334,11 @@ class RecordWindow(QtWidgets.QWidget):
         asset_repo = InstructionAssetRepository()
         timeline_repo = TimelineRepository()
 
-        assets = asset_repo.list_by_protocol(p.id)
-        steps = timeline_repo.list(p.id)
+        assets = asset_repo.list_by_protocol(p_db.id)
+        steps = timeline_repo.list(p_db.id)
         print("=== START_RECORDING DEBUG ===")
-        print("Protocol:", p.name, p.id)
-        print("modules_enabled:", p.modules_enabled)
+        print("Protocol:", p_db.name, p_db.id)
+        print("modules_enabled:", p_db.modules_enabled)
         print("assets:", len(assets))
         print("steps:", len(steps))
         if steps:
@@ -363,10 +360,10 @@ class RecordWindow(QtWidgets.QWidget):
             record_window=self,
             output_dir=self.session_output_dir,        # v2
             output_name=self.get_export_basename(),
-            modules_enabled=p.modules_enabled or {},
+            modules_enabled=p_db.modules_enabled or {},
             assets=assets,
             timeline_steps=steps,
-            protocol=p
+            protocol=p_db
 
         )
         self.algorithm_analysis.set_show_grid(self.checkBox_DisplayGrid.isChecked())
@@ -381,10 +378,15 @@ class RecordWindow(QtWidgets.QWidget):
         # Thread
         self.algorithm_thread = QThread()
         self.algorithm_analysis.moveToThread(self.algorithm_thread)
+        self.algorithm_analysis.finished = False
 
         self.algorithm_thread.started.connect(self.algorithm_analysis.detect_and_process)
         self.algorithm_analysis.data_signal.connect(self.update_ui)
         self.algorithm_analysis.data_signal.connect(self.start_timer_on_first_frame)
+       
+
+        self.algorithm_analysis.finished_signal.connect(self.algorithm_thread.quit)
+        self.algorithm_analysis.finished_signal.connect(self.algorithm_analysis.deleteLater)
         self.algorithm_thread.finished.connect(self.algorithm_thread.deleteLater)
 
         # Reset UI counters
@@ -407,29 +409,33 @@ class RecordWindow(QtWidgets.QWidget):
             self.timer.start(1000)
 
     def stop_recording(self):
+
         if self.algorithm_analysis:
             self.algorithm_analysis.stop()
 
-        if self.algorithm_thread and self.algorithm_thread.isRunning():
-            self.algorithm_thread.quit()
-            self.algorithm_thread.wait()
-
-        self.algorithm_thread = None
-        self.algorithm_analysis = None
-
+        # Fermer la caméra AVANT d'attendre le thread
         if self.camera_manager:
             self.camera_manager.close_camera()
+
+        # Maintenant on attend le thread
+        try:
+            if self.algorithm_thread and self.algorithm_thread.isRunning():
+                self.algorithm_thread.quit()
+                self.algorithm_thread.wait()
+        except RuntimeError:
+            # thread déjà supprimé → on ignore
+            pass
+
 
         self.timer.stop()
         self.timer_started = False
 
-        # --- V2: clôture session (UI thread) ---
+        # V2 session close
         if self.session_id:
             try:
                 self.event_store.log(self.session_id, "session_ended", {})
                 self.session_service.end_session(self.session_id)
                 self.export_service.export_session_minimal(self.session_id)
-
             except Exception as e:
                 print(f"[WARNING] Fin session V2 échouée: {e}")
 
@@ -438,6 +444,11 @@ class RecordWindow(QtWidgets.QWidget):
 
         self.pushButton_Start.setEnabled(True)
         self.pushButton_Stop.setEnabled(False)
+        self.algorithm_thread = None
+        self.algorithm_analysis = None
+
+
+
 
     # ------------------------------------------------------------------
     # UI update from algo

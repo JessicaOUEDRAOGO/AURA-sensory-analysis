@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 from datetime import datetime
 from PyQt6.QtCore import QObject, pyqtSignal
+from PyQt6.QtCore import QThread
 
 from src.core.utils.paths import asset_path, config_path, data_path
 from src.core.projection.display_manager import DisplayManager
@@ -14,6 +15,7 @@ from src.core.projection.draw_utils import DrawUtils
 
 class Algorithm_Analysis(QObject):
     data_signal = pyqtSignal(dict)
+    finished_signal = pyqtSignal()
 
     def __init__(
         self,
@@ -91,8 +93,19 @@ class Algorithm_Analysis(QObject):
         # Consignes
         self.waiting_for_consigne_key = False
 
-    def is_enabled(self, key: str, default: bool = True) -> bool:
-        return bool(self.modules_enabled.get(key, default))
+    def is_enabled(self, key: str, default: bool = False) -> bool:
+        v = self.modules_enabled.get(key, default)
+
+        if v is None:
+            return False
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, int):
+            return v != 0
+        if isinstance(v, str):
+            return v.strip().lower() in ("1", "true", "yes", "on")
+        return bool(v)
+
 
 
     def update_background_image(self, new_image_background):
@@ -110,18 +123,22 @@ class Algorithm_Analysis(QObject):
         self.running = True
         print("detect_and_process started")
 
-        overlay_on = self.is_enabled("overlay_ra", True)
-        projection_on = self.is_enabled("projection_media", True)
+        overlay_on = self.is_enabled("overlay_ra", False)
+        projection_on = self.is_enabled("projection_media", False)
         adv_logs = self.is_enabled("advanced_logs", False)
 
         print("=== RUNTIME DEBUG ===")
         print("projection_on:", projection_on, "overlay_on:", overlay_on, "adv_logs:", adv_logs)
         print("timeline_steps:", len(self.timeline_steps))
         print("assets:", len(self.assets))
+        
         if self.timeline_steps:
             s0 = self.timeline_steps[0]
             print("step0:", s0.order_index, s0.label, "asset_ref=", s0.asset_ref, "pause=", s0.pause, "duration=", s0.duration_s)
         print("=====================")
+        for k in ["overlay_ra", "projection_media"]:
+            v = self.modules_enabled.get(k, None)
+            print("DBG", k, v, type(v))
 
 
 
@@ -135,7 +152,7 @@ class Algorithm_Analysis(QObject):
             print("[MODULES] overlay_ra désactivé -> pas de RA")
 
 
-    # --- Consignes dynamiques depuis timeline ---
+        # --- Consignes dynamiques depuis timeline ---
         if projection_on and self.timeline_steps:
             assets_by_id = {a.id: a for a in self.assets}
 
@@ -149,7 +166,7 @@ class Algorithm_Analysis(QObject):
                     while self.running and (datetime.now() - t0).total_seconds() < step.duration_s:
                         self.display_manager.display_image_on_projector_monitor(self.image_background)
                         _frame = self.parent.camera_manager.get_frame()
-                        cv2.waitKey(30)
+                        cv2.waitKey(1)
                     continue
 
                 asset = assets_by_id.get(step.asset_ref)
@@ -164,10 +181,15 @@ class Algorithm_Analysis(QObject):
                     img = cv2.resize(img, (self.image_width, self.image_height))
 
                     self.waiting_for_consigne_key = True
-                    while self.running and self.waiting_for_consigne_key:
+                    while True:
+                        if not self.running:
+                            break
+                        if not self.waiting_for_consigne_key:
+                            break
+
                         self.display_manager.display_image_on_projector_monitor(img)
                         _frame = self.parent.camera_manager.get_frame()
-                        cv2.waitKey(30)
+                        cv2.waitKey(1)
 
         elif projection_on and not self.timeline_steps:
             if adv_logs:
@@ -180,12 +202,20 @@ class Algorithm_Analysis(QObject):
         print("Consignes affichées, on continue avec la détection des marqueurs.")
 
         # --- Boucle principale ---
-        while self.running:
+     
+        while True:
+            if not self.running:
+                break
             current_image_background = self.image_background.copy()
-            frame = self.parent.camera_manager.get_frame()
+            if not self.running:
+                break
 
-            if frame is None or frame.size == 0:
-                print("Erreur : Frame invalide ou vide.")
+            frame = self.parent.camera_manager.get_frame()
+            if frame is None:
+                break
+
+            if frame.size == 0:
+                print("Erreur : Frame vide.")
                 break
 
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -298,6 +328,8 @@ class Algorithm_Analysis(QObject):
 
         self.save_to_csv()
         print("detect_and_process terminé")
+        self.finished_signal.emit()
+
 
     def state_popUpCamera_changed(self):
         self.status_popUpCamera = not self.status_popUpCamera
@@ -452,6 +484,8 @@ class Algorithm_Analysis(QObject):
 
     def stop(self):
         self.running = False
+        self.waiting_for_consigne_key = False
+
 
     def select_next_marker(self, direction):
         if not self.marker_states:
