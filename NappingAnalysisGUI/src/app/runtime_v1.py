@@ -26,11 +26,20 @@ class Algorithm_Analysis(QObject):
         image_background,
         output_name="data",
         record_window=None,
-        output_dir=None
+        output_dir=None,
+        modules_enabled=None,
+        assets=None,
+        timeline_steps=None,
+        protocol=None
     ):
         super().__init__()
         self.parent = parent
         self.display_manager = display_manager
+
+        self.modules_enabled = modules_enabled or {}
+        self.assets = assets or []
+        self.timeline_steps = timeline_steps or []
+        self.protocol = protocol
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -82,6 +91,10 @@ class Algorithm_Analysis(QObject):
         # Consignes
         self.waiting_for_consigne_key = False
 
+    def is_enabled(self, key: str, default: bool = True) -> bool:
+        return bool(self.modules_enabled.get(key, default))
+
+
     def update_background_image(self, new_image_background):
         self.image_background = new_image_background
         self.image_width = self.image_background.shape[1]
@@ -97,29 +110,72 @@ class Algorithm_Analysis(QObject):
         self.running = True
         print("detect_and_process started")
 
+        overlay_on = self.is_enabled("overlay_ra", True)
+        projection_on = self.is_enabled("projection_media", True)
+        adv_logs = self.is_enabled("advanced_logs", False)
+
+        print("=== RUNTIME DEBUG ===")
+        print("projection_on:", projection_on, "overlay_on:", overlay_on, "adv_logs:", adv_logs)
+        print("timeline_steps:", len(self.timeline_steps))
+        print("assets:", len(self.assets))
+        if self.timeline_steps:
+            s0 = self.timeline_steps[0]
+            print("step0:", s0.order_index, s0.label, "asset_ref=", s0.asset_ref, "pause=", s0.pause, "duration=", s0.duration_s)
+        print("=====================")
+
+
+
         # Config RA
-        ra_config = self.load_config(config_path("ra_config.json"))
+        # ra_config = self.load_config(config_path("ra_config.json"))
+        # Config RA (uniquement si module overlay activé)
+        ra_config = {}
+        if overlay_on:
+            ra_config = self.load_config(config_path("ra_config.json"))
+        elif adv_logs:
+            print("[MODULES] overlay_ra désactivé -> pas de RA")
 
-        # --- Consignes ---
-        consigne_paths = [
-            asset_path("textures", "Consigne1.png"),
-            asset_path("textures", "Consigne2.png")
-        ]
 
-        for consigne_path in consigne_paths:
-            consigne_img = cv2.imread(consigne_path)
-            if consigne_img is not None:
-                consigne_img = cv2.resize(consigne_img, (self.image_width, self.image_height))
-                self.waiting_for_consigne_key = True
+    # --- Consignes dynamiques depuis timeline ---
+        if projection_on and self.timeline_steps:
+            assets_by_id = {a.id: a for a in self.assets}
 
-                while self.running and self.waiting_for_consigne_key:
-                    self.display_manager.display_image_on_projector_monitor(consigne_img)
+            for step in self.timeline_steps:
+                if not self.running:
+                    break
 
-                    # Optionnel : garde ta lecture caméra (même si pas utilisée)
-                    _frame = self.parent.camera_manager.get_frame()
-                    cv2.waitKey(30)
-            else:
-                print(f"⚠️ Consigne introuvable : {consigne_path}")
+                # Pause
+                if step.pause or step.asset_ref is None:
+                    t0 = datetime.now()
+                    while self.running and (datetime.now() - t0).total_seconds() < step.duration_s:
+                        self.display_manager.display_image_on_projector_monitor(self.image_background)
+                        _frame = self.parent.camera_manager.get_frame()
+                        cv2.waitKey(30)
+                    continue
+
+                asset = assets_by_id.get(step.asset_ref)
+                if not asset:
+                    continue
+
+                # Image
+                if asset.asset_type == "image":
+                    img = cv2.imread(asset.path)
+                    if img is None:
+                        continue
+                    img = cv2.resize(img, (self.image_width, self.image_height))
+
+                    self.waiting_for_consigne_key = True
+                    while self.running and self.waiting_for_consigne_key:
+                        self.display_manager.display_image_on_projector_monitor(img)
+                        _frame = self.parent.camera_manager.get_frame()
+                        cv2.waitKey(30)
+
+        elif projection_on and not self.timeline_steps:
+            if adv_logs:
+                print("[MODULES] projection_media=ON mais timeline_steps vide -> aucune consigne")
+        else:
+            if adv_logs:
+                print("[MODULES] projection_media=OFF -> consignes ignorées")
+
 
         print("Consignes affichées, on continue avec la détection des marqueurs.")
 
@@ -184,7 +240,22 @@ class Algorithm_Analysis(QObject):
                     marker_id = str(ids[i][0])
 
                     # Afficher uniquement si statique
-                    if state["is_static"]:
+                    # if state["is_static"]:
+                    #     if f"marker_{marker_id}" in ra_config:
+                    #         self.draw_from_config(
+                    #             current_image_background,
+                    #             ra_config[f"marker_{marker_id}"],
+                    #             projector_x, projector_y, marker_size, marker_id_int
+                    #         )
+                    #     else:
+                    #         self.draw_default_marker(
+                    #             current_image_background,
+                    #             projector_x, projector_y, marker_size, ids[i][0]
+                    #         )
+
+                    
+                    # si overlay_ra=False, aucun overlay ne sera dessiné
+                    if state["is_static"] and overlay_on:
                         if f"marker_{marker_id}" in ra_config:
                             self.draw_from_config(
                                 current_image_background,
@@ -196,6 +267,7 @@ class Algorithm_Analysis(QObject):
                                 current_image_background,
                                 projector_x, projector_y, marker_size, ids[i][0]
                             )
+
 
                         if self.mode_multidim:
                             color = self.get_marker_color(marker_id_int)

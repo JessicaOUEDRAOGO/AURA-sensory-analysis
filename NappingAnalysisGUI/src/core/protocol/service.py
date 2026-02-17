@@ -34,8 +34,8 @@ class ProtocolService:
             goal="",
             hypotheses="",
             instruction_type=instruction_type,
-            modules_enabled=[],
-            data_to_export=[],
+            modules_enabled={},
+            data_to_export={},
             locked=False,
             created_at=datetime.now().isoformat(timespec="seconds"),
             version=1

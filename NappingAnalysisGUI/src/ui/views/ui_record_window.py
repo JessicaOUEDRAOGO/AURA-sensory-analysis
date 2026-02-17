@@ -6,6 +6,10 @@ from src.core.session.session_service import SessionService
 from src.core.session.event_store import EventStore
 from src.core.session.export_service import ExportService
 
+from src.core.protocol.asset_repository import InstructionAssetRepository
+from src.core.protocol.timeline_repository import TimelineRepository
+
+
 from PyQt6 import QtWidgets, uic
 from PyQt6.QtCore import Qt, QTimer, QThread
 from PyQt6.QtGui import QPainter
@@ -276,7 +280,20 @@ class RecordWindow(QtWidgets.QWidget):
         if not p:
             QtWidgets.QMessageBox.warning(self, "Protocole", "Sélectionne d'abord un protocole (Home).")
             return
+        
+        repo = ProtocolRepository()
 
+        proto_id = None
+        p_mem = getattr(self.parent, "current_protocol", None)
+        if p_mem:
+            proto_id = p_mem.id
+
+        # si tu veux être encore plus sûr : proto_id = self.active_protocol_id or proto_id
+
+        p = repo.get_by_id(proto_id) if proto_id else None
+        if not p:
+            QtWidgets.QMessageBox.warning(self, "Protocole", "Protocole introuvable en base.")
+            return
         
         # Sécurité: calibration pas chargée
         if self.calib_data["H"] is None or self.calib_data["H_graph"] is None:
@@ -315,6 +332,26 @@ class RecordWindow(QtWidgets.QWidget):
         if not p:
             QtWidgets.QMessageBox.warning(self, "Protocole", "Sélectionne d'abord un protocole.")
             return
+        
+        
+        asset_repo = InstructionAssetRepository()
+        timeline_repo = TimelineRepository()
+
+        assets = asset_repo.list_by_protocol(p.id)
+        steps = timeline_repo.list(p.id)
+        print("=== START_RECORDING DEBUG ===")
+        print("Protocol:", p.name, p.id)
+        print("modules_enabled:", p.modules_enabled)
+        print("assets:", len(assets))
+        print("steps:", len(steps))
+        if steps:
+            s0 = steps[0]
+            print("step0:", s0.order_index, s0.label, "asset_ref=", s0.asset_ref, "pause=", s0.pause, "duration=", s0.duration_s)
+        if assets:
+            a0 = assets[0]
+            print("asset0:", a0.id, a0.asset_type, a0.path, "exists=", os.path.exists(a0.path))
+        print("=============================")
+
 
         # Init algo
         self.algorithm_analysis = Algorithm_Analysis(
@@ -326,7 +363,11 @@ class RecordWindow(QtWidgets.QWidget):
             record_window=self,
             output_dir=self.session_output_dir,        # v2
             output_name=self.get_export_basename(),
-            
+            modules_enabled=p.modules_enabled or {},
+            assets=assets,
+            timeline_steps=steps,
+            protocol=p
+
         )
         self.algorithm_analysis.set_show_grid(self.checkBox_DisplayGrid.isChecked())
 
