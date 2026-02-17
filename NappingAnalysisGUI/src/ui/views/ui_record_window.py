@@ -11,7 +11,7 @@ from PyQt6.QtCore import Qt, QTimer, QThread
 from PyQt6.QtGui import QPainter
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QCheckBox, QFileDialog, QLineEdit, QLabel, QHBoxLayout,
-    QGraphicsView, QFrame
+    QGraphicsView, QFrame, QComboBox
 )
 from src.core.protocol.repository import ProtocolRepository
 from src.core.utils.paths import gui_path, asset_path
@@ -52,20 +52,31 @@ class RecordWindow(QtWidgets.QWidget):
         self.image_background_clean = image_background.copy()
         self.image_background_with_grid = image_background.copy()
 
-        #Les ID des particpants 
-        self.active_participant_id = "P001"
-        self.active_protocol_id = None
-        # petit champ en haut (ou où tu veux)
-        self._participant_label = QLabel("Participant ID:", self)
-        self._participant_input = QLineEdit(self)
-        self._participant_input.setText(self.active_participant_id)
-        self._participant_input.editingFinished.connect(self._sync_participant_id)
+        # #Les ID des particpants 
+        # self.active_participant_id = "P001"
+        # self.active_protocol_id = None
+        # # petit champ en haut (ou où tu veux)
+        # self._participant_label = QLabel("Participant ID:", self)
+        # self._participant_input = QLineEdit(self)
+        # self._participant_input.setText(self.active_participant_id)
+        # self._participant_input.editingFinished.connect(self._sync_participant_id)
 
-        # si tu as un layout existant dans ton UI (ex: verticalLayout)
-        # adapte le nom du layout à celui dans Record_Menu.ui
+        # # si tu as un layout existant dans ton UI (ex: verticalLayout)
+        # # adapte le nom du layout à celui dans Record_Menu.ui
+        # if hasattr(self, "verticalLayout"):
+        #     self.verticalLayout.insertWidget(0, self._participant_label)
+        #     self.verticalLayout.insertWidget(1, self._participant_input)
+        # Participant (combo)
+        self.active_participant_id = None
+        self.active_protocol_id = None
+
+        self._participant_label = QLabel("Participant ID:", self)
+        self._participant_combo = QComboBox(self)
+        self._participant_combo.currentTextChanged.connect(self._on_participant_changed)
+
         if hasattr(self, "verticalLayout"):
             self.verticalLayout.insertWidget(0, self._participant_label)
-            self.verticalLayout.insertWidget(1, self._participant_input)
+            self.verticalLayout.insertWidget(1, self._participant_combo)
 
         # Session V2 (hybride)
         self.session_id = None
@@ -156,7 +167,47 @@ class RecordWindow(QtWidgets.QWidget):
             p = getattr(self.parent, "current_protocol", None)
             if p and hasattr(self, "label_protocol"):
                 self.label_protocol.setText(f"Protocole : {p.name} (v{p.version})")
+
+            #  remplir la combo avec les participants du protocole courant
+            if p and hasattr(self, "_participant_combo"):
+                self._load_participants_for_protocol(p.id)
+
             super().showEvent(event)
+
+    def _on_participant_changed(self, text: str):
+        pid = (text or "").strip()
+        if pid:
+            self.active_participant_id = pid
+
+    def _load_participants_for_protocol(self, protocol_id: str):
+        # récupère tous les participants du protocole
+        from src.core.storage.db import connect
+        conn = connect()
+        try:
+            rows = conn.execute(
+                "SELECT participant_id FROM protocol_participants WHERE protocol_id=? ORDER BY participant_id ASC",
+                (protocol_id,)
+            ).fetchall()
+            ids = [r["participant_id"] for r in rows]
+        finally:
+            conn.close()
+
+        self._participant_combo.blockSignals(True)
+        self._participant_combo.clear()
+
+        if ids:
+            self._participant_combo.addItems(ids)
+            # par défaut: premier participant de la liste
+            self.active_participant_id = ids[0]
+            self._participant_combo.setCurrentText(ids[0])
+        else:
+            # fallback si aucun participant n'a été défini
+            self._participant_combo.addItem("P001")
+            self.active_participant_id = "P001"
+            self._participant_combo.setCurrentText("P001")
+
+        self._participant_combo.blockSignals(False)
+
     # ------------------------------------------------------------------
     # Qt events
     # ------------------------------------------------------------------
@@ -236,7 +287,11 @@ class RecordWindow(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "DisplayManager", "display_manager est None (non injecté depuis MainApp).")
             return
 
-        participant_id = getattr(self, "active_participant_id", None) or "P001"
+        participant_id = None
+        if hasattr(self, "_participant_combo"):
+            participant_id = (self._participant_combo.currentText() or "").strip()
+        participant_id = participant_id or getattr(self, "active_participant_id", None) or "P001"
+
         self.active_protocol_id = p.id
         self.active_participant_id = participant_id
 

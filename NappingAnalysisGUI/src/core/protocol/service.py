@@ -32,8 +32,8 @@ class ProtocolService:
         p = self.repo.get_by_name(name)
         if not p:
             raise ValueError("Protocole introuvable.")
-        # verrouille en DB (lecture seule)
-        self.repo.set_locked(p.id, True)
+        # # verrouille en DB (lecture seule)
+        # self.repo.set_locked(p.id, True)
         return Protocol(**{**p.__dict__, "locked": True})
 
     def duplicate(self, source_name: str, new_name: str) -> Protocol:

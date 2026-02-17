@@ -37,6 +37,8 @@ class SessionService:
                 "INSERT INTO sessions(id, protocol_id, participant_id, started_at, output_dir) VALUES (?, ?, ?, ?, ?)",
                 (session_id, protocol_id, participant_id, started_at, out_dir)
             )
+            # Lock protocole dès qu'il est utilisé en session
+            conn.execute("UPDATE protocols SET locked = 1 WHERE id = ?", (protocol_id,))
             conn.commit()
         finally:
             conn.close()

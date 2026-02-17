@@ -9,6 +9,7 @@ from PyQt6.QtCore import Qt
 from src.core.protocol.models import TimelineStep, InstructionAsset
 from src.core.protocol.timeline_repository import TimelineRepository, new_step_id
 from src.core.protocol.asset_repository import InstructionAssetRepository
+from src.core.protocol.repository import ProtocolRepository
 
 DEFAULT_DURATION_S = 10.0
 
@@ -233,6 +234,9 @@ class TimelineEditorPage(QtWidgets.QWidget):
         self.table.selectRow(insert_at)
 
     def save_to_db(self):
+        if ProtocolRepository().get_by_name(getattr(self.parent, "protocol", None).name).locked:
+            QtWidgets.QMessageBox.warning(self, "Timeline", "Protocole verrouillé. Duplique pour modifier.")
+            return
         # lire table -> steps
         for i in range(self.table.rowCount()):
             label = (self.table.item(i, 1).text() if self.table.item(i, 1) else "").strip() or f"Étape {i+1}"

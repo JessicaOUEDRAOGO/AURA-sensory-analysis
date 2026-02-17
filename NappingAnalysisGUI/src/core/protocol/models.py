@@ -1,5 +1,5 @@
 # src/core/protocol/models.py
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any
 
 @dataclass(frozen=True)
@@ -9,8 +9,8 @@ class Protocol:
     goal: str = ""
     hypotheses: str = ""
     instruction_type: str = "image"  # audio|image|video
-    modules_enabled: List[str] = None
-    data_to_export: List[str] = None
+    modules_enabled: Dict[str, bool] = field(default_factory=dict)
+    data_to_export: Dict[str, bool] = field(default_factory=dict)
     locked: bool = False
     created_at: str = ""
     version: int = 1
