@@ -5,21 +5,13 @@ from PyQt6 import QtWidgets
 from PyQt6.QtCore import Qt
 
 from src.core.protocol.service import ProtocolService
-from src.ui.views.ui_protocol_editor import ProtocolEditorWizard
+from src.core.utils.paths import asset_path
+from src.ui.widgets.background_widget import BackgroundWidget
 
 
-
-class ProtocolHomeWindow(QtWidgets.QWidget):
-    """
-    Home protocol:
-    - Create new protocol (name uniqueness)
-    - Search existing protocols
-    - Open (locked read-only)
-    - Duplicate (editable)
-    """
-
+class ProtocolHomeWindow(BackgroundWidget):
     def __init__(self, parent, protocol_service: ProtocolService):
-        super().__init__(parent)
+        super().__init__(parent, bg_path=asset_path("images", "backgrounds", "protocol_home.png"))
         self.parent = parent
         self.protocol_service = protocol_service
 
@@ -34,7 +26,6 @@ class ProtocolHomeWindow(QtWidgets.QWidget):
         title.setStyleSheet("font-size: 18px; font-weight: 600;")
         root.addWidget(title)
 
-        # --- Create section
         box_create = QtWidgets.QGroupBox("Créer un nouveau protocole")
         lay_create = QtWidgets.QGridLayout(box_create)
 
@@ -56,7 +47,6 @@ class ProtocolHomeWindow(QtWidgets.QWidget):
         lay_create.addWidget(self.btn_create, 2, 1)
         root.addWidget(box_create)
 
-        # --- Existing section
         box_existing = QtWidgets.QGroupBox("Utiliser un protocole existant")
         lay_existing = QtWidgets.QVBoxLayout(box_existing)
 
@@ -100,12 +90,28 @@ class ProtocolHomeWindow(QtWidgets.QWidget):
 
         root.addStretch(1)
 
+        # garde tes groupbox lisibles (ok)
+        box_create.setStyleSheet("""
+            QGroupBox {
+                background-color: rgba(255, 255, 255, 210);
+                border: 1px solid rgba(0,0,0,40);
+                border-radius: 10px;
+                margin-top: 10px;
+                padding: 10px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 6px;
+                font-weight: 600;
+            }
+        """)
+        box_existing.setStyleSheet(box_create.styleSheet())
+
     # ---------------- Helpers ----------------
     def refresh_list(self):
         self.list_protocols.clear()
         search = (self.input_search.text() or "").strip()
-
-        # repo.list is in repository, so we need access via service.repo
         protocols = self.protocol_service.repo.list(search=search)
 
         for p in protocols:
@@ -123,14 +129,8 @@ class ProtocolHomeWindow(QtWidgets.QWidget):
         return item.data(Qt.ItemDataRole.UserRole)
 
     def _apply_protocol_to_record(self, p):
-        """
-        Injecte le protocole sélectionné dans RecordWindow
-        pour éviter d'utiliser l'ancien PROTO_TEST.
-        """
         if hasattr(self.parent, "record_window") and self.parent.record_window is not None:
             self.parent.record_window.active_protocol_id = p.id
-
-            # fallback participant si non défini
             if not getattr(self.parent.record_window, "active_participant_id", None):
                 self.parent.record_window.active_participant_id = "P001"
 
@@ -152,11 +152,9 @@ class ProtocolHomeWindow(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "Protocole", f"Erreur création protocole : {e}")
             return
 
-        # Protocole courant + injection dans RecordWindow
         self.parent.current_protocol = p
         self._apply_protocol_to_record(p)
 
-        # Wizard 2A/2B (édition)
         try:
             from src.ui.views.ui_protocol_editor import ProtocolEditorWizard
             dlg = ProtocolEditorWizard(self.parent, p)
@@ -165,18 +163,14 @@ class ProtocolHomeWindow(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "Protocole", f"Impossible d’ouvrir l’éditeur : {e}")
             res = None
 
-        # UI refresh
         self.input_new_name.clear()
         self.refresh_list()
 
-        # Navigation : si l’utilisateur a fini le wizard -> Record
         if res == QtWidgets.QDialog.DialogCode.Accepted and hasattr(self.parent, "record_window"):
             QtWidgets.QMessageBox.information(self, "Protocole", f"Protocole créé : {p.name}")
             self.parent.stacked_widget.setCurrentWidget(self.parent.record_window)
         else:
-            # Si annulé, on reste sur Home (plus safe)
             self.label_status.setText(f"Protocole créé mais édition annulée : {p.name}")
-
 
     def on_open_clicked(self):
         p = self._get_selected_protocol()
@@ -192,8 +186,6 @@ class ProtocolHomeWindow(QtWidgets.QWidget):
 
         self.parent.current_protocol = opened
         self._apply_protocol_to_record(opened)
-        
-
         self.refresh_list()
 
         QtWidgets.QMessageBox.information(self, "Protocole", f"Ouvré en lecture seule : {opened.name}")
@@ -206,12 +198,7 @@ class ProtocolHomeWindow(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "Protocole", "Sélectionne un protocole dans la liste.")
             return
 
-        new_name, ok = QtWidgets.QInputDialog.getText(
-            self,
-            "Dupliquer protocole",
-            "Nouveau nom (unique) :",
-            text=f"{p.name}_COPY"
-        )
+        new_name, ok = QtWidgets.QInputDialog.getText(self, "Dupliquer protocole", "Nouveau nom (unique) :", text=f"{p.name}_COPY")
         if not ok:
             return
 
@@ -235,5 +222,4 @@ class ProtocolHomeWindow(QtWidgets.QWidget):
             self.parent.stacked_widget.setCurrentWidget(self.parent.record_window)
 
     def go_to_main_menu(self):
-        if hasattr(self.parent, "main_menu"):
-            self.parent.stacked_widget.setCurrentWidget(self.parent.main_menu)
+        self.parent.stacked_widget.setCurrentWidget(self.parent.main_menu)

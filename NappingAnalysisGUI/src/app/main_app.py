@@ -2,15 +2,15 @@
 from src.core.storage.db import init_db
 import sys
 import cv2
-from PyQt6 import uic, QtWidgets
-from PyQt6.QtCore import Qt
+from PyQt6 import QtWidgets
 
-from src.core.utils.paths import gui_path, asset_path
+from src.core.utils.paths import asset_path
 from src.core.projection.display_manager import DisplayManager
 from src.core.protocol.repository import ProtocolRepository
 from src.core.protocol.service import ProtocolService
-from src.ui.views.ui_protocol_home import ProtocolHomeWindow
 
+from src.ui.views.ui_main_menu_page import MainMenuPage
+from src.ui.views.ui_protocol_home import ProtocolHomeWindow
 from src.ui.views.ui_record_window import RecordWindow
 from src.ui.views.ui_calibration_menu import CalibrationMenu
 from src.ui.views.ui_reality_augmented_window import RealityAugementedWindow
@@ -39,16 +39,15 @@ class MainApp(QtWidgets.QMainWindow):
         self.resize(1033, 1061)
 
         self.stacked_widget = QtWidgets.QStackedWidget(self)
-        
         self.setCentralWidget(self.stacked_widget)
+
         # Protocol services
         self.current_protocol = None
         self.protocol_repo = ProtocolRepository()
         self.protocol_service = ProtocolService(self.protocol_repo)
-       
 
         # --------------------------------------------------
-        # BACKGROUND
+        # BACKGROUND (projecteur)
         # --------------------------------------------------
         self.image_background = cv2.imread(asset_path("textures", "blanc_4k_carre_mid.png"))
         if self.image_background is None:
@@ -57,17 +56,16 @@ class MainApp(QtWidgets.QMainWindow):
         # --------------------------------------------------
         # DISPLAY MANAGER
         # --------------------------------------------------
-        self.display_manager = DisplayManager(
-            projector_screen_id=self.settings["projector_screen_id"]
-        )
+        self.display_manager = DisplayManager(projector_screen_id=self.settings["projector_screen_id"])
         self.display_manager.resolution = self.settings["resolution"]
         self.display_manager.display_image_on_projector_monitor(self.image_background)
 
         # --------------------------------------------------
         # UI PAGES
         # --------------------------------------------------
-        self.main_menu = MainMenu(self)
+        self.main_menu = MainMenuPage(self)  # QWidget page
         self.protocol_home = ProtocolHomeWindow(self, self.protocol_service)
+        self.settings_window = SettingsMenu(self)  # dialog
 
         nbr_tag = 5
         self.record_window = RecordWindow(
@@ -77,7 +75,7 @@ class MainApp(QtWidgets.QMainWindow):
             display_manager=self.display_manager,
             cam_width=self.cam_width,
             cam_height=self.cam_height,
-            grid_size=self.grid_size
+            grid_size=self.grid_size,
         )
 
         self.calibration_window = CalibrationMenu(
@@ -85,13 +83,13 @@ class MainApp(QtWidgets.QMainWindow):
             self.image_background,
             cam_width=self.cam_width,
             cam_height=self.cam_height,
-            grid_size=self.grid_size
+            grid_size=self.grid_size,
         )
 
         self.RA_window = RealityAugementedWindow(self)
         self.Background_Window = BackgroundWindow(self)
 
-        # Stack
+        # Stack (QUE des QWidget)
         self.stacked_widget.addWidget(self.main_menu)
         self.stacked_widget.addWidget(self.protocol_home)
         self.stacked_widget.addWidget(self.record_window)
@@ -101,19 +99,13 @@ class MainApp(QtWidgets.QMainWindow):
         self.stacked_widget.setCurrentWidget(self.main_menu)
 
         # --------------------------------------------------
-        # INITIALISATION PROTOCOLE (FIX FOREIGN KEY)
+        # INITIALISATION PROTOCOLE
         # --------------------------------------------------
         self.current_protocol_id = None
         self.init_default_protocol()
-        # Protocole courant → record
         self.current_protocol_id = self.record_window.active_protocol_id
         self.current_protocol_locked = False
 
-
-
-    # --------------------------------------------------
-    # Création automatique d’un protocole par défaut
-    # --------------------------------------------------
     def init_default_protocol(self):
         repo = ProtocolRepository()
         service = ProtocolService(repo)
@@ -122,15 +114,11 @@ class MainApp(QtWidgets.QMainWindow):
             protocol = repo.get_by_name("PROTO_TEST")
 
             if protocol is None:
-                protocol = service.create_new(
-                    name="PROTO_TEST",
-                    instruction_type="image"
-                )
+                protocol = service.create_new(name="PROTO_TEST", instruction_type="image")
                 print("PROTO_TEST créé")
             else:
                 print("PROTO_TEST déjà existant")
 
-            # Fallback uniquement (si aucun protocole sélectionné)
             if self.current_protocol is None:
                 self.current_protocol = protocol
                 print("Fallback protocole courant :", protocol.name, protocol.id)
@@ -138,59 +126,17 @@ class MainApp(QtWidgets.QMainWindow):
         except Exception as e:
             print("Erreur init protocole :", e)
 
-# --------------------------------------------------
-# MAIN MENU
-# --------------------------------------------------
-class MainMenu(QtWidgets.QMainWindow):
-    def __init__(self, parent: MainApp):
-        super().__init__()
-        uic.loadUi(gui_path("Main_Menu.ui"), self)
-        self.parent = parent
 
-        self.pushButton_Record.clicked.connect(self.go_to_record)
-        self.pushButton_2_ARS.clicked.connect(self.go_to_RA)
-        self.pushButton_background.clicked.connect(self.go_to_background)
-        self.pushButton_Settings.clicked.connect(self.go_to_settings)
-        self.pushButton_Quit.clicked.connect(self.quit_app)
-
-    def go_to_RA(self):
-        self.parent.stacked_widget.setCurrentWidget(self.parent.RA_window)
-
-    # def go_to_record(self):
-    #     self.parent.stacked_widget.setCurrentWidget(self.parent.record_window)
-    
-    def go_to_record(self):
-        # passe par le choix protocole
-        self.parent.stacked_widget.setCurrentWidget(self.parent.protocol_home)
-        self.parent.protocol_home.setFocus()
-
-
-    def go_to_background(self):
-        self.parent.stacked_widget.setCurrentWidget(self.parent.Background_Window)
-
-    def go_to_settings(self):
-        dlg = SettingsMenu(self.parent)
-        dlg.exec()
-
-    def quit_app(self):
-        QtWidgets.QApplication.quit()
-
-
-# --------------------------------------------------
-# MAIN
-# --------------------------------------------------
 def main():
     print("\n============================================================")
     print("Projective Augmented Reality & Napping Collection Data")
     print("============================================================\n")
 
-    # Initialisation base
     init_db()
 
     app = QtWidgets.QApplication(sys.argv)
     qt_window = MainApp()
     qt_window.show()
-
     sys.exit(app.exec())
 
 
