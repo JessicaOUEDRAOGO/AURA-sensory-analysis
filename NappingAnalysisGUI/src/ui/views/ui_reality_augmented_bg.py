@@ -59,7 +59,7 @@ class RealityAugementedWindowWithBG(BackgroundWidget):
             QLabel#leftLabelCircle,
             QLabel#leftLabelTrait,
             QLabel#leftLabelText {
-                color: rgba(2255,255,255,240);   /* noir foncé */
+                color: rgba(255,255,255,240);   /* noir foncé */
                 font-weight: 700;
             }
 

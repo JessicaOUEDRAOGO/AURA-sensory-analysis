@@ -3,15 +3,12 @@ from __future__ import annotations
 
 from PyQt6 import QtWidgets
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import QGraphicsDropShadowEffect
 
 from src.core.utils.paths import asset_path
 from src.ui.widgets.background_widget import BackgroundWidget
 
-# IMPORTANT:
-# -> adapte l'import ci-dessous au NOM EXACT de ta fenêtre Projection Background actuelle
-# ex: from src.ui.views.ui_background_window import BackgroundWindow
-# ou from src.ui.views.ui_projection_background_window import ProjectionBackgroundWindow
 from src.ui.views.ui_background_window import BackgroundWindow  # <-- À ADAPTER
 
 
@@ -51,7 +48,7 @@ class ProjectionBackgroundWindowWithBG(BackgroundWidget):
         shadow = QGraphicsDropShadowEffect(card)
         shadow.setBlurRadius(35)
         shadow.setOffset(0, 10)
-        shadow.setColor(QtWidgets.QColorDialog().currentColor())  # fallback si besoin
+        shadow.setColor(QColor(0, 0, 0, 180))# fallback si besoin
         # NOTE: QColorDialog().currentColor() peut être noir selon contexte,
         # si tu veux stable, remplace les 2 lignes ci-dessus par:
         # from PyQt6.QtGui import QColor
@@ -88,31 +85,63 @@ class ProjectionBackgroundWindowWithBG(BackgroundWidget):
 
         # style identique à AR
         self.setStyleSheet("""
-        #card {
-            background-color: rgba(15, 18, 22, 185);
-            border-radius: 18px;
-            border: 1px solid rgba(255, 255, 255, 60);
-        }
+            #card {
+                background-color: rgba(15, 18, 22, 185);
+                border-radius: 18px;
+                border: 1px solid rgba(255, 255, 255, 60);
+            }
 
-        /* Scrollbar propre */
-        QScrollBar:vertical {
-            background: rgba(0,0,0,20);
-            width: 10px;
-            margin: 6px 3px 6px 3px;
-            border-radius: 5px;
-        }
-        QScrollBar::handle:vertical {
-            background: rgba(255, 214, 120, 120);
-            border-radius: 5px;
-            min-height: 30px;
-        }
-        QScrollBar::handle:vertical:hover {
-            background: rgba(255, 214, 120, 180);
-        }
-        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
-            height: 0px;
-        }
-        QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
-            background: transparent;
-        }
+            /* Texte */
+            #card QLabel {
+                color: rgba(240,240,240,240);
+                font-weight: 700;
+            }
+
+            /* Inputs (si tu as des lineEdit en haut) */
+            #card QLineEdit, #card QComboBox, #card QSpinBox, #card QDoubleSpinBox {
+                background-color: rgba(255,255,255,230);
+                border-radius: 10px;
+                padding: 6px 10px;
+                border: 1px solid rgba(0,0,0,70);
+                color: rgba(10,10,10,240);
+            }
+
+            /* BOUTONS AMBRE (identique RA) */
+            #card QPushButton {
+                background-color: rgba(255, 214, 120, 45);
+                border: 1px solid rgba(255, 180, 60, 200);
+                border-radius: 12px;
+                padding: 8px 14px;
+                font-weight: 800;
+                color: rgba(20,20,20,235);
+            }
+            #card QPushButton:hover {
+                background-color: rgba(255, 214, 120, 75);
+            }
+            #card QPushButton:pressed {
+                background-color: rgba(255, 214, 120, 95);
+            }
+
+            /* Scrollbar propre */
+            QScrollBar:vertical {
+                background: rgba(0,0,0,20);
+                width: 10px;
+                margin: 6px 3px 6px 3px;
+                border-radius: 5px;
+            }
+            QScrollBar::handle:vertical {
+                background: rgba(255, 214, 120, 120);
+                border-radius: 5px;
+                min-height: 30px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: rgba(255, 214, 120, 180);
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+                background: transparent;
+            }
         """)
+

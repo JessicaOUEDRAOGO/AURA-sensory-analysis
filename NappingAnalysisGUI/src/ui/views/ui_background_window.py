@@ -18,6 +18,25 @@ class BackgroundWindow(QtWidgets.QWidget):
     def __init__(self, parent):
         super().__init__()
         uic.loadUi(gui_path("Background_Menu.ui"), self)
+        # === Style ambre identique à RA ===
+        self.setStyleSheet("""
+        QPushButton {
+            background-color: rgba(255, 191, 0, 0.15);
+            border: 2px solid #ffbf00;
+            border-radius: 12px;
+            padding: 8px 20px;
+            font-weight: 600;
+            color: #2b2b2b;
+        }
+
+        QPushButton:hover {
+            background-color: rgba(255, 191, 0, 0.35);
+        }
+
+        QPushButton:pressed {
+            background-color: rgba(255, 191, 0, 0.6);
+        }
+        """)
 
         self.parent = parent  # MainApp
 
