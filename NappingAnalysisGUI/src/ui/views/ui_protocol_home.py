@@ -143,27 +143,31 @@ class ProtocolHomeWindow(BackgroundWidget):
 
             /* =========================
             GROUPBOX (fond clair)
-            ========================== */
+            /* GroupBox clair */
             #protocolCard QGroupBox {
                 background-color: rgba(255,255,255,235);
                 border-radius: 12px;
                 border: 1px solid rgba(0,0,0,55);
-                margin-top: 14px;
-                padding: 14px;
+                margin-top: 18px;          /* laisse de la place au titre */
+                padding: 18px 14px 14px 14px;
                 color: rgba(20,20,20,235);
                 font-weight: 600;
             }
 
-            /* Titre du groupbox (ex: "Créer un nouveau protocole") */
+            /* Titre en "badge" (lisible) */
             #protocolCard QGroupBox::title {
                 subcontrol-origin: margin;
+                subcontrol-position: top left;
                 left: 14px;
-                padding: 0 8px;
+                top: 0px;
+                padding: 4px 10px;
+                background-color: rgba(255,255,255,245);  /* badge clair */
+                color: rgba(15,15,15,245);                /* texte noir */
+                border-radius: 8px;
                 font-weight: 800;
-                color: rgba(15,15,15,240);
             }
 
-            /* Labels DANS les groupbox : "Nom", "Type consigne" -> noirs */
+            /* Labels dans les groupbox */
             #protocolCard QGroupBox QLabel {
                 color: rgba(25,25,25,235);
                 font-weight: 600;
@@ -206,6 +210,7 @@ class ProtocolHomeWindow(BackgroundWidget):
             #protocolCard QPushButton:pressed {
                 background-color: rgba(255, 214, 120, 110);
             }
+            
         """)
     # ---------------- Helpers ----------------
     def refresh_list(self):

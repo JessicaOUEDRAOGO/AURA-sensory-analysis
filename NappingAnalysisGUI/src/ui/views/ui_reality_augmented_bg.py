@@ -108,7 +108,7 @@ class RealityAugementedWindowWithBG(BackgroundWidget):
             }
             /* Labels spécifiques à gauche (Rond / Trait / Text) */
             #arCard QLabel[leftLabel="true"] {
-                color: rgba(255, 200, 120, 255);
+                color: rgba(20, 20, 20, 235);
                 font-weight: 800;
             }
 

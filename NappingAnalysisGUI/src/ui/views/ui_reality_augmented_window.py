@@ -13,6 +13,16 @@ class RealityAugementedWindow(QtWidgets.QWidget):
         super().__init__()
 
         uic.loadUi(gui_path("RealityAugemented_Menu.ui"), self)
+        # Labels à gauche (Rond / Trait / Text)
+        self.label_Circle.setProperty("leftLabel", "true")
+        self.label_trait.setProperty("leftLabel", "true")
+        self.label_text.setProperty("leftLabel", "true")
+
+        # Important : forcer le refresh du style
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.update()
+
         # --- Force la lisibilité des 3 labels à gauche (Rond / Trait / Text) ---
         for lbl in (self.label_Circle, self.label_trait, self.label_text):
             lbl.setStyleSheet("QLabel { color: rgba(20,20,20,230); font-weight: 700; }")
