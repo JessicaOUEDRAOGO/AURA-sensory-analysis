@@ -142,6 +142,8 @@ class MainMenuPage(QtWidgets.QWidget):
         self.left_layout = QtWidgets.QVBoxLayout(self.left_panel)
         self.left_layout.setContentsMargins(24, 24, 24, 24)
         self.left_layout.setSpacing(16)
+        self.left_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+
 
         self.left_title = QtWidgets.QLabel("MENU", self.left_panel)
         self.left_title.setStyleSheet("""
@@ -186,8 +188,16 @@ class MainMenuPage(QtWidgets.QWidget):
                   self.pushButton_Settings, self.pushButton_Quit]:
             if b:
                 b.setParent(self.left_panel)
-                b.setMinimumHeight(70)
-                b.setMaximumWidth(360)
+                # b.setMinimumHeight(70)
+                # b.setMaximumWidth(360)
+                # Taille UNIFORME
+                BTN_W = 360
+                BTN_H = 60
+
+                b.setMinimumSize(BTN_W, BTN_H)
+                b.setMaximumSize(BTN_W, BTN_H)
+                b.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed,
+                                QtWidgets.QSizePolicy.Policy.Fixed)
                 b.setCursor(Qt.CursorShape.PointingHandCursor)
                 b.setStyleSheet(btn_style)
                 self.left_layout.addWidget(b)
