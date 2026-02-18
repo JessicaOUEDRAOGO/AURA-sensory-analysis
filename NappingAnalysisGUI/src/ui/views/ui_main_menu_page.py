@@ -1,107 +1,148 @@
 from PyQt6 import uic, QtWidgets
 from PyQt6.QtCore import Qt, QUrl
-from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
-from PyQt6.QtMultimediaWidgets import QVideoWidget
+from PyQt6.QtGui import QPixmap
+from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput, QVideoSink
 
 from src.core.utils.paths import gui_path, asset_path
 
 
 class MainMenuPage(QtWidgets.QWidget):
     def __init__(self, parent):
-        super().__init__()
+        super().__init__(parent)
         self.parent = parent
+        self.setContentsMargins(0, 0, 0, 0)
 
-        # --------------------------------------------------
-        # LAYOUT PRINCIPAL
-        # --------------------------------------------------
-        self.main_layout = QtWidgets.QVBoxLayout(self)
-        self.main_layout.setContentsMargins(0, 0, 0, 0)
+        # ======================================
+        # STACK : SUPERPOSITION
+        # ======================================
+        self.stack = QtWidgets.QStackedLayout(self)
+        self.stack.setStackingMode(QtWidgets.QStackedLayout.StackingMode.StackAll)
+        self.stack.setContentsMargins(0, 0, 0, 0)
 
-        # --------------------------------------------------
-        # VIDEO BACKGROUND
-        # --------------------------------------------------
-        self.video_widget = QVideoWidget(self)
-        self.video_widget.setSizePolicy(
+        # ======================================
+        # BACKGROUND VIDEO -> QLabel (pas de native window)
+        # ======================================
+        self.video_label = QtWidgets.QLabel()
+        self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.video_label.setStyleSheet("background: black;")
+        self.video_label.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
-            QtWidgets.QSizePolicy.Policy.Expanding
+            QtWidgets.QSizePolicy.Policy.Expanding,
         )
+        # IMPORTANT : laisse passer les clics
+        self.video_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+
+        self._last_pixmap = None
 
         self.player = QMediaPlayer(self)
         self.audio_output = QAudioOutput(self)
-
-        self.player.setVideoOutput(self.video_widget)
+        self.audio_output.setVolume(0.0)
         self.player.setAudioOutput(self.audio_output)
-        self.audio_output.setVolume(0.0)  # Muet
+
+        self.video_sink = QVideoSink(self)
+        self.player.setVideoOutput(self.video_sink)
+
+        self.video_sink.videoFrameChanged.connect(self.on_video_frame)
+        self.player.mediaStatusChanged.connect(self.loop_video)
 
         video_path = asset_path("videos", "main_menu.mp4")
         self.player.setSource(QUrl.fromLocalFile(video_path))
-        self.player.mediaStatusChanged.connect(self.handle_media_status)
         self.player.play()
 
-        # Ajouter la vidéo au layout
-        self.main_layout.addWidget(self.video_widget)
+        # ======================================
+        # OVERLAY UI (au-dessus)
+        # ======================================
+        self.overlay_widget = QtWidgets.QWidget()
+        self.overlay_widget.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.overlay_widget.setStyleSheet("background: transparent;")
 
-        # --------------------------------------------------
-        # UI CONTENT (au-dessus de la vidéo)
-        # --------------------------------------------------
+        overlay_layout = QtWidgets.QVBoxLayout(self.overlay_widget)
+        overlay_layout.setContentsMargins(0, 0, 0, 0)
+
         tmp = QtWidgets.QMainWindow()
         uic.loadUi(gui_path("Main_Menu.ui"), tmp)
 
         content = tmp.centralWidget()
-        content.setParent(self)
-        content.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        content.setParent(self.overlay_widget)
+        content.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        content.setStyleSheet("background: transparent;")
 
-        self.main_layout.addWidget(content)
+        overlay_layout.addWidget(content)
 
-        # Mettre la vidéo en arrière-plan
-        self.video_widget.lower()
+        # ======================================
+        # AJOUT AU STACK
+        # ======================================
+        self.stack.addWidget(self.video_label)      # index 0
+        self.stack.addWidget(self.overlay_widget)   # index 1
 
-        # --------------------------------------------------
-        # RÉCUPÉRATION DES BOUTONS
-        # --------------------------------------------------
+        # ✅ CRUCIAL : overlay au-dessus
+        self.stack.setCurrentWidget(self.overlay_widget)
+
+        # (double sécurité)
+        self.overlay_widget.raise_()
+
+        # ======================================
+        # BOUTONS
+        # ======================================
         self.pushButton_Record = content.findChild(QtWidgets.QPushButton, "pushButton_Record")
         self.pushButton_2_ARS = content.findChild(QtWidgets.QPushButton, "pushButton_2_ARS")
         self.pushButton_background = content.findChild(QtWidgets.QPushButton, "pushButton_background")
         self.pushButton_Settings = content.findChild(QtWidgets.QPushButton, "pushButton_Settings")
         self.pushButton_Quit = content.findChild(QtWidgets.QPushButton, "pushButton_Quit")
 
-        # Sécurité
-        if not all([
-            self.pushButton_Record,
-            self.pushButton_2_ARS,
-            self.pushButton_background,
-            self.pushButton_Settings,
-            self.pushButton_Quit
-        ]):
-            print("⚠️ Erreur : Boutons non trouvés dans Main_Menu.ui")
+        if not all([self.pushButton_Record, self.pushButton_2_ARS, self.pushButton_background,
+                    self.pushButton_Settings, self.pushButton_Quit]):
+            print("[UI] ERROR: boutons manquants dans Main_Menu.ui")
 
-        # --------------------------------------------------
-        # CONNECTIONS
-        # --------------------------------------------------
         self.pushButton_Record.clicked.connect(self.go_to_record)
         self.pushButton_2_ARS.clicked.connect(self.go_to_RA)
         self.pushButton_background.clicked.connect(self.go_to_background)
         self.pushButton_Settings.clicked.connect(self.go_to_settings)
         self.pushButton_Quit.clicked.connect(self.quit_app)
 
-    # --------------------------------------------------
+    # ======================================
+    # VIDEO FRAMES -> QLabel
+    # ======================================
+    def on_video_frame(self, frame):
+        if not frame or not frame.isValid():
+            return
+
+        img = frame.toImage()
+        if img.isNull():
+            return
+
+        pix = QPixmap.fromImage(img)
+        self._last_pixmap = pix
+        self._apply_scaled_pixmap()
+
+    def _apply_scaled_pixmap(self):
+        if self._last_pixmap is None:
+            return
+        scaled = self._last_pixmap.scaled(
+            self.video_label.size(),
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding,  # effet "fond d'écran"
+            Qt.TransformationMode.SmoothTransformation
+        )
+        self.video_label.setPixmap(scaled)
+
+    # ======================================
     # LOOP VIDEO
-    # --------------------------------------------------
-    def handle_media_status(self, status):
+    # ======================================
+    def loop_video(self, status):
         if status == QMediaPlayer.MediaStatus.EndOfMedia:
             self.player.setPosition(0)
             self.player.play()
 
-    # --------------------------------------------------
-    # RESIZE (important pour full background)
-    # --------------------------------------------------
+    # ======================================
+    # RESIZE
+    # ======================================
     def resizeEvent(self, event):
-        self.video_widget.setGeometry(self.rect())
         super().resizeEvent(event)
+        self._apply_scaled_pixmap()
 
-    # --------------------------------------------------
+    # ======================================
     # NAVIGATION
-    # --------------------------------------------------
+    # ======================================
     def go_to_RA(self):
         self.parent.stacked_widget.setCurrentWidget(self.parent.RA_window)
 
