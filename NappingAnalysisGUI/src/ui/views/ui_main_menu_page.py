@@ -63,11 +63,40 @@ class MainMenuPage(QtWidgets.QWidget):
         uic.loadUi(gui_path("Main_Menu.ui"), tmp)
 
         content = tmp.centralWidget()
+        # =========================
+        # 1) VOILE SOMBRE (overlay)
+        # =========================
+        veil = QtWidgets.QWidget(self.overlay_widget)
+        veil.setObjectName("veil")
+        veil.setStyleSheet("""
+        #veil {
+            background-color: rgba(0, 0, 0, 120);  /* augmente 120 -> 160 si tu veux plus sombre */
+        }
+        """)
+        veil.lower()  # le voile derrière les boutons mais au-dessus de la vidéo
+
+        # IMPORTANT : le voile doit suivre la taille de l'overlay
+        def _resize_veil():
+            veil.setGeometry(self.overlay_widget.rect())
+
+        _resize_veil()
+
         content.setParent(self.overlay_widget)
         content.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         content.setStyleSheet("background: transparent;")
 
         overlay_layout.addWidget(content)
+
+        label_titre = content.findChild(QtWidgets.QLabel, "label_titre")
+        if label_titre:
+            label_titre.setStyleSheet("""
+                QLabel {
+                    color: white;
+                    font-size: 22px;
+                    font-weight: 700;
+                }
+            """)
+
 
         # ======================================
         # AJOUT AU STACK
@@ -75,7 +104,7 @@ class MainMenuPage(QtWidgets.QWidget):
         self.stack.addWidget(self.video_label)      # index 0
         self.stack.addWidget(self.overlay_widget)   # index 1
 
-        # ✅ CRUCIAL : overlay au-dessus
+        # CRUCIAL : overlay au-dessus
         self.stack.setCurrentWidget(self.overlay_widget)
 
         # (double sécurité)
@@ -99,6 +128,29 @@ class MainMenuPage(QtWidgets.QWidget):
         self.pushButton_background.clicked.connect(self.go_to_background)
         self.pushButton_Settings.clicked.connect(self.go_to_settings)
         self.pushButton_Quit.clicked.connect(self.quit_app)
+
+        btn_style = """
+        QPushButton {
+            color: white;
+            background-color: rgba(255, 255, 255, 40);
+            border: 1px solid rgba(255, 255, 255, 90);
+            border-radius: 14px;
+            padding: 12px;
+            font-size: 16px;
+        }
+        QPushButton:hover {
+            background-color: rgba(255, 255, 255, 70);
+        }
+        QPushButton:pressed {
+            background-color: rgba(255, 255, 255, 110);
+        }
+        """
+
+        for b in [self.pushButton_Record, self.pushButton_2_ARS, self.pushButton_background,
+                self.pushButton_Settings, self.pushButton_Quit]:
+            if b:
+                b.setStyleSheet(btn_style)
+
 
     # ======================================
     # VIDEO FRAMES -> QLabel
@@ -132,6 +184,14 @@ class MainMenuPage(QtWidgets.QWidget):
         if status == QMediaPlayer.MediaStatus.EndOfMedia:
             self.player.setPosition(0)
             self.player.play()
+    
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._apply_scaled_pixmap()
+        # resize du voile
+        for w in self.overlay_widget.findChildren(QtWidgets.QWidget, "veil"):
+            w.setGeometry(self.overlay_widget.rect())
+
 
     # ======================================
     # RESIZE
