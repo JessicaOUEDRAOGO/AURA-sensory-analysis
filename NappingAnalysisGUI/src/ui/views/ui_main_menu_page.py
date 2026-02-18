@@ -63,6 +63,35 @@ class MainMenuPage(QtWidgets.QWidget):
         uic.loadUi(gui_path("Main_Menu.ui"), tmp)
 
         content = tmp.centralWidget()
+        # ======================================
+        # NOUVEAU TITRE RECHERCHE
+        # ======================================
+
+        label_titre = content.findChild(QtWidgets.QLabel, "label_titre")
+
+        if label_titre:
+            label_titre.setText("""
+            <div align="center">
+                <div style="font-size:14pt; font-weight:300; letter-spacing:1px;">
+                    Institut Lyfe × ENISE
+                </div>
+                <br>
+                <div style="font-size:22pt; font-weight:700; letter-spacing:2px;">
+                    PROJECTIVE AUGMENTED REALITY PLATFORM
+                </div>
+                <br>
+                <div style="font-size:14pt; font-style:italic;">
+                    for Sensory Research
+                </div>
+            </div>
+            """)
+
+            label_titre.setStyleSheet("""
+                QLabel {
+                    color: white;
+                }
+            """)
+
         # =========================
         # 1) VOILE SOMBRE (overlay)
         # =========================
