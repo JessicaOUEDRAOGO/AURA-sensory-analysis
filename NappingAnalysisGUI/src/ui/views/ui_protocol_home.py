@@ -207,66 +207,6 @@ class ProtocolHomeWindow(BackgroundWidget):
                 background-color: rgba(255, 214, 120, 110);
             }
         """)
-
-        # self.setStyleSheet("""
-        #     #protocolCard {
-        #         background-color: rgba(15, 18, 22, 190);
-        #         border-radius: 18px;
-        #         border: 1px solid rgba(255, 255, 255, 60);
-        #     }
-
-        #     QLabel {
-        #         color: rgba(255,255,255,230);
-        #     }
-
-        #     QLineEdit, QComboBox {
-        #         background-color: rgba(255,255,255,220);
-        #         border-radius: 10px;
-        #         padding: 8px 12px;
-        #         border: 1px solid rgba(0,0,0,60);
-        #         color: rgba(20,20,20,235);
-        #     }
-
-        #     QListWidget {
-        #         background-color: rgba(255,255,255,210);
-        #         border-radius: 10px;
-        #         border: 1px solid rgba(0,0,0,50);
-        #     }
-
-        #     QGroupBox {
-        #         background-color: rgba(255,255,255,210);
-        #         border-radius: 12px;
-        #         border: 1px solid rgba(0,0,0,40);
-        #         margin-top: 12px;
-        #         padding: 12px;
-        #         color: rgba(20,20,20,235);
-        #         font-weight: 600;
-        #     }
-
-        #     QGroupBox::title {
-        #         subcontrol-origin: margin;
-        #         left: 10px;
-        #         padding: 0 6px;
-        #         font-weight: 800;
-        #     }
-
-        #     QPushButton {
-        #         background-color: rgba(255, 214, 120, 30);
-        #         border: 1px solid rgba(255, 214, 120, 120);
-        #         border-radius: 12px;
-        #         padding: 10px 18px;
-        #         font-weight: 700;
-        #         color: rgba(255,255,255,240);
-        #     }
-
-        #     QPushButton:hover {
-        #         border: 1px solid rgba(255, 214, 120, 220);
-        #         background-color: rgba(255, 214, 120, 55);
-        #     }
-        # """)
-
-
-
     # ---------------- Helpers ----------------
     def refresh_list(self):
         self.list_protocols.clear()

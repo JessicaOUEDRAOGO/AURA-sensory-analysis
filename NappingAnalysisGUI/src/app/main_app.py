@@ -14,6 +14,7 @@ from src.ui.views.ui_protocol_home import ProtocolHomeWindow
 from src.ui.views.ui_record_window import RecordWindow
 from src.ui.views.ui_calibration_menu import CalibrationMenu
 from src.ui.views.ui_reality_augmented_window import RealityAugementedWindow
+from src.ui.views.ui_reality_augmented_bg import RealityAugementedWindowWithBG
 from src.ui.views.ui_background_window import BackgroundWindow
 from src.ui.views.ui_settings_menu import SettingsMenu
 
@@ -86,7 +87,7 @@ class MainApp(QtWidgets.QMainWindow):
             grid_size=self.grid_size,
         )
 
-        self.RA_window = RealityAugementedWindow(self)
+        self.RA_window = RealityAugementedWindowWithBG(self)
         self.Background_Window = BackgroundWindow(self)
 
         # Stack (QUE des QWidget)
