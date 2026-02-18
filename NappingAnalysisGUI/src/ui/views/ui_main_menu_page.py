@@ -2,6 +2,7 @@
 from PyQt6 import uic, QtWidgets
 from PyQt6.QtCore import Qt, QUrl
 from PyQt6.QtGui import QPixmap
+from PyQt6 import QtCore
 from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput, QVideoSink
 
 from src.core.utils.paths import gui_path, asset_path
@@ -26,7 +27,9 @@ class MainMenuPage(QtWidgets.QWidget):
         # =============================
         self.video_label = QtWidgets.QLabel()
         self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.video_label.setScaledContents(False)
         self.video_label.setStyleSheet("background: black;")
+        self.video_label.setScaledContents(False)
         self.video_label.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Expanding,
@@ -59,6 +62,7 @@ class MainMenuPage(QtWidgets.QWidget):
         uic.loadUi(gui_path("Main_Menu.ui"), tmp)
 
         content = tmp.centralWidget()
+        self.content = content
         content.setParent(self.overlay_widget)
         content.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         content.setStyleSheet("background: transparent;")
@@ -90,6 +94,9 @@ class MainMenuPage(QtWidgets.QWidget):
             </div>
             """)
             self.label_titre.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+            self.label_titre.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored, QtWidgets.QSizePolicy.Policy.Ignored)
+            self.label_titre.setParent(self.overlay_widget)
+            self.label_titre.raise_()
 
         # =============================
         # AJOUT AU STACK
@@ -212,12 +219,33 @@ class MainMenuPage(QtWidgets.QWidget):
     def _apply_scaled_pixmap(self):
         if self._last_pixmap is None:
             return
+
+        target = self.video_label.size()
+        if target.width() <= 0 or target.height() <= 0:
+            return
+
+        # ---- réglage zoom ----
+        # dark : 1.00 (plein cover)
+        # light : 0.88 à 0.95 (moins zoomé mais toujours cover)
+        zoom = 1.0 if self.theme == "dark" else 0.92
+
+        # on réduit un peu la taille cible => effet "dézoom"
+        scaled_target = target * zoom
+
+        # 1) cover sur la taille réduite
         scaled = self._last_pixmap.scaled(
-            self.video_label.size(),
+            scaled_target,
             Qt.AspectRatioMode.KeepAspectRatioByExpanding,
             Qt.TransformationMode.SmoothTransformation
         )
-        self.video_label.setPixmap(scaled)
+
+        # 2) puis on recadre au centre sur la taille finale (target)
+        x = max(0, (scaled.width() - target.width()) // 2)
+        y = max(0, (scaled.height() - target.height()) // 2)
+
+        cropped = scaled.copy(x, y, target.width(), target.height())
+        self.video_label.setPixmap(cropped)
+
 
     # =============================
     # THEME APPLY
@@ -405,6 +433,29 @@ class MainMenuPage(QtWidgets.QWidget):
         margin = 16
         self.pushButton_Theme.move(self.width() - self.pushButton_Theme.width() - margin, margin)
         self.pushButton_Theme.raise_()
+        # =============================
+        # TITRE : position fixe (dans le repère de content)
+        # =============================
+        if self.label_titre and hasattr(self, "content"):
+            panel_w = 420
+            margin_x = 50
+            margin_y = 180
+
+            # position voulue dans le repère de MainMenuPage
+            gx = panel_w + margin_x
+            gy = margin_y
+
+            # convertit vers le repère du parent réel (content)
+            p = self.content.mapFrom(self, self.mapToGlobal(QtCore.QPoint(gx, gy)))
+            x = p.x()
+            y = p.y()
+
+            w = max(200, self.width() - gx - 60)
+            h = 220
+
+            self.label_titre.setGeometry(x, y, w, h)
+            self.label_titre.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
+            self.label_titre.raise_()
 
     # =============================
     # TOGGLE THEME
