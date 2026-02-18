@@ -16,6 +16,7 @@ from src.ui.views.ui_calibration_menu import CalibrationMenu
 from src.ui.views.ui_reality_augmented_window import RealityAugementedWindow
 from src.ui.views.ui_reality_augmented_bg import RealityAugementedWindowWithBG
 from src.ui.views.ui_background_window import BackgroundWindow
+from src.ui.views.ui_projection_background_bg import ProjectionBackgroundWindowWithBG
 from src.ui.views.ui_settings_menu import SettingsMenu
 
 
@@ -88,7 +89,7 @@ class MainApp(QtWidgets.QMainWindow):
         )
 
         self.RA_window = RealityAugementedWindowWithBG(self)
-        self.Background_Window = BackgroundWindow(self)
+        self.Background_Window = ProjectionBackgroundWindowWithBG(self)
 
         # Stack (QUE des QWidget)
         self.stacked_widget.addWidget(self.main_menu)
