@@ -56,6 +56,12 @@ class RealityAugementedWindowWithBG(BackgroundWidget):
                 color: rgba(255,255,255,235);
                 font-weight: 600;
             }
+            QLabel#leftLabelCircle,
+            QLabel#leftLabelTrait,
+            QLabel#leftLabelText {
+                color: rgba(2255,255,255,240);   /* noir foncé */
+                font-weight: 700;
+            }
 
             #arCard QLineEdit, #arCard QComboBox, #arCard QSpinBox, #arCard QDoubleSpinBox {
                 background-color: rgba(255,255,255,230);
@@ -76,7 +82,10 @@ class RealityAugementedWindowWithBG(BackgroundWidget):
             #arCard QPushButton:hover {
                 background-color: rgba(255, 214, 120, 75);
             }
-
+            QLabel[leftLabel="true"]{
+                color: rgba(20,20,20,230);
+                font-weight: 700;
+            }
             /* Scrollbar discrète */
             QScrollBar:vertical {
                 width: 10px;
@@ -93,6 +102,16 @@ class RealityAugementedWindowWithBG(BackgroundWidget):
             QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
                 background: transparent;
             }
+            #arCard QLabel {
+            color: rgba(240,240,240,240);
+            font-weight: 700;
+            }
+            /* Labels spécifiques à gauche (Rond / Trait / Text) */
+            #arCard QLabel[leftLabel="true"] {
+                color: rgba(255, 200, 120, 255);
+                font-weight: 800;
+            }
+
         """)
 
     # Bonus : limite la hauteur de la card selon la fenêtre (évite de passer sous la barre des tâches)

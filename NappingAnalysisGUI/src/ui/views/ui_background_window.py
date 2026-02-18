@@ -206,7 +206,7 @@ class BackgroundWindow(QtWidgets.QWidget):
         # crop
         save_path_crop = os.path.join(textures_dir, f"background_{timestamp}_crop.png")
         self.cropped_pixmap.save(save_path_crop, "PNG")
-        print(f"✅ Background crop sauvegardé : {save_path_crop}")
+        print(f"Background crop sauvegardé : {save_path_crop}")
 
         # appliquer (compose + projector + record_window)
         self.compose_background_with_crop()
@@ -215,7 +215,7 @@ class BackgroundWindow(QtWidgets.QWidget):
         img_final = self._compose_background(self.cropped_pixmap)
         save_path_final = os.path.join(textures_dir, f"background_{timestamp}_final.png")
         cv2.imwrite(save_path_final, img_final)
-        print(f"✅ Background final sauvegardé : {save_path_final}")
+        print(f" Background final sauvegardé : {save_path_final}")
 
     # ---------------------------------------------------------------------
     # NAV

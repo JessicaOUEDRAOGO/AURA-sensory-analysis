@@ -13,6 +13,28 @@ class RealityAugementedWindow(QtWidgets.QWidget):
         super().__init__()
 
         uic.loadUi(gui_path("RealityAugemented_Menu.ui"), self)
+        # --- Force la lisibilité des 3 labels à gauche (Rond / Trait / Text) ---
+        for lbl in (self.label_Circle, self.label_trait, self.label_text):
+            lbl.setStyleSheet("QLabel { color: rgba(20,20,20,230); font-weight: 700; }")
+
+        # Si ton fond est sombre, utilise plutôt :
+        # for lbl in (self.label_Circle, self.label_trait, self.label_text):
+        #     lbl.setStyleSheet("QLabel { color: rgba(255,255,255,240); font-weight: 700; }")
+
+        # Rendre les labels de gauche lisibles
+        self.label_Circle.setObjectName("leftLabelCircle")
+        self.label_trait.setObjectName("leftLabelTrait")
+        self.label_text.setObjectName("leftLabelText")
+
+        # --- rendre lisibles Rond / Trait / Text ---
+        self.label_Circle.setProperty("leftLabel", True)
+        self.label_trait.setProperty("leftLabel", True)
+        self.label_text.setProperty("leftLabel", True)
+
+        # force Qt à ré-appliquer le style
+        for w in (self.label_Circle, self.label_trait, self.label_text):
+            w.style().unpolish(w)
+            w.style().polish(w)
 
         self.parent = parent  # Référence à MainApp
 
