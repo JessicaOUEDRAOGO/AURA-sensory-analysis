@@ -130,14 +130,30 @@ class MainMenuPage(QtWidgets.QWidget):
         self.left_panel.setObjectName("leftPanel")
         self.left_panel.setStyleSheet("""
         #leftPanel {
+            /* Teinte très légère (bleu/gris) + gradient => contraste même sur fond noir */
             background: qlineargradient(
                 x1:0, y1:0, x2:1, y2:0,
-                stop:0 rgba(0, 0, 0, 170),
-                stop:1 rgba(0, 0, 0, 60)
+                stop:0 rgba(20, 24, 30, 245),
+                stop:0.65 rgba(20, 24, 30, 220),
+                stop:1 rgba(20, 24, 30, 160)
             );
-            border-right: 1px solid rgba(255, 255, 255, 60);
+            border-right: 1px solid rgba(255, 255, 255, 35);
         }
         """)
+
+        self.left_glow = QtWidgets.QFrame(self.overlay_widget)
+        self.left_glow.setStyleSheet("""
+        background: qlineargradient(
+            x1:0, y1:0, x2:0, y2:1,
+            stop:0 rgba(255, 214, 120, 0),
+            stop:0.25 rgba(255, 214, 120, 90),
+            stop:0.5 rgba(255, 214, 120, 160),
+            stop:0.75 rgba(255, 214, 120, 90),
+            stop:1 rgba(255, 214, 120, 0)
+        );
+        """)
+        self.left_glow.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.left_glow.raise_()
 
         self.left_layout = QtWidgets.QVBoxLayout(self.left_panel)
         self.left_layout.setContentsMargins(24, 24, 24, 24)
@@ -148,39 +164,66 @@ class MainMenuPage(QtWidgets.QWidget):
         self.left_title = QtWidgets.QLabel("MENU", self.left_panel)
         self.left_title.setStyleSheet("""
         QLabel {
-            color: rgba(255, 255, 255, 180);
+            color: rgba(255, 255, 255, 210);
             font-size: 11pt;
-            font-weight: 600;
-            letter-spacing: 2px;
+            font-weight: 700;
+            letter-spacing: 3px;
         }
         """)
+
         self.left_layout.addWidget(self.left_title)
         self.left_layout.addSpacing(10)
 
         # ======================================
         # STYLE PREMIUM BOUTONS (inchangé)
         # ======================================
+        # btn_style = """
+        # QPushButton {
+        #     color: rgba(255, 255, 255, 235);
+        #     background-color: rgba(255, 255, 255, 38);
+        #     border: 1px solid rgba(255, 255, 255, 90);
+        #     border-radius: 18px;
+        #     padding: 18px 22px;
+        #     font-size: 16px;
+        #     font-weight: 600;
+        # }
+        # QPushButton:hover {
+        #     background-color: rgba(255, 255, 255, 58);
+        #     border: 1px solid rgba(255, 255, 255, 140);
+        # }
+        # QPushButton:pressed {
+        #     background-color: rgba(255, 255, 255, 80);
+        #     border: 1px solid rgba(255, 255, 255, 170);
+        # }
+        # QPushButton:focus {
+        #     outline: none;
+        #     border: 2px solid rgba(255, 255, 255, 200);
+        # }
+        # """
         btn_style = """
         QPushButton {
             color: rgba(255, 255, 255, 235);
-            background-color: rgba(255, 255, 255, 38);
-            border: 1px solid rgba(255, 255, 255, 90);
+            background-color: rgba(255, 214, 120, 18);  /* teinte ambre très légère */
+            border: 1px solid rgba(255, 214, 120, 80);  /* bord ambre */
             border-radius: 18px;
             padding: 18px 22px;
             font-size: 16px;
             font-weight: 600;
         }
+
         QPushButton:hover {
-            background-color: rgba(255, 255, 255, 58);
-            border: 1px solid rgba(255, 255, 255, 140);
+            background-color: rgba(255, 214, 120, 32);
+            border: 1px solid rgba(255, 214, 120, 140);
         }
+
         QPushButton:pressed {
-            background-color: rgba(255, 255, 255, 80);
-            border: 1px solid rgba(255, 255, 255, 170);
+            background-color: rgba(255, 214, 120, 45);
+            border: 1px solid rgba(255, 214, 120, 180);
         }
+
         QPushButton:focus {
             outline: none;
-            border: 2px solid rgba(255, 255, 255, 200);
+            border: 2px solid rgba(255, 214, 120, 220);
         }
         """
 
@@ -245,6 +288,11 @@ class MainMenuPage(QtWidgets.QWidget):
         # Left panel fixé à gauche
         panel_w = 420
         self.left_panel.setGeometry(0, 0, panel_w, self.height())
+        # Ligne glow à droite du panel
+        if hasattr(self, "left_glow") and self.left_glow:
+            x = self.left_panel.geometry().right()  # bord droit du panel
+            self.left_glow.setGeometry(x, 0, 2, self.height())
+            self.left_glow.raise_()
 
     # ======================================
     # NAVIGATION
