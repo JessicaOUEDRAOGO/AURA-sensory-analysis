@@ -11,7 +11,7 @@ from src.ui.widgets.background_widget import BackgroundWidget
 
 class ProtocolHomeWindow(BackgroundWidget):
     def __init__(self, parent, protocol_service: ProtocolService):
-        super().__init__(parent, bg_path=asset_path("images", "backgrounds", "protocol_home.png"))
+        super().__init__(parent, bg_path=asset_path("images", "backgrounds", "record_bg_dark.jpg"))
         self.parent = parent
         self.protocol_service = protocol_service
 
@@ -20,12 +20,44 @@ class ProtocolHomeWindow(BackgroundWidget):
 
     # ---------------- UI ----------------
     def _build_ui(self):
+        # =========================
+        # Layout principal (UN SEUL)
+        # =========================
         root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
+        # =========================
+        # Wrapper centré
+        # =========================
+        wrapper = QtWidgets.QWidget(self)
+        wrapper_layout = QtWidgets.QHBoxLayout(wrapper)
+        wrapper_layout.setContentsMargins(0, 40, 0, 40)
+        wrapper_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        # =========================
+        # Card (container)
+        # =========================
+        self.card = QtWidgets.QFrame(wrapper)
+        self.card.setObjectName("protocolCard")
+        self.card.setMinimumWidth(850)
+        self.card.setMaximumWidth(1100)
+
+        card_layout = QtWidgets.QVBoxLayout(self.card)
+        card_layout.setContentsMargins(40, 40, 40, 40)
+        card_layout.setSpacing(22)
+
+        wrapper_layout.addWidget(self.card)
+        root.addWidget(wrapper, 1)
+
+        # =========================
+        # UI (on ajoute DIRECTEMENT dans la card)
+        # =========================
         title = QtWidgets.QLabel("Protocole")
-        title.setStyleSheet("font-size: 18px; font-weight: 600;")
-        root.addWidget(title)
+        title.setStyleSheet("font-size: 20px; font-weight: 700;")
+        card_layout.addWidget(title)
 
+        # ---- Create box ----
         box_create = QtWidgets.QGroupBox("Créer un nouveau protocole")
         lay_create = QtWidgets.QGridLayout(box_create)
 
@@ -45,8 +77,9 @@ class ProtocolHomeWindow(BackgroundWidget):
         lay_create.addWidget(self.combo_instruction, 1, 1)
 
         lay_create.addWidget(self.btn_create, 2, 1)
-        root.addWidget(box_create)
+        card_layout.addWidget(box_create)
 
+        # ---- Existing box ----
         box_existing = QtWidgets.QGroupBox("Utiliser un protocole existant")
         lay_existing = QtWidgets.QVBoxLayout(box_existing)
 
@@ -82,31 +115,75 @@ class ProtocolHomeWindow(BackgroundWidget):
         actions_row.addWidget(self.btn_back)
 
         lay_existing.addLayout(actions_row)
-        root.addWidget(box_existing)
+        card_layout.addWidget(box_existing)
 
         self.label_status = QtWidgets.QLabel("")
-        self.label_status.setStyleSheet("color: #444;")
-        root.addWidget(self.label_status)
+        self.label_status.setStyleSheet("color: rgba(255,255,255,180);")
+        card_layout.addWidget(self.label_status)
 
-        root.addStretch(1)
+        card_layout.addStretch(1)
 
-        # garde tes groupbox lisibles (ok)
-        box_create.setStyleSheet("""
-            QGroupBox {
-                background-color: rgba(255, 255, 255, 210);
-                border: 1px solid rgba(0,0,0,40);
-                border-radius: 10px;
-                margin-top: 10px;
-                padding: 10px;
+        # =========================
+        # Style premium (ciblé sur la card)
+        # =========================
+        self.setStyleSheet("""
+            #protocolCard {
+                background-color: rgba(15, 18, 22, 190);
+                border-radius: 18px;
+                border: 1px solid rgba(255, 255, 255, 60);
             }
+
+            QLabel {
+                color: rgba(255,255,255,230);
+            }
+
+            QLineEdit, QComboBox {
+                background-color: rgba(255,255,255,220);
+                border-radius: 10px;
+                padding: 8px 12px;
+                border: 1px solid rgba(0,0,0,60);
+                color: rgba(20,20,20,235);
+            }
+
+            QListWidget {
+                background-color: rgba(255,255,255,210);
+                border-radius: 10px;
+                border: 1px solid rgba(0,0,0,50);
+            }
+
+            QGroupBox {
+                background-color: rgba(255,255,255,210);
+                border-radius: 12px;
+                border: 1px solid rgba(0,0,0,40);
+                margin-top: 12px;
+                padding: 12px;
+                color: rgba(20,20,20,235);
+                font-weight: 600;
+            }
+
             QGroupBox::title {
                 subcontrol-origin: margin;
                 left: 10px;
                 padding: 0 6px;
-                font-weight: 600;
+                font-weight: 800;
+            }
+
+            QPushButton {
+                background-color: rgba(255, 214, 120, 30);
+                border: 1px solid rgba(255, 214, 120, 120);
+                border-radius: 12px;
+                padding: 10px 18px;
+                font-weight: 700;
+                color: rgba(255,255,255,240);
+            }
+
+            QPushButton:hover {
+                border: 1px solid rgba(255, 214, 120, 220);
+                background-color: rgba(255, 214, 120, 55);
             }
         """)
-        box_existing.setStyleSheet(box_create.styleSheet())
+
+
 
     # ---------------- Helpers ----------------
     def refresh_list(self):
