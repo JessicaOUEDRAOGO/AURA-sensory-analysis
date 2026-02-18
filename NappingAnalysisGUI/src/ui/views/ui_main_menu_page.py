@@ -123,6 +123,13 @@ class MainMenuPage(QtWidgets.QWidget):
         self.pushButton_Settings.clicked.connect(self.go_to_settings)
         self.pushButton_Quit.clicked.connect(self.quit_app)
 
+        # ---- Labels (texte des boutons) ----
+        self.pushButton_Record.setText("Start Session")
+        self.pushButton_2_ARS.setText("Augmented Reality")
+        self.pushButton_background.setText("Projection Background")
+        self.pushButton_Settings.setText("System Settings")
+        self.pushButton_Quit.setText("Exit")
+
         # ======================================
         # LEFT PANEL (film / contraste)
         # ======================================
@@ -203,6 +210,7 @@ class MainMenuPage(QtWidgets.QWidget):
         btn_style = """
         QPushButton {
             color: rgba(255, 255, 255, 235);
+            letter-spacing: 0.4px;
             background-color: rgba(255, 214, 120, 18);  /* teinte ambre très légère */
             border: 1px solid rgba(255, 214, 120, 80);  /* bord ambre */
             border-radius: 18px;
