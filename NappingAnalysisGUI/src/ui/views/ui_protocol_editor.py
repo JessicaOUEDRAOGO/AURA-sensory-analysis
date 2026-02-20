@@ -313,7 +313,7 @@ class ProtocolEditorWizard(QtWidgets.QDialog):
         self.lbl_name = QtWidgets.QLabel(f"Nom : {self.protocol.name}")
         lay.addWidget(self.lbl_name)
 
-        lay.addWidget(QtWidgets.QLabel("Objectif (goal)"))
+        lay.addWidget(QtWidgets.QLabel("Objectif"))
         self.input_goal = QtWidgets.QPlainTextEdit()
         self.input_goal.setEnabled(not getattr(self.protocol, "locked", False))
         lay.addWidget(self.input_goal)

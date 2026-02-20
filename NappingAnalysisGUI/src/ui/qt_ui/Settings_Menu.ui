@@ -42,7 +42,7 @@
      <item>
       <widget class="QLabel" name="label_Paramtre">
        <property name="text">
-        <string>Paramètre</string>
+        <string>Paramètres</string>
        </property>
       </widget>
      </item>
@@ -226,14 +226,14 @@
          <item>
           <widget class="QPushButton" name="pushButton_StartCam">
            <property name="text">
-            <string>Start</string>
+            <string>Démarrer</string>
            </property>
           </widget>
          </item>
          <item>
           <widget class="QPushButton" name="pushButton_StopCam">
            <property name="text">
-            <string>Stop</string>
+            <string>Arrêt</string>
            </property>
           </widget>
          </item>

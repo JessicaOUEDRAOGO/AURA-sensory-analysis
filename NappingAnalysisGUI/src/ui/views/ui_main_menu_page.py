@@ -142,15 +142,15 @@ class MainMenuPage(QtWidgets.QWidget):
 
         # Labels (texte)
         if self.pushButton_Record:
-            self.pushButton_Record.setText("Start Session")
+            self.pushButton_Record.setText("Démarrer la session")
         if self.pushButton_2_ARS:
-            self.pushButton_2_ARS.setText("Augmented Reality")
+            self.pushButton_2_ARS.setText("Réalité augmentée")
         if self.pushButton_background:
-            self.pushButton_background.setText("Projection Background")
+            self.pushButton_background.setText("Arrière-plan de projection")
         if self.pushButton_Settings:
-            self.pushButton_Settings.setText("System Settings")
+            self.pushButton_Settings.setText("Paramètres du système")
         if self.pushButton_Quit:
-            self.pushButton_Quit.setText("Exit")
+            self.pushButton_Quit.setText("Quitter")
 
         # =============================
         # LEFT PANEL

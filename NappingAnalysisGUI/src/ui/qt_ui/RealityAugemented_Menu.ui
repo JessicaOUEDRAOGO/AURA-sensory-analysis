@@ -1331,7 +1331,7 @@
       </size>
      </property>
      <property name="text">
-      <string>Load Last RA Config</string>
+      <string>Télécharger la configuration précédente</string>
      </property>
     </widget>
    </item>
@@ -1344,7 +1344,7 @@
       </size>
      </property>
      <property name="text">
-      <string>Enregistrement des paramètres de Réalité Augementé</string>
+      <string>Enregistrer la nouvelle configuration</string>
      </property>
     </widget>
    </item>
