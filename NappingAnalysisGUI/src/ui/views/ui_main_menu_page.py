@@ -84,12 +84,16 @@ class MainMenuPage(QtWidgets.QWidget):
                     Institut Lyfe × ENISE
                 </div>
                 <br>
+                <div style="font-size:18pt; font-weight:700; letter-spacing:2px;">
+                    PLATEFORME DE REALITE AUGMENTEE
+                </div>
+                <br>
                 <div style="font-size:22pt; font-weight:700; letter-spacing:2px;">
-                    PROJECTIVE AUGMENTED REALITY PLATFORM
+                    PROJECTIVE
                 </div>
                 <br>
                 <div style="font-size:14pt; font-style:italic;">
-                    for Sensory Research
+                    pour la recherche sensorielle
                 </div>
             </div>
             """)
