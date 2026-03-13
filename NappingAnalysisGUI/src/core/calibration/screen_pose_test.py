@@ -15,11 +15,14 @@ PROJECTOR_WIDTH = 3840
 PROJECTOR_HEIGHT = 2160
 
 GRID_SIZE = 700
-GRID_STEP = 50
 LINE_THICKNESS = 2
 BORDER_THICKNESS = 4
-POINT_RADIUS = 8
+POINT_RADIUS = 10
 SHOW_LABELS = True
+
+# marge intérieure pour que la grille projetée ne soit pas coupée
+INNER_MARGIN = 28
+CORNER_OFFSET = 10
 
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = BASE_DIR.parents[2]
@@ -78,7 +81,7 @@ def load_calibration_data():
     H_inv_graph = np.array(data["H_inv_graph"], dtype=np.float64)
 
     # IMPORTANT :
-    # H_proj : camera undistorted -> projector
+    # H_proj      : camera undistorted -> projector
     # H_inv_graph : graph -> camera undistorted
     # donc graph -> projector
     H_graph_to_proj = H_proj @ H_inv_graph
@@ -90,44 +93,81 @@ def load_calibration_data():
 def build_grid_image():
     img = np.zeros((GRID_SIZE, GRID_SIZE, 3), dtype=np.uint8)
 
+    # -----------------------------------------------------
+    # zone utile intérieure
+    # -----------------------------------------------------
+    x0 = INNER_MARGIN
+    y0 = INNER_MARGIN
+    x1 = GRID_SIZE - 1 - INNER_MARGIN
+    y1 = GRID_SIZE - 1 - INNER_MARGIN
+
     # fond noir
     img[:] = (0, 0, 0)
 
-    # lignes verticales
-    for x in range(0, GRID_SIZE, GRID_STEP):
-        cv2.line(img, (x, 0), (x, GRID_SIZE - 1), (0, 255, 0), LINE_THICKNESS)
+    # -----------------------------------------------------
+    # grille intérieure
+    # -----------------------------------------------------
+    n_div = 14  # nombre de divisions
+    xs = np.linspace(x0, x1, n_div + 1).astype(int)
+    ys = np.linspace(y0, y1, n_div + 1).astype(int)
 
-    # lignes horizontales
-    for y in range(0, GRID_SIZE, GRID_STEP):
-        cv2.line(img, (0, y), (GRID_SIZE - 1, y), (0, 255, 0), LINE_THICKNESS)
+    for x in xs:
+        cv2.line(img, (x, y0), (x, y1), (0, 255, 0), LINE_THICKNESS)
 
+    for y in ys:
+        cv2.line(img, (x0, y), (x1, y), (0, 255, 0), LINE_THICKNESS)
+
+    # -----------------------------------------------------
     # contour principal
+    # -----------------------------------------------------
     cv2.rectangle(
         img,
-        (0, 0),
-        (GRID_SIZE - 1, GRID_SIZE - 1),
+        (x0, y0),
+        (x1, y1),
         (255, 255, 255),
         BORDER_THICKNESS
     )
 
+    # -----------------------------------------------------
     # centre
-    center = (GRID_SIZE // 2, GRID_SIZE // 2)
+    # -----------------------------------------------------
+    center = ((x0 + x1) // 2, (y0 + y1) // 2)
     cv2.circle(img, center, 12, (0, 0, 255), -1)
 
-    # coins
+    if SHOW_LABELS:
+        cv2.putText(
+            img,
+            "CENTER",
+            (center[0] - 45, center[1] - 18),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (0, 0, 255),
+            2
+        )
+
+    # -----------------------------------------------------
+    # coins légèrement à l'intérieur
+    # -----------------------------------------------------
     corners = [
-        ((0, 0), "TL"),
-        ((GRID_SIZE - 1, 0), "TR"),
-        ((GRID_SIZE - 1, GRID_SIZE - 1), "BR"),
-        ((0, GRID_SIZE - 1), "BL"),
+        ((x0 + CORNER_OFFSET, y0 + CORNER_OFFSET), "TL"),
+        ((x1 - CORNER_OFFSET, y0 + CORNER_OFFSET), "TR"),
+        ((x1 - CORNER_OFFSET, y1 - CORNER_OFFSET), "BR"),
+        ((x0 + CORNER_OFFSET, y1 - CORNER_OFFSET), "BL"),
     ]
 
     for (x, y), label in corners:
         cv2.circle(img, (x, y), POINT_RADIUS, (255, 0, 255), -1)
 
         if SHOW_LABELS:
-            tx = x + 12 if x < GRID_SIZE // 2 else x - 70
-            ty = y + 28 if y < GRID_SIZE // 2 else y - 12
+            if label == "TL":
+                tx, ty = x + 12, y + 28
+            elif label == "TR":
+                tx, ty = x - 55, y + 28
+            elif label == "BR":
+                tx, ty = x - 55, y - 12
+            else:  # BL
+                tx, ty = x + 12, y - 12
+
             cv2.putText(
                 img,
                 label,
@@ -137,10 +177,6 @@ def build_grid_image():
                 (255, 255, 0),
                 2
             )
-
-    if SHOW_LABELS:
-        cv2.putText(img, "CENTER", (center[0] - 45, center[1] - 18),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
     return img
 
