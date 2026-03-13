@@ -21,11 +21,12 @@ class Algorithm_Analysis(QObject):
         self,
         parent,
         display_manager: DisplayManager,
+        image_background,
         H_projector,
         H_inv_projector,
         H_graph,
         H_inv_graph,
-        image_background,
+        grid_size=700,
         output_name="data",
         record_window=None,
         output_dir=None,
@@ -33,9 +34,22 @@ class Algorithm_Analysis(QObject):
         assets=None,
         timeline_steps=None,
         protocol=None
+        
     ):
         super().__init__()
         self.parent = parent
+        # Calibration caméra pour undistortion des points
+        self.K_cam = None
+        self.dist_cam = None
+        self.grid_size = grid_size
+        try:
+            with open(config_path("camera_calibration.json"), "r", encoding="utf-8") as f:
+                cam_data = json.load(f)
+            self.K_cam = np.array(cam_data["camera_matrix"], dtype=np.float64)
+            self.dist_cam = np.array(cam_data["dist_coeffs"], dtype=np.float64).reshape(-1, 1)
+            print("[V2] Calibration caméra chargée pour undistortion runtime.")
+        except Exception as e:
+            print(f"[WARNING] Impossible de charger la calibration caméra : {e}")
         self.display_manager = display_manager
 
         self.modules_enabled = modules_enabled or {}
@@ -120,6 +134,7 @@ class Algorithm_Analysis(QObject):
         self.waiting_for_consigne_key = False
 
     def detect_and_process(self):
+        from src.core.config.app_config import CALIBRATION_TAG_IDS
         self.running = True
         print("detect_and_process started")
 
@@ -225,7 +240,7 @@ class Algorithm_Analysis(QObject):
             graph_coords_ArUco = []
 
             if ids is not None:
-                valid_indices = [i for i in range(len(ids)) if int(ids[i][0]) not in [40, 41, 42, 43]]
+                valid_indices = [i for i in range(len(ids)) if int(ids[i][0]) not in CALIBRATION_TAG_IDS]
                 ids = ids[valid_indices]
                 corners = [corners[i] for i in valid_indices]
 
@@ -450,19 +465,28 @@ class Algorithm_Analysis(QObject):
         cv2.waitKey(1)
 
     def transform_to_projector(self, camera_point):
-        camera_point = np.array([camera_point[0], camera_point[1], 1], dtype=np.float32)
-        projected_point = np.dot(self.H_projector, camera_point)
+        camera_point_undist = self.undistort_camera_point(camera_point)
+
+        pt = np.array([camera_point_undist[0], camera_point_undist[1], 1.0], dtype=np.float32)
+        projected_point = np.dot(self.H_projector, pt)
         projected_point /= projected_point[2]
+
         x, y = projected_point[:2]
+
+        # conservation du flip horizontal déjà présent dans ton pipeline
         x = (self.image_width - 1) - x
-        return np.array([x, y])
+
+        return np.array([x, y], dtype=np.float32)
 
     def transform_to_graph(self, camera_point):
-        camera_point = np.array([camera_point[0], camera_point[1], 1], dtype=np.float32)
-        graph_point = np.dot(self.H_graph, camera_point)
+        camera_point_undist = self.undistort_camera_point(camera_point)
+
+        pt = np.array([camera_point_undist[0], camera_point_undist[1], 1.0], dtype=np.float32)
+        graph_point = np.dot(self.H_graph, pt)
         graph_point /= graph_point[2]
-        graph_point[0] = 700 - graph_point[0]
-        return graph_point[:2]
+
+        graph_point[0] = (self.grid_size - 1) - graph_point[0]
+        return graph_point[:2].astype(np.float32)
 
     def save_to_buffer(self, graph_coords_ArUco):
         frame_data = {
@@ -527,6 +551,17 @@ class Algorithm_Analysis(QObject):
             g = int(milieu[1] * (1 - t) + fin[1] * t)
             r = int(milieu[2] * (1 - t) + fin[2] * t)
         return (b, g, r)
+    
+    def undistort_camera_point(self, camera_point):
+        """
+        Convertit un point image brut en point image undistorté (en pixels).
+        """
+        if self.K_cam is None or self.dist_cam is None:
+            return np.array(camera_point[:2], dtype=np.float32)
+
+        pt = np.array([[camera_point[:2]]], dtype=np.float32)
+        und = cv2.undistortPoints(pt, self.K_cam, self.dist_cam, P=self.K_cam)
+        return und.reshape(2).astype(np.float32)
 
     def get_marker_color(self, marker_id):
         if not self.mode_multidim:

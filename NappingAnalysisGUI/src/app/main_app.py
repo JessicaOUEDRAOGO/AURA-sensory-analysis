@@ -27,16 +27,30 @@ class MainApp(QtWidgets.QMainWindow):
         # --------------------------------------------------
         # SETTINGS
         # --------------------------------------------------
+        from src.core.config.app_config import (
+            CAMERA_ID,
+            CAMERA_WIDTH,
+            CAMERA_HEIGHT,
+            PROJECTOR_SCREEN_ID,
+            PROJECTOR_WIDTH,
+            PROJECTOR_HEIGHT,
+            GRID_SIZE,
+        )
+        # SETTINGS GLOBALS
+        # --------------------------------------------------
         self.settings = {
             "projector_screen_id": 1,
             "camera_id": 0,
-            "resolution": (3840, 2160),
+            "projector_resolution": (3840, 2160)
         }
+        self.projector_screen_id = PROJECTOR_SCREEN_ID
+        self.projector_resolution = (PROJECTOR_WIDTH, PROJECTOR_HEIGHT)
 
-        self.cam_width = 3840
-        self.cam_height = 2160
-        self.grid_size = 700
+        self.camera_id = CAMERA_ID
+        self.cam_width = CAMERA_WIDTH
+        self.cam_height = CAMERA_HEIGHT
 
+        self.grid_size = GRID_SIZE
         self.setWindowTitle("Projective Augmented Reality & Napping Collection Data")
         self.resize(1033, 1061)
 
@@ -58,8 +72,8 @@ class MainApp(QtWidgets.QMainWindow):
         # --------------------------------------------------
         # DISPLAY MANAGER
         # --------------------------------------------------
-        self.display_manager = DisplayManager(projector_screen_id=self.settings["projector_screen_id"])
-        self.display_manager.resolution = self.settings["resolution"]
+        self.display_manager = DisplayManager(projector_screen_id=self.projector_screen_id)
+        self.display_manager.resolution = self.projector_resolution
         self.display_manager.display_image_on_projector_monitor(self.image_background)
 
         # --------------------------------------------------

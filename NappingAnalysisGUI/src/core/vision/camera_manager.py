@@ -3,10 +3,17 @@ import cv2
 
 
 class CameraManager:
-    def __init__(self, camera_index=0, width=1920, height=1080):
+    from src.core.config.app_config import (
+        CAMERA_ID,
+        CAMERA_WIDTH,
+        CAMERA_HEIGHT,
+        CAMERA_FPS,
+    )
+    def __init__(self, camera_index=CAMERA_ID, width=CAMERA_WIDTH, height=CAMERA_HEIGHT, fps=CAMERA_FPS):
         self.camera_index = camera_index
         self.width = width
         self.height = height
+        self.fps = fps
         self.cap = None
 
     # --------------------------------------------------
@@ -14,30 +21,48 @@ class CameraManager:
     # --------------------------------------------------
     def open_camera(self):
         """
-        Ouvre la caméra avec configuration résolution.
-        Compatible Windows (CAP_DSHOW) et fallback si nécessaire.
+        Ouvre la caméra en forçant une résolution unique.
+        Vérifie la résolution réelle obtenue.
         """
-
-        if self.cap is not None:
+        if self.cap is not None and self.cap.isOpened():
             print("Caméra déjà ouverte.")
-            return
+            return True
 
-        # Windows optimisation
-        self.cap = cv2.VideoCapture(self.camera_index, cv2.CAP_DSHOW)
+        # Tentative Windows
+        cap = cv2.VideoCapture(self.camera_index, cv2.CAP_DSHOW)
 
         # Fallback si échec
-        if not self.cap.isOpened():
+        if not cap.isOpened():
             print("CAP_DSHOW échoué, tentative fallback...")
-            self.cap = cv2.VideoCapture(self.camera_index)
+            cap = cv2.VideoCapture(self.camera_index)
 
-        if not self.cap.isOpened():
+        if not cap.isOpened():
             raise RuntimeError(f"Impossible d'ouvrir la caméra (index={self.camera_index})")
 
-        # Configuration résolution
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+        # Forcer la résolution AVANT lecture
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+        cap.set(cv2.CAP_PROP_FPS, self.fps)
 
-        print(f"Caméra {self.camera_index} ouverte ({self.width}x{self.height})")
+        # Première lecture de validation
+        ret, frame = cap.read()
+        if not ret or frame is None:
+            cap.release()
+            raise RuntimeError("Impossible de lire une première frame caméra.")
+
+        real_h, real_w = frame.shape[:2]
+        print(f"Caméra {self.camera_index} ouverte ({real_w}x{real_h})")
+
+        # Vérification stricte
+        if (real_w, real_h) != (self.width, self.height):
+            cap.release()
+            raise RuntimeError(
+                f"Résolution caméra incohérente : obtenue {real_w}x{real_h}, "
+                f"attendue {self.width}x{self.height}"
+            )
+
+        self.cap = cap
+        return True
 
     # --------------------------------------------------
     # CAPTURE FRAME
@@ -46,12 +71,20 @@ class CameraManager:
         """
         Retourne une frame BGR.
         """
-        if self.cap is None:
+        if self.cap is None or not self.cap.isOpened():
             return None
 
         ret, frame = self.cap.read()
-        if not ret:
+        if not ret or frame is None:
             print("Impossible de lire une frame caméra.")
+            return None
+
+        h, w = frame.shape[:2]
+        if (w, h) != (self.width, self.height):
+            print(
+                f"Frame ignorée : résolution inattendue {w}x{h} "
+                f"(attendu {self.width}x{self.height})"
+            )
             return None
 
         return frame

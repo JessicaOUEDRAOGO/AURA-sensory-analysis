@@ -97,3 +97,12 @@ photo-vid*/
 # Generated backgrounds (user-specific outputs)
 NappingAnalysisGUI/assets/textures/background_*_crop.png
 NappingAnalysisGUI/assets/textures/background_*_final.png
+# calibration generated files
+*.npy
+*_debug.json
+*_debug.png
+projected_grid_test*.png
+
+# python
+__pycache__/
+*.pyc

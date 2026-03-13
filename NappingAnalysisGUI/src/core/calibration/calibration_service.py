@@ -112,53 +112,134 @@ class Calibration:
             return None
 
     def start_calib(self, label_status):
-        quadrilateral_detector = QuadrilateralDetector()
-        homography = HomographyTransformer()
-        proj_point = ProjectorPoint()
-        drawer = DrawUtils()
+        import os
+        import cv2
+        from PyQt6.QtGui import QPixmap
+
+        from src.core.calibration.v2_recalibration_core import V2RecalibrationCore
+        from src.core.utils.paths import asset_path, config_path
 
         if self.frame is None:
-            # force une capture au moins une fois
             self.update_frame()
             if self.frame is None:
                 raise Exception("Aucune frame caméra disponible pour calibrer.")
 
-        proj_points = quadrilateral_detector.detect_quadrilateral_from_aruco(self.frame)
-        if proj_points is None or len(proj_points) != 4:
-            raise Exception("Impossible de détecter les 4 marqueurs ArUco de calibration.")
+        core = V2RecalibrationCore(grid_size=self.grid_size)
 
-        image = drawer.draw_points_linked(proj_points, self.frame, "Quadrilatère détecté")
-        self.proj_points = proj_points
-        self.update_frame(last_frame=image)
+        # --------------------------------------------------
+        # Si la référence V2 n'existe pas encore, on la crée
+        # --------------------------------------------------
+        ref_file = config_path("v2_recalibration_reference.json")
+        if not os.path.exists(ref_file):
+            print("[V2] Référence absente -> création de la référence V2")
+            self.build_v2_reference(label_status)
 
-        # Domain projecteur (carré basé sur image_height)
-        cam_points = proj_point.setUp_Projector_Point(proj_points, self.image_height, self.image_height)
-        S = self.image_height
-        cam_points = np.array(cam_points, dtype=np.float32)
+        try:
+            reference_data = core.load_reference_bundle()
+        except Exception as e:
+            print(f"[V2] Référence illisible -> recréation ({e})")
+            self.build_v2_reference(label_status)
+            reference_data = core.load_reference_bundle()
+        result = core.compute_startup_bundle(self.frame, reference_data)
 
-        # Rotation 180° : (x', y') = (S-1-x, S-1-y)
-        cam_points = np.stack([(S - 1) - cam_points[:, 0], (S - 1) - cam_points[:, 1]], axis=1).astype(np.float32)
+        self.H_proj = result["H_proj"]
+        self.H_inv_proj = result["H_inv_proj"]
+        self.H_graph = result["H_graph"]
+        self.H_inv_graph = result["H_inv_graph"]
 
-        # Domain graph (grid)
-        graph_points = proj_point.setUp_Projector_Point(proj_points, self.grid_size, self.grid_size)
-        Sg = self.grid_size
-        graph_points = np.array(graph_points, dtype=np.float32)
+        preview = self.frame.copy()
 
-        # Rotation 180°
-        graph_points = np.stack([(Sg - 1) - graph_points[:, 0], (Sg - 1) - graph_points[:, 1]], axis=1).astype(np.float32)
+        # points actuels en rouge
+        for pt in result["current_camera_points_raw"]:
+            x, y = int(pt[0]), int(pt[1])
+            cv2.circle(preview, (x, y), 10, (0, 0, 255), -1)
 
-        self.H_proj, self.H_inv_proj = homography.find_Invers_Homography(proj_points, cam_points)
-        self.H_graph, self.H_inv_graph = homography.find_Invers_Homography(proj_points, graph_points)
+        self.update_frame(last_frame=preview)
 
-        # Icon validate (chemin robuste)
         validate_icon = asset_path("icons", "Validate.png")
         if os.path.exists(validate_icon):
             label_status.setPixmap(QPixmap(validate_icon))
-        else:
-            print(f"[WARNING] Icône Validate introuvable : {validate_icon}")
 
         self.save_calib()
         return self.H_proj, self.H_inv_proj, self.H_graph, self.H_inv_graph
+    # def start_calib(self, label_status):
+    #     quadrilateral_detector = QuadrilateralDetector()
+    #     homography = HomographyTransformer()
+    #     proj_point = ProjectorPoint()
+    #     drawer = DrawUtils()
+
+    #     if self.frame is None:
+    #         # force une capture au moins une fois
+    #         self.update_frame()
+    #         if self.frame is None:
+    #             raise Exception("Aucune frame caméra disponible pour calibrer.")
+
+    #     proj_points = quadrilateral_detector.detect_quadrilateral_from_aruco(self.frame)
+    #     if proj_points is None or len(proj_points) != 4:
+    #         raise Exception("Impossible de détecter les 4 marqueurs ArUco de calibration.")
+
+    #     image = drawer.draw_points_linked(proj_points, self.frame, "Quadrilatère détecté")
+    #     self.proj_points = proj_points
+    #     self.update_frame(last_frame=image)
+
+    #     # Domain projecteur (carré basé sur image_height)
+    #     cam_points = proj_point.setUp_Projector_Point(proj_points, self.image_height, self.image_height)
+    #     S = self.image_height
+    #     cam_points = np.array(cam_points, dtype=np.float32)
+
+    #     # Rotation 180° : (x', y') = (S-1-x, S-1-y)
+    #     cam_points = np.stack([(S - 1) - cam_points[:, 0], (S - 1) - cam_points[:, 1]], axis=1).astype(np.float32)
+
+    #     # Domain graph (grid)
+    #     graph_points = proj_point.setUp_Projector_Point(proj_points, self.grid_size, self.grid_size)
+    #     Sg = self.grid_size
+    #     graph_points = np.array(graph_points, dtype=np.float32)
+
+    #     # Rotation 180°
+    #     graph_points = np.stack([(Sg - 1) - graph_points[:, 0], (Sg - 1) - graph_points[:, 1]], axis=1).astype(np.float32)
+
+    #     self.H_proj, self.H_inv_proj = homography.find_Invers_Homography(proj_points, cam_points)
+    #     self.H_graph, self.H_inv_graph = homography.find_Invers_Homography(proj_points, graph_points)
+
+    #     # Icon validate (chemin robuste)
+    #     validate_icon = asset_path("icons", "Validate.png")
+    #     if os.path.exists(validate_icon):
+    #         label_status.setPixmap(QPixmap(validate_icon))
+    #     else:
+    #         print(f"[WARNING] Icône Validate introuvable : {validate_icon}")
+
+    #     self.save_calib()
+    #     return self.H_proj, self.H_inv_proj, self.H_graph, self.H_inv_graph
+    def build_v2_reference(self, label_status):
+        import os
+        import cv2
+        from PyQt6.QtGui import QPixmap
+
+        from src.core.calibration.v2_recalibration_core import V2RecalibrationCore
+        from src.core.utils.paths import asset_path
+
+        if self.frame is None:
+            self.update_frame()
+            if self.frame is None:
+                raise Exception("Aucune frame caméra disponible pour créer la référence V2.")
+
+        core = V2RecalibrationCore(grid_size=self.grid_size)
+        ref_data, ref_path = core.save_reference_bundle(self.frame)
+
+        preview = self.frame.copy()
+
+        for pt in ref_data["reference_camera_points_raw"].values():
+            x, y = int(pt[0]), int(pt[1])
+            cv2.circle(preview, (x, y), 12, (255, 0, 0), -1)
+
+        self.update_frame(last_frame=preview)
+
+        validate_icon = asset_path("icons", "Validate.png")
+        if os.path.exists(validate_icon):
+            label_status.setPixmap(QPixmap(validate_icon))
+
+        print(f"Référence V2 sauvegardée : {ref_path}")
+        return ref_path
 
     def get_homography(self):
         if self.homography_transformer:
