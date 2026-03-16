@@ -48,7 +48,7 @@ STEREO_CALIB_PATH = CONFIG_DIR / "stereo_camera_projector_calibration.json"
 OUTPUT_CALIB_PATH = CONFIG_DIR / "calibration_data.json"
 OUTPUT_POSE_PATH = CONFIG_DIR / "screen_pose_manual.json"
 OUTPUT_DEBUG_PATH = CONFIG_DIR / "manual_pose_debug.png"
-RUNTIME_MAPPING_PATH = CONFIG_DIR / "runtime_mapping.json"
+
 
 # =========================================================
 # OUTILS JSON / CALIB
@@ -431,12 +431,6 @@ def main():
                 H_graph = H_graph / H_graph[2, 2]
                 H_inv_graph = np.linalg.inv(H_graph)
 
-                H_graph_to_proj = H_proj @ H_inv_graph
-                H_graph_to_proj = H_graph_to_proj / H_graph_to_proj[2, 2]
-
-                H_proj_to_graph = np.linalg.inv(H_graph_to_proj)
-                H_proj_to_graph = H_proj_to_graph / H_proj_to_graph[2, 2]
-
                 # caméra undistordue -> mm écran
                 H_cam_to_screen_mm, _ = cv2.findHomography(cam_points_undist, screen_points_mm)
                 H_cam_to_screen_mm = H_cam_to_screen_mm / H_cam_to_screen_mm[2, 2]
@@ -492,48 +486,12 @@ def main():
 
                 with open(OUTPUT_POSE_PATH, "w", encoding="utf-8") as f:
                     json.dump(pose_data, f, indent=4)
-                
-                runtime_mapping_data = {
-                    "metadata": {
-                        "grid_size": GRID_SIZE,
-                        "projector_width": PROJECTOR_WIDTH,
-                        "projector_height": PROJECTOR_HEIGHT,
-                        "screen_width_mm": SCREEN_WIDTH_MM,
-                        "screen_height_mm": SCREEN_HEIGHT_MM,
-                        "source_pose_method": "manual_screen_corners_solvepnp"
-                    },
-                    "screen_pose": {
-                        "rvec_screen_to_camera": rvec_sc.tolist(),
-                        "tvec_screen_to_camera": tvec_sc.tolist(),
-                        "R_screen_to_camera": R_sc.tolist(),
-                        "R_screen_to_projector": R_sp.tolist(),
-                        "T_screen_to_projector": T_sp.tolist()
-                    },
-                    "homographies": {
-                        "H_cam_undist_to_proj": H_proj.tolist(),
-                        "H_proj_to_cam_undist": H_inv_proj.tolist(),
-                        "H_cam_undist_to_graph": H_graph.tolist(),
-                        "H_graph_to_cam_undist": H_inv_graph.tolist(),
-                        "H_graph_to_proj": H_graph_to_proj.tolist(),
-                        "H_proj_to_graph": H_proj_to_graph.tolist()
-                    },
-                    "reference_points": {
-                        "camera_points_raw_TL_TR_BR_BL": cam_points_raw.tolist(),
-                        "camera_points_undist_TL_TR_BR_BL": cam_points_undist.tolist(),
-                        "screen_points_mm_TL_TR_BR_BL": screen_points_mm.tolist(),
-                        "graph_points_TL_TR_BR_BL": graph_points.tolist()
-                    }
-                }
-
-                with open(RUNTIME_MAPPING_PATH, "w", encoding="utf-8") as f:
-                    json.dump(runtime_mapping_data, f, indent=4)
 
                 print("\n=== RESULTATS ===")
                 print("Méthode solvePnP choisie :", best_flag)
                 print("Erreur reprojection solvePnP (px) :", pnp_mean_err)
                 print("R_screen_to_camera =\n", R_sc)
                 print("t_screen_to_camera =\n", tvec_sc)
-                print("-", RUNTIME_MAPPING_PATH)
                 print("\nFichiers sauvegardés :")
                 print("-", OUTPUT_CALIB_PATH)
                 print("-", OUTPUT_POSE_PATH)

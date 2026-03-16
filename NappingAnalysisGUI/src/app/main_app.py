@@ -3,7 +3,7 @@ from src.core.storage.db import init_db
 import sys
 import cv2
 from PyQt6 import QtWidgets
-
+import numpy as np
 from src.core.utils.paths import asset_path
 from src.core.projection.display_manager import DisplayManager
 from src.core.protocol.repository import ProtocolRepository
@@ -65,10 +65,15 @@ class MainApp(QtWidgets.QMainWindow):
         # --------------------------------------------------
         # BACKGROUND (projecteur)
         # --------------------------------------------------
-        self.image_background = cv2.imread(asset_path("textures", "blanc_4k_carre_mid.png"))
-        if self.image_background is None:
-            self.image_background = 255 * (cv2.UMat(2160, 3840, cv2.CV_8UC3).get())
-
+        # self.image_background = cv2.imread(asset_path("textures", "blanc_4k_carre_mid.png"))
+        # if self.image_background is not None:
+        #     print("Background shape:", self.image_background.shape)
+        # else:
+        #     print("Background image introuvable")
+        # if self.image_background is None:
+        #     self.image_background = 255 * (cv2.UMat(2160, 3840, cv2.CV_8UC3).get())
+        self.image_background = np.full((2160, 3840, 3), 255, dtype=np.uint8)
+        print("Background shape:", self.image_background.shape)
         # --------------------------------------------------
         # DISPLAY MANAGER
         # --------------------------------------------------

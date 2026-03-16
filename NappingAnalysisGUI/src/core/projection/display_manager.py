@@ -43,12 +43,8 @@ class DisplayManager:
         q_pixmap = QPixmap.fromImage(q_img)
         self.label.setPixmap(q_pixmap)
 
+    
     def display_image_on_projector_monitor(self, image_to_display: np.ndarray, screen_id: int = None):
-        """
-        Affiche une image OpenCV sur l'écran projecteur (fullscreen).
-        - applique flip horizontal (miroir) comme ton V1.
-        - peut redimensionner si self.resolution est définie.
-        """
         if image_to_display is None or image_to_display.size == 0:
             return
 
@@ -57,32 +53,35 @@ class DisplayManager:
         if screen_id is None:
             screen_id = self.projector_screen_id
 
-        # Sécurisation de l'ID écran
+        print("=== DISPLAY DEBUG ===")
+        print("screen_id:", screen_id)
+        for idx, m in enumerate(monitors):
+            print(f"Monitor {idx}: x={m.x}, y={m.y}, width={m.width}, height={m.height}")
+        print("Image shape:", image_to_display.shape)
+        print("Resolution demandée:", self.resolution)
+        print("=====================")
+
         if screen_id < 0 or screen_id >= len(monitors):
             print(f"[WARNING] screen_id {screen_id} invalide, fallback sur dernier écran disponible.")
             screen_id = len(monitors) - 1
 
         monitor = monitors[screen_id]
-
         img = image_to_display
 
-        # Resize si une résolution est demandée
         if self.resolution is not None:
-            try:
-                w, h = self.resolution
+            w, h = self.resolution
+            if img.shape[1] != w or img.shape[0] != h:
                 img = cv2.resize(img, (w, h), interpolation=cv2.INTER_AREA)
-            except Exception as e:
-                print(f"[WARNING] Impossible de resize vers {self.resolution}: {e}")
-
-        # Flip horizontal (effet miroir)
-        flipped_image = cv2.flip(img, 1)
 
         cv2.namedWindow(self._projector_window_name, cv2.WINDOW_NORMAL)
         cv2.moveWindow(self._projector_window_name, monitor.x, monitor.y)
-        cv2.setWindowProperty(self._projector_window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
-        cv2.imshow(self._projector_window_name, flipped_image)
+        cv2.setWindowProperty(
+            self._projector_window_name,
+            cv2.WND_PROP_FULLSCREEN,
+            cv2.WINDOW_FULLSCREEN
+        )
+        cv2.imshow(self._projector_window_name, img)
         cv2.waitKey(1)
-
     def close_display(self):
         """
         Nettoie l'affichage label + ferme la fenêtre projecteur si ouverte.

@@ -115,44 +115,31 @@ class Calibration:
         import os
         import cv2
         from PyQt6.QtGui import QPixmap
-
-        from src.core.calibration.v2_recalibration_core import V2RecalibrationCore
-        from src.core.utils.paths import asset_path, config_path
+        from src.core.utils.paths import asset_path
 
         if self.frame is None:
             self.update_frame()
             if self.frame is None:
                 raise Exception("Aucune frame caméra disponible pour calibrer.")
 
-        core = V2RecalibrationCore(grid_size=self.grid_size)
+        loaded = self.load_calib()
+        if loaded is None:
+            raise Exception("Impossible de charger calibration_data.json")
 
-        # --------------------------------------------------
-        # Si la référence V2 n'existe pas encore, on la crée
-        # --------------------------------------------------
-        ref_file = config_path("v2_recalibration_reference.json")
-        if not os.path.exists(ref_file):
-            print("[V2] Référence absente -> création de la référence V2")
-            self.build_v2_reference(label_status)
-
-        try:
-            reference_data = core.load_reference_bundle()
-        except Exception as e:
-            print(f"[V2] Référence illisible -> recréation ({e})")
-            self.build_v2_reference(label_status)
-            reference_data = core.load_reference_bundle()
-        result = core.compute_startup_bundle(self.frame, reference_data)
-
-        self.H_proj = result["H_proj"]
-        self.H_inv_proj = result["H_inv_proj"]
-        self.H_graph = result["H_graph"]
-        self.H_inv_graph = result["H_inv_graph"]
+        self.H_proj, self.H_inv_proj, self.H_graph, self.H_inv_graph = loaded
 
         preview = self.frame.copy()
 
-        # points actuels en rouge
-        for pt in result["current_camera_points_raw"]:
-            x, y = int(pt[0]), int(pt[1])
-            cv2.circle(preview, (x, y), 10, (0, 0, 255), -1)
+        # petit texte de confirmation sur l'image
+        cv2.putText(
+            preview,
+            "Calibration chargee depuis calibration_data.json",
+            (40, 50),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.0,
+            (0, 255, 0),
+            2
+        )
 
         self.update_frame(last_frame=preview)
 
@@ -160,7 +147,6 @@ class Calibration:
         if os.path.exists(validate_icon):
             label_status.setPixmap(QPixmap(validate_icon))
 
-        self.save_calib()
         return self.H_proj, self.H_inv_proj, self.H_graph, self.H_inv_graph
     # def start_calib(self, label_status):
     #     quadrilateral_detector = QuadrilateralDetector()

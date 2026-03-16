@@ -11,7 +11,7 @@ from PyQt6.QtCore import QThread
 from src.core.utils.paths import asset_path, config_path, data_path
 from src.core.projection.display_manager import DisplayManager
 from src.core.projection.draw_utils import DrawUtils
-
+from src.core.mapping.coordinate_mapper import CoordinateMapper
 
 class Algorithm_Analysis(QObject):
     data_signal = pyqtSignal(dict)
@@ -39,17 +39,15 @@ class Algorithm_Analysis(QObject):
         super().__init__()
         self.parent = parent
         # Calibration caméra pour undistortion des points
-        self.K_cam = None
-        self.dist_cam = None
         self.grid_size = grid_size
+
+        self.mapper = None
         try:
-            with open(config_path("camera_calibration.json"), "r", encoding="utf-8") as f:
-                cam_data = json.load(f)
-            self.K_cam = np.array(cam_data["camera_matrix"], dtype=np.float64)
-            self.dist_cam = np.array(cam_data["dist_coeffs"], dtype=np.float64).reshape(-1, 1)
-            print("[V2] Calibration caméra chargée pour undistortion runtime.")
+            self.mapper = CoordinateMapper()
+            self.mapper.load()
+            print("[V2] CoordinateMapper chargé avec succès.")
         except Exception as e:
-            print(f"[WARNING] Impossible de charger la calibration caméra : {e}")
+            print(f"[WARNING] Impossible de charger CoordinateMapper : {e}")
         self.display_manager = display_manager
 
         self.modules_enabled = modules_enabled or {}
@@ -235,7 +233,10 @@ class Algorithm_Analysis(QObject):
 
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             corners, ids, _ = self.detector.detectMarkers(gray)
-
+            if ids is not None:
+                print("IDs détectés bruts :", [int(x[0]) for x in ids])
+            else:
+                print("Aucun ID détecté")
             projector_coords_ArUco = []
             graph_coords_ArUco = []
 
@@ -269,15 +270,18 @@ class Algorithm_Analysis(QObject):
                     state["last_pos"] = camera_point
                     self.marker_states[marker_id_int] = state
 
+                    if self.mapper is None:
+                        continue
+
                     # Projector coords
-                    projector_point = self.transform_to_projector(camera_point)
+                    projector_point = self.mapper.camera_raw_to_projector(camera_point)
                     projector_coords_ArUco.append([marker_id_int, projector_point])
 
-                    projector_corners = [self.transform_to_projector(corner[0][j]) for j in range(4)]
+                    projector_corners = [self.mapper.camera_raw_to_projector(corner[0][j]) for j in range(4)]
                     marker_size = int(np.linalg.norm(projector_corners[0] - projector_corners[1])) * 2
 
                     # Graph coords
-                    graph_point = self.transform_to_graph(camera_point)
+                    graph_point = self.mapper.camera_raw_to_graph(camera_point)
                     graph_coords_ArUco.append([marker_id_int, graph_point])
 
                     projector_x = int(projector_point[0] - ((self.image_width - self.image_height) / 2))
