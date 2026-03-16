@@ -44,22 +44,87 @@ class DisplayManager:
         self.label.setPixmap(q_pixmap)
 
     
+    # def display_image_on_projector_monitor(self, image_to_display: np.ndarray, screen_id: int = None):
+    #     if image_to_display is None or image_to_display.size == 0:
+    #         return
+
+    #     monitors = get_monitors()
+
+    #     if screen_id is None:
+    #         screen_id = self.projector_screen_id
+
+    #     print("=== DISPLAY DEBUG ===")
+    #     print("screen_id:", screen_id)
+    #     for idx, m in enumerate(monitors):
+    #         print(f"Monitor {idx}: x={m.x}, y={m.y}, width={m.width}, height={m.height}")
+    #     print("Image shape:", image_to_display.shape)
+    #     print("Resolution demandée:", self.resolution)
+    #     print("=====================")
+
+    #     if screen_id < 0 or screen_id >= len(monitors):
+    #         print(f"[WARNING] screen_id {screen_id} invalide, fallback sur dernier écran disponible.")
+    #         screen_id = len(monitors) - 1
+
+    #     monitor = monitors[screen_id]
+    #     img = image_to_display
+
+    #     if self.resolution is not None:
+    #         w, h = self.resolution
+    #         if img.shape[1] != w or img.shape[0] != h:
+    #             img = cv2.resize(img, (w, h), interpolation=cv2.INTER_AREA)
+
+    #     cv2.namedWindow(self._projector_window_name, cv2.WINDOW_NORMAL)
+    #     cv2.moveWindow(self._projector_window_name, monitor.x, monitor.y)
+    #     cv2.setWindowProperty(
+    #         self._projector_window_name,
+    #         cv2.WND_PROP_FULLSCREEN,
+    #         cv2.WINDOW_FULLSCREEN
+    #     )
+    #     cv2.imshow(self._projector_window_name, img)
+    #     cv2.waitKey(1)
     def display_image_on_projector_monitor(self, image_to_display: np.ndarray, screen_id: int = None):
-        if image_to_display is None or image_to_display.size == 0:
+        if image_to_display is None:
+            print("[DISPLAY] image_to_display = None")
             return
+
+        if not isinstance(image_to_display, np.ndarray):
+            print(f"[DISPLAY] type invalide: {type(image_to_display)}")
+            return
+
+        print("=== DISPLAY DEBUG ===")
+        print("Incoming image shape:", image_to_display.shape)
+        print("Incoming image dtype:", image_to_display.dtype)
+        print("=====================")
+
+        # Rejeter tout ce qui n'est pas une vraie image
+        if image_to_display.ndim not in (2, 3):
+            print(f"[DISPLAY] ndim invalide: {image_to_display.ndim}")
+            return
+
+        if image_to_display.ndim == 2:
+            h, w = image_to_display.shape
+            if h <= 10 and w <= 10:
+                print("[DISPLAY] matrice 2D trop petite -> probablement pas une image")
+                return
+            image_to_display = cv2.cvtColor(image_to_display, cv2.COLOR_GRAY2BGR)
+
+        if image_to_display.ndim == 3:
+            h, w, c = image_to_display.shape
+            if h <= 10 and w <= 10:
+                print("[DISPLAY] matrice 3D trop petite -> probablement pas une image")
+                return
+            if c != 3:
+                print(f"[DISPLAY] nombre de canaux invalide: {c}")
+                return
 
         monitors = get_monitors()
 
         if screen_id is None:
             screen_id = self.projector_screen_id
 
-        print("=== DISPLAY DEBUG ===")
         print("screen_id:", screen_id)
         for idx, m in enumerate(monitors):
             print(f"Monitor {idx}: x={m.x}, y={m.y}, width={m.width}, height={m.height}")
-        print("Image shape:", image_to_display.shape)
-        print("Resolution demandée:", self.resolution)
-        print("=====================")
 
         if screen_id < 0 or screen_id >= len(monitors):
             print(f"[WARNING] screen_id {screen_id} invalide, fallback sur dernier écran disponible.")
@@ -68,10 +133,11 @@ class DisplayManager:
         monitor = monitors[screen_id]
         img = image_to_display
 
-        if self.resolution is not None:
-            w, h = self.resolution
-            if img.shape[1] != w or img.shape[0] != h:
-                img = cv2.resize(img, (w, h), interpolation=cv2.INTER_AREA)
+        # Redimensionnement vers la vraie résolution de l'écran cible
+        target_w = monitor.width
+        target_h = monitor.height
+        if img.shape[1] != target_w or img.shape[0] != target_h:
+            img = cv2.resize(img, (target_w, target_h), interpolation=cv2.INTER_AREA)
 
         cv2.namedWindow(self._projector_window_name, cv2.WINDOW_NORMAL)
         cv2.moveWindow(self._projector_window_name, monitor.x, monitor.y)

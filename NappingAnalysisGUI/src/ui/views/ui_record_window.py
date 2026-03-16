@@ -352,19 +352,20 @@ class RecordWindow(QtWidgets.QWidget):
 
         # Init algo
         self.algorithm_analysis = Algorithm_Analysis(
-            self,
-            self.display_manager,
-            self.calib_data["H"], self.calib_data["H_inv"],
-            self.calib_data["H_graph"], self.calib_data["H_inv_graph"],
-            self.image_background,
+            parent=self,
+            display_manager=self.display_manager,
+            image_background=self.image_background,
+            H_projector=self.calib_data["H"],
+            H_inv_projector=self.calib_data["H_inv"],
+            H_graph=self.calib_data["H_graph"],
+            H_inv_graph=self.calib_data["H_inv_graph"],
             record_window=self,
-            output_dir=self.session_output_dir,        # v2
+            output_dir=self.session_output_dir,
             output_name=self.get_export_basename(),
             modules_enabled=p_db.modules_enabled or {},
             assets=assets,
             timeline_steps=steps,
             protocol=p_db
-
         )
         self.algorithm_analysis.set_show_grid(self.checkBox_DisplayGrid.isChecked())
 
