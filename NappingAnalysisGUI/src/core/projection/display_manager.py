@@ -44,44 +44,7 @@ class DisplayManager:
         self.label.setPixmap(q_pixmap)
 
     
-    # def display_image_on_projector_monitor(self, image_to_display: np.ndarray, screen_id: int = None):
-    #     if image_to_display is None or image_to_display.size == 0:
-    #         return
-
-    #     monitors = get_monitors()
-
-    #     if screen_id is None:
-    #         screen_id = self.projector_screen_id
-
-    #     print("=== DISPLAY DEBUG ===")
-    #     print("screen_id:", screen_id)
-    #     for idx, m in enumerate(monitors):
-    #         print(f"Monitor {idx}: x={m.x}, y={m.y}, width={m.width}, height={m.height}")
-    #     print("Image shape:", image_to_display.shape)
-    #     print("Resolution demandée:", self.resolution)
-    #     print("=====================")
-
-    #     if screen_id < 0 or screen_id >= len(monitors):
-    #         print(f"[WARNING] screen_id {screen_id} invalide, fallback sur dernier écran disponible.")
-    #         screen_id = len(monitors) - 1
-
-    #     monitor = monitors[screen_id]
-    #     img = image_to_display
-
-    #     if self.resolution is not None:
-    #         w, h = self.resolution
-    #         if img.shape[1] != w or img.shape[0] != h:
-    #             img = cv2.resize(img, (w, h), interpolation=cv2.INTER_AREA)
-
-    #     cv2.namedWindow(self._projector_window_name, cv2.WINDOW_NORMAL)
-    #     cv2.moveWindow(self._projector_window_name, monitor.x, monitor.y)
-    #     cv2.setWindowProperty(
-    #         self._projector_window_name,
-    #         cv2.WND_PROP_FULLSCREEN,
-    #         cv2.WINDOW_FULLSCREEN
-    #     )
-    #     cv2.imshow(self._projector_window_name, img)
-    #     cv2.waitKey(1)
+    
     def display_image_on_projector_monitor(self, image_to_display: np.ndarray, screen_id: int = None):
         if image_to_display is None:
             print("[DISPLAY] image_to_display = None")
