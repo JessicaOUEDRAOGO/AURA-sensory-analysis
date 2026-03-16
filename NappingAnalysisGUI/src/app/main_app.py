@@ -19,6 +19,10 @@ from src.ui.views.ui_background_window import BackgroundWindow
 from src.ui.views.ui_projection_background_bg import ProjectionBackgroundWindowWithBG
 from src.ui.views.ui_settings_menu import SettingsMenu
 
+def build_useful_background(projector_width, projector_height, useful_x, useful_y, useful_w, useful_h):
+        bg = np.zeros((projector_height, projector_width, 3), dtype=np.uint8)
+        bg[useful_y:useful_y + useful_h, useful_x:useful_x + useful_w] = 255
+        return bg
 
 class MainApp(QtWidgets.QMainWindow):
     def __init__(self):
@@ -64,15 +68,8 @@ class MainApp(QtWidgets.QMainWindow):
 
         # --------------------------------------------------
         # BACKGROUND (projecteur)
-        # --------------------------------------------------
-        # self.image_background = cv2.imread(asset_path("textures", "blanc_4k_carre_mid.png"))
-        # if self.image_background is not None:
-        #     print("Background shape:", self.image_background.shape)
-        # else:
-        #     print("Background image introuvable")
-        # if self.image_background is None:
-        #     self.image_background = 255 * (cv2.UMat(2160, 3840, cv2.CV_8UC3).get())
-        self.image_background = np.full((2160, 3840, 3), 255, dtype=np.uint8)
+        
+        self.image_background = np.zeros((2160, 3840, 3), dtype=np.uint8)
         print("Background shape:", self.image_background.shape)
         # --------------------------------------------------
         # DISPLAY MANAGER
@@ -126,6 +123,8 @@ class MainApp(QtWidgets.QMainWindow):
         self.init_default_protocol()
         self.current_protocol_id = self.record_window.active_protocol_id
         self.current_protocol_locked = False
+    
+    
 
     def init_default_protocol(self):
         repo = ProtocolRepository()

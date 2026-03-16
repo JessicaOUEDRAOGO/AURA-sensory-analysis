@@ -54,10 +54,10 @@ class DisplayManager:
             print(f"[DISPLAY] type invalide: {type(image_to_display)}")
             return
 
-        print("=== DISPLAY DEBUG ===")
-        print("Incoming image shape:", image_to_display.shape)
-        print("Incoming image dtype:", image_to_display.dtype)
-        print("=====================")
+        # print("=== DISPLAY DEBUG ===")
+        # print("Incoming image shape:", image_to_display.shape)
+        # print("Incoming image dtype:", image_to_display.dtype)
+        # print("=====================")
 
         # Rejeter tout ce qui n'est pas une vraie image
         if image_to_display.ndim not in (2, 3):
@@ -85,13 +85,13 @@ class DisplayManager:
         if screen_id is None:
             screen_id = self.projector_screen_id
 
-        print("screen_id:", screen_id)
-        for idx, m in enumerate(monitors):
-            print(f"Monitor {idx}: x={m.x}, y={m.y}, width={m.width}, height={m.height}")
+        # print("screen_id:", screen_id)
+        # for idx, m in enumerate(monitors):
+        #     print(f"Monitor {idx}: x={m.x}, y={m.y}, width={m.width}, height={m.height}")
 
-        if screen_id < 0 or screen_id >= len(monitors):
-            print(f"[WARNING] screen_id {screen_id} invalide, fallback sur dernier écran disponible.")
-            screen_id = len(monitors) - 1
+        # if screen_id < 0 or screen_id >= len(monitors):
+        #     print(f"[WARNING] screen_id {screen_id} invalide, fallback sur dernier écran disponible.")
+        #     screen_id = len(monitors) - 1
 
         monitor = monitors[screen_id]
         img = image_to_display

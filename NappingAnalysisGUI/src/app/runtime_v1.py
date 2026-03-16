@@ -298,7 +298,16 @@ class Algorithm_Analysis(QObject):
         print("Consignes affichées, on continue avec la détection des marqueurs.")
 
         while self.running:
-            current_image_background = self.image_background.copy()
+            current_image_background = np.zeros_like(self.image_background)
+            graph_background = np.full((self.grid_size, self.grid_size, 3), 255, dtype=np.uint8)
+
+            warped_background = cv2.warpPerspective(
+                graph_background,
+                self.mapper.H_graph_to_proj,
+                (self.image_width, self.image_height)
+            )
+
+            current_image_background = warped_background.copy()
 
             frame = self.parent.camera_manager.get_frame()
             if frame is None:
@@ -311,10 +320,10 @@ class Algorithm_Analysis(QObject):
 
             corners, ids = self._detect_markers(frame)
 
-            if ids is not None and len(ids) > 0:
-                print("IDs détectés bruts :", [int(x[0]) for x in ids])
-            else:
-                print("Aucun ID détecté")
+            # if ids is not None and len(ids) > 0:
+            #     print("IDs détectés bruts :", [int(x[0]) for x in ids])
+            # else:
+            #     print("Aucun ID détecté")
 
             projector_coords_ArUco = []
             graph_coords_ArUco = []
@@ -338,22 +347,42 @@ class Algorithm_Analysis(QObject):
                     state = self._update_marker_state(marker_id_int, camera_point)
 
                     # Coordonnées V2 via mapper
-                    projector_point = self.mapper.camera_raw_to_projector(camera_point)
-                    graph_point = self.mapper.camera_raw_to_graph(camera_point)
+                    # projector_point = self.mapper.camera_raw_to_projector(camera_point)
+                    # graph_point = self.mapper.camera_raw_to_graph(camera_point)
 
-                    projector_coords_ArUco.append([marker_id_int, projector_point])
-                    graph_coords_ArUco.append([marker_id_int, graph_point])
+                    # projector_coords_ArUco.append([marker_id_int, projector_point])
+                    # graph_coords_ArUco.append([marker_id_int, graph_point])
 
-                    # taille approx du tag en coordonnées projecteur
-                    projector_corners = [
-                        self.mapper.camera_raw_to_projector(corner[0][j]) for j in range(4)
-                    ]
+                    # # taille approx du tag en coordonnées projecteur
+                    # projector_corners = [
+                    #     self.mapper.camera_raw_to_projector(corner[0][j]) for j in range(4)
+                    # ]
+                    # marker_size = int(np.linalg.norm(projector_corners[0] - projector_corners[1])) * 2
+                    # marker_size = max(marker_size, 20)
+
+                    # projector_x = int(projector_point[0])
+                    # projector_y = int(projector_point[1])
+                    projector_corners = np.array(
+                        [self.mapper.camera_raw_to_projector(corner[0][j]) for j in range(4)],
+                        dtype=np.float32
+                    )
+
+                    graph_corners = np.array(
+                        [self.mapper.camera_raw_to_graph(corner[0][j]) for j in range(4)],
+                        dtype=np.float32
+                    )
+
+                    projector_center = projector_corners.mean(axis=0)
+                    graph_center = graph_corners.mean(axis=0)
+
+                    projector_coords_ArUco.append([marker_id_int, projector_center])
+                    graph_coords_ArUco.append([marker_id_int, graph_center])
+
                     marker_size = int(np.linalg.norm(projector_corners[0] - projector_corners[1])) * 2
                     marker_size = max(marker_size, 20)
 
-                    projector_x = int(projector_point[0])
-                    projector_y = int(projector_point[1])
-
+                    projector_x = int(round(projector_center[0]))
+                    projector_y = int(round(projector_center[1]))
                     marker_id = str(marker_id_int)
 
                     # Overlay seulement si statique et module activé
