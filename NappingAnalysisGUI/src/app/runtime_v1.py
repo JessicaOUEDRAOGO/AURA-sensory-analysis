@@ -212,14 +212,41 @@ class Algorithm_Analysis(QObject):
                 if img is None:
                     continue
 
-                img = cv2.resize(img, (self.image_width, self.image_height), interpolation=cv2.INTER_AREA)
+                img = self.prepare_instruction_image(img, margin_ratio=0.04)
 
                 self.waiting_for_consigne_key = True
                 while self.running and self.waiting_for_consigne_key:
                     self.display_manager.display_image_on_projector_monitor(img)
                     _ = self.parent.camera_manager.get_frame()
                     cv2.waitKey(1)
+    def prepare_instruction_image(self, img, margin_ratio=0.04):
+        """
+        Place l'image dans un canvas noir avec marge de sécurité,
+        sans déformation et sans tronquage.
+        """
+        target_h = self.image_height
+        target_w = self.image_width
 
+        canvas = np.zeros((target_h, target_w, 3), dtype=np.uint8)
+
+        src_h, src_w = img.shape[:2]
+
+        usable_w = int(target_w * (1.0 - 2 * margin_ratio))
+        usable_h = int(target_h * (1.0 - 2 * margin_ratio))
+
+        scale = min(usable_w / src_w, usable_h / src_h)
+
+        new_w = max(1, int(src_w * scale))
+        new_h = max(1, int(src_h * scale))
+
+        resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+        x0 = (target_w - new_w) // 2
+        y0 = (target_h - new_h) // 2
+
+        canvas[y0:y0 + new_h, x0:x0 + new_w] = resized
+
+        return canvas
     # ======================================================================
     # Détection / stabilité
     # ======================================================================
