@@ -43,7 +43,18 @@ class DisplayManager:
         q_pixmap = QPixmap.fromImage(q_img)
         self.label.setPixmap(q_pixmap)
 
-    
+    def _prepare_for_projection(self, img: np.ndarray) -> np.ndarray:
+        """
+        Corrige orientation + miroir pour correspondre au point de vue utilisateur.
+        """
+
+        # TEST 1 : miroir horizontal
+        img = cv2.flip(img, 1)
+
+        # TEST 2 : rotation 180°
+        img = cv2.rotate(img, cv2.ROTATE_180)
+
+        return img
     
     def display_image_on_projector_monitor(self, image_to_display: np.ndarray, screen_id: int = None):
         if image_to_display is None:
@@ -94,7 +105,7 @@ class DisplayManager:
         #     screen_id = len(monitors) - 1
 
         monitor = monitors[screen_id]
-        img = image_to_display
+        img = self._prepare_for_projection(image_to_display)
 
         # Redimensionnement vers la vraie résolution de l'écran cible
         target_w = monitor.width
