@@ -16,8 +16,8 @@ PROJECTOR_WIDTH = 3840
 PROJECTOR_HEIGHT = 2160
 
 VALID_POSES = [
-    "pose_01", "pose_02", "pose_03", "pose_04",
-    "pose_06", "pose_09", "pose_10", "pose_11", "pose_12"
+    "pose_screen_01", "pose_screen_03", "pose_screen_04", "pose_screen_08",
+    "pose_screen_09", "pose_screen_10","pose_screen_12"
 ]
 
 # ---------------------------------------------------------

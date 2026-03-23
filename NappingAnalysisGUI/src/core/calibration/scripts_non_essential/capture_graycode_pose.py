@@ -21,7 +21,7 @@ CAMERA_WIDTH = 1920
 CAMERA_HEIGHT = 1080
 
 OUTPUT_ROOT = Path("projector_calibration_data")
-POSE_NAME = "pose_screen_01"
+POSE_NAME = "pose_screen_12"
 
 # temporisations
 SETTLE_TIME_SEC = 0.35           # temps pour stabiliser affichage/projecteur
