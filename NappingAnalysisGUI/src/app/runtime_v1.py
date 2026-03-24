@@ -275,37 +275,7 @@ class Algorithm_Analysis(QObject):
         state["last_pos"] = camera_point.copy()
         self.marker_states[marker_id_int] = state
         return state
-    def compensate_projector_point_for_display_transform(self, pt):
-        """
-        Compense le flip appliqué dans DisplayManager.
-        DisplayManager applique actuellement :
-            flip horizontal + rotate 180
-        ce qui équivaut à un flip vertical.
-
-        Donc ici on applique l'inverse sur les coordonnées projecteur
-        avant dessin.
-        """
-        x = float(pt[0])
-        y = float(pt[1])
-
-        projector_h = self.mapper.projector_height if self.mapper is not None else self.image_height
-
-        return np.array([x, projector_h - 1 - y], dtype=np.float32)
-        
-    def compensate_projector_homography_for_display_transform(self, H):
-        """
-        Compense le flip vertical appliqué dans DisplayManager.
-        """
-        projector_h = self.mapper.projector_height if self.mapper is not None else self.image_height
-
-        T = np.array([
-            [1.0,  0.0, 0.0],
-            [0.0, -1.0, projector_h - 1],
-            [0.0,  0.0, 1.0]
-        ], dtype=np.float64)
-
-        H_corr = T @ H
-        return H_corr / H_corr[2, 2]
+    
     # ======================================================================
     # Boucle principale
     # ======================================================================
@@ -358,8 +328,12 @@ class Algorithm_Analysis(QObject):
             current_image_background = np.zeros_like(self.image_background)
             # graph_background = np.full((self.grid_size, self.grid_size, 3), 255, dtype=np.uint8)
             graph_background = self.build_graph_useful_background()
-            H_graph_to_proj_corr = self.compensate_projector_homography_for_display_transform(
-                self.mapper.H_graph_to_proj
+            proj_w = self.mapper.projector_width
+            proj_h = self.mapper.projector_height
+
+            H_graph_to_proj_corr = self.display_manager.transform_projector_homography_to_display(
+                self.mapper.H_graph_to_proj,
+                proj_h
             )
 
             warped_background = cv2.warpPerspective(
@@ -428,8 +402,10 @@ class Algorithm_Analysis(QObject):
                         dtype=np.float32
                     )
 
+                    proj_h = self.mapper.projector_height
+
                     projector_corners = np.array(
-                        [self.compensate_projector_point_for_display_transform(p) for p in projector_corners_raw],
+                        [self.display_manager.transform_projector_point_to_display(p, proj_h) for p in projector_corners_raw],
                         dtype=np.float32
                     )
 
