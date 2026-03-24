@@ -12,6 +12,7 @@ PATTERN_SIZE = (9, 6)          # nb de coins internes (colonnes, lignes)
 SQUARE_SIZE_M = 0.024          # taille d'une case en mètres
 MIN_VALID_IMAGES = 8
 
+
 # Dossiers
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = BASE_DIR.parents[2]   # adapte si besoin selon l'emplacement réel du script
@@ -24,6 +25,12 @@ CAMERA_JSON_PATH = CONFIG_DIR / "camera_calibration.json"
 CAMERA_MATRIX_NPY_PATH = CONFIG_DIR / "cam_mint.npy"
 CAMERA_DIST_NPY_PATH = CONFIG_DIR / "cam_distcoef.npy"
 DEBUG_JSON_PATH = CONFIG_DIR / "camera_calibration_debug.json"
+
+# Sauvegarde des images avec damier détecté
+SAVE_DETECTED_IMAGES = True
+DETECTED_DIR = BASE_DIR / "detected_checkerboards"
+SAVE_RAW_DETECTED_IMAGES = False   # True si tu veux aussi sauvegarder l'image brute
+RAW_DETECTED_DIR = BASE_DIR / "detected_checkerboards_raw"
 
 # Critères de raffinement
 SUBPIX_CRITERIA = (
@@ -45,6 +52,36 @@ PREVIEW_DELAY_MS = 200
 def ensure_output_dir() -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
+    if SAVE_DETECTED_IMAGES:
+        DETECTED_DIR.mkdir(parents=True, exist_ok=True)
+
+    if SAVE_RAW_DETECTED_IMAGES:
+        RAW_DETECTED_DIR.mkdir(parents=True, exist_ok=True)
+
+def save_detected_checkerboard_image(image, image_path: Path, pattern_size, corners, found):
+    """
+    Sauvegarde une image annotée avec les coins du damier détectés.
+    """
+    vis = image.copy()
+    cv2.drawChessboardCorners(vis, pattern_size, corners, found)
+
+    output_path = DETECTED_DIR / image_path.name
+    ok = cv2.imwrite(str(output_path), vis)
+
+    if not ok:
+        print(f"[WARN] Impossible d'enregistrer l'image détectée : {output_path}")
+    else:
+        print(f"[SAVE] Image détectée sauvegardée : {output_path.name}")
+
+def save_raw_detected_image(image, image_path: Path):
+    """
+    Sauvegarde l'image brute pour laquelle le damier a été détecté.
+    """
+    output_path = RAW_DETECTED_DIR / image_path.name
+    ok = cv2.imwrite(str(output_path), image)
+
+    if not ok:
+        print(f"[WARN] Impossible d'enregistrer l'image brute : {output_path}")
 
 def build_object_points(pattern_size, square_size_m):
     objp = np.zeros((pattern_size[0] * pattern_size[1], 3), np.float32)
@@ -180,7 +217,17 @@ def main():
         object_points.append(objp.copy())
         image_points.append(corners)
         used_images.append(image_path.name)
+        if SAVE_DETECTED_IMAGES:
+            save_detected_checkerboard_image(
+                image=image,
+                image_path=image_path,
+                pattern_size=PATTERN_SIZE,
+                corners=corners,
+                found=found
+            )
 
+        if SAVE_RAW_DETECTED_IMAGES:
+            save_raw_detected_image(image, image_path)
         if SHOW_PREVIEW:
             vis = image.copy()
             cv2.drawChessboardCorners(vis, PATTERN_SIZE, corners, found)
@@ -271,105 +318,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-# import cv2
-# import numpy as np
-# import glob
-# import json
-
-# PATTERN_SIZE = (9, 6)   # coins internes
-# SQUARE_SIZE = 0.024     # en metres
-# IMAGES_PATH = "img_checker/*.jpg"
-
-# objp = np.zeros((PATTERN_SIZE[0] * PATTERN_SIZE[1], 3), np.float32)
-# objp[:, :2] = np.mgrid[0:PATTERN_SIZE[0], 0:PATTERN_SIZE[1]].T.reshape(-1, 2)
-# objp *= SQUARE_SIZE
-
-# object_points = []
-# image_points = []
-
-# images = sorted(glob.glob(IMAGES_PATH))
-# if not images:
-#     raise RuntimeError("Aucune image trouvee dans img_checker")
-
-# criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
-
-# img_size = None
-# valid_count = 0
-
-# for image_file in images:
-#     image = cv2.imread(image_file)
-#     if image is None:
-#         continue
-
-#     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-#     img_size = gray.shape[::-1]
-
-#     found, corners = cv2.findChessboardCorners(gray, PATTERN_SIZE)
-
-#     if found:
-#         corners_refined = cv2.cornerSubPix(
-#             gray,
-#             corners,
-#             (11, 11),
-#             (-1, -1),
-#             criteria
-#         )
-
-#         object_points.append(objp.copy())
-#         image_points.append(corners_refined)
-#         valid_count += 1
-
-#         vis = image.copy()
-#         cv2.drawChessboardCorners(vis, PATTERN_SIZE, corners_refined, found)
-#         preview = cv2.resize(vis, (1280, 720), interpolation=cv2.INTER_AREA)
-#         cv2.imshow("detected", preview)
-#         cv2.waitKey(200)
-#     else:
-#         print(f"Damier non detecte : {image_file}")
-
-# cv2.destroyAllWindows()
-
-# if valid_count < 8:
-#     raise RuntimeError(f"Pas assez d'images valides : {valid_count}")
-
-# ret, camera_matrix, dist_coeffs, rvecs, tvecs = cv2.calibrateCamera(
-#     object_points,
-#     image_points,
-#     img_size,
-#     None,
-#     None
-# )
-
-# print("=== RESULTATS ===")
-# print("Nombre d'images valides :", valid_count)
-# print("Erreur RMS :", ret)
-# print("Camera matrix :\n", camera_matrix)
-# print("Dist coeffs :\n", dist_coeffs.ravel())
-
-# mean_error = 0
-# for i in range(len(object_points)):
-#     imgpoints2, _ = cv2.projectPoints(
-#         object_points[i], rvecs[i], tvecs[i], camera_matrix, dist_coeffs
-#     )
-#     error = cv2.norm(image_points[i], imgpoints2, cv2.NORM_L2) / len(imgpoints2)
-#     mean_error += error
-
-# mean_error /= len(object_points)
-# print("Erreur moyenne de reprojection (px) :", mean_error)
-
-# np.save("cam_mint.npy", camera_matrix)
-# np.save("cam_distcoef.npy", dist_coeffs)
-
-# data = {
-#     "pattern_size": [PATTERN_SIZE[0], PATTERN_SIZE[1]],
-#     "square_size_m": SQUARE_SIZE,
-#     "rms_error": float(ret),
-#     "mean_reprojection_error_px": float(mean_error),
-#     "camera_matrix": camera_matrix.tolist(),
-#     "dist_coeffs": dist_coeffs.tolist()
-# }
-
-# with open("camera_calibration.json", "w", encoding="utf-8") as f:
-#     json.dump(data, f, indent=4)
-
-# print("Calibration sauvegardee.")
