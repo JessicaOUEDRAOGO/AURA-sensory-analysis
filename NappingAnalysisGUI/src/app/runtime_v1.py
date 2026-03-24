@@ -425,7 +425,10 @@ class Algorithm_Analysis(QObject):
                     projector_x = int(round(projector_center[0]))
                     projector_y = int(round(projector_center[1]))
                     marker_id = str(marker_id_int)
-
+                    # projection de carré qui represente la projection directe des tags Aruco détectés
+                    # pts = projector_corners.astype(np.int32).reshape((-1, 1, 2))
+                    # cv2.polylines(current_image_background, [pts], True, (0, 255, 0), 2)
+                    # cv2.circle(current_image_background, (projector_x, projector_y), 8, (0, 0, 255), -1)
                     # Overlay seulement si statique et module activé
                     if state["is_static"] and overlay_on:
                         if f"marker_{marker_id}" in ra_config:
