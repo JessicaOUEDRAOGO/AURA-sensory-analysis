@@ -65,6 +65,22 @@ class CoordinateMapper:
         self.H_graph_to_proj = np.array(homographies["H_graph_to_proj"], dtype=np.float64)
         self.H_proj_to_graph = np.array(homographies["H_proj_to_graph"], dtype=np.float64)
 
+        # Correction du repère graph : miroir horizontal
+        F_graph_x = np.array([
+            [-1.0, 0.0, self.grid_size],
+            [ 0.0, 1.0, 0.0],
+            [ 0.0, 0.0, 1.0]
+        ], dtype=np.float64)
+
+        # Son inverse est lui-même
+        F_graph_x_inv = F_graph_x.copy()
+
+        self.H_cam_undist_to_graph = F_graph_x @ self.H_cam_undist_to_graph
+        self.H_graph_to_cam_undist = self.H_graph_to_cam_undist @ F_graph_x_inv
+
+        self.H_graph_to_proj = self.H_graph_to_proj @ F_graph_x_inv
+        self.H_proj_to_graph = F_graph_x @ self.H_proj_to_graph
+
     @staticmethod
     def _apply_homography(H, point_2d):
         pt = np.array([point_2d[0], point_2d[1], 1.0], dtype=np.float64)
