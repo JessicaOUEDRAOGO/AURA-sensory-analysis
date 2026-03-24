@@ -397,26 +397,25 @@ class Algorithm_Analysis(QObject):
 
                     # projector_x = int(projector_point[0])
                     # projector_y = int(projector_point[1])
+                    camera_center = np.mean(corner[0], axis=0).astype(np.float32)
+
+                    projector_center_raw = self.mapper.camera_raw_to_projector(camera_center)
+                    proj_h = self.mapper.projector_height
+                    projector_center = self.display_manager.transform_projector_point_to_display(
+                        projector_center_raw, proj_h
+                    )
+
+                    graph_center = self.mapper.camera_raw_to_graph(camera_center)
+
                     projector_corners_raw = np.array(
                         [self.mapper.camera_raw_to_projector(corner[0][j]) for j in range(4)],
                         dtype=np.float32
                     )
 
-                    proj_h = self.mapper.projector_height
-
                     projector_corners = np.array(
                         [self.display_manager.transform_projector_point_to_display(p, proj_h) for p in projector_corners_raw],
                         dtype=np.float32
                     )
-
-                    graph_corners = np.array(
-                        [self.mapper.camera_raw_to_graph(corner[0][j]) for j in range(4)],
-                        dtype=np.float32
-                    )
-
-                    projector_center = projector_corners.mean(axis=0)
-                    graph_center = graph_corners.mean(axis=0)
-
                     projector_coords_ArUco.append([marker_id_int, projector_center])
                     graph_coords_ArUco.append([marker_id_int, graph_center])
 
