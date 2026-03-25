@@ -491,33 +491,7 @@ class Algorithm_Analysis(QObject):
         self.finished_signal.emit()
     
     def build_graph_useful_background(self):
-        bg = np.zeros((self.grid_size, self.grid_size, 3), dtype=np.uint8)
-
-        # Décalage global du rectangle blanc
-        offset_x = -1   # négatif = vers la gauche, positif = vers la droite
-        offset_y = 10    # positif = vers le bas, négatif = vers le haut
-
-        # Réduction de la taille utile
-        margin_right = 20
-        margin_bottom = 0
-
-        rect_w = self.grid_size - margin_right
-        rect_h = self.grid_size - margin_bottom
-
-        x0 = offset_x
-        y0 = offset_y
-        x1 = offset_x + rect_w
-        y1 = offset_y + rect_h
-
-        # Clamp pour rester dans l'image
-        draw_x0 = max(0, x0)
-        draw_y0 = max(0, y0)
-        draw_x1 = min(self.grid_size, x1)
-        draw_y1 = min(self.grid_size, y1)
-
-        if draw_x1 > draw_x0 and draw_y1 > draw_y0:
-            bg[draw_y0:draw_y1, draw_x0:draw_x1] = 255
-
+        bg = np.full((self.grid_size, self.grid_size, 3), 255, dtype=np.uint8)
         return bg
     # ======================================================================
     # Dessin overlays

@@ -21,8 +21,8 @@ CAMERA_WIDTH = 1920
 CAMERA_HEIGHT = 1080
 
 # dimensions physiques utiles de l'écran diffusant
-SCREEN_WIDTH_MM = 590.0
-SCREEN_HEIGHT_MM = 590.0
+SCREEN_WIDTH_MM = 600.0
+SCREEN_HEIGHT_MM = 600.0
 
 # taille de la grille logique de ton appli
 GRID_SIZE = 700
