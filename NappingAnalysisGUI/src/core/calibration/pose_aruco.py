@@ -1,0 +1,647 @@
+# -*- coding: utf-8 -*-
+from pathlib import Path
+import json
+import time
+
+import cv2
+import numpy as np
+from screeninfo import get_monitors
+
+
+# =========================================================
+# PARAMETRES
+# =========================================================
+PROJECTOR_SCREEN_ID = 1
+
+PROJECTOR_WIDTH = 3840
+PROJECTOR_HEIGHT = 2160
+
+CAMERA_ID = 0
+CAMERA_WIDTH = 1920
+CAMERA_HEIGHT = 1080
+
+# dimensions physiques utiles de l'écran diffusant
+SCREEN_WIDTH_MM = 590.0
+SCREEN_HEIGHT_MM = 590.0
+
+# taille de la grille logique de ton appli
+GRID_SIZE = 700
+
+# rectangle blanc affiché pour aider visuellement
+DISPLAY_RECT_WIDTH = 2200
+DISPLAY_RECT_HEIGHT = 2200
+DISPLAY_BG_LEVEL = 220
+DISPLAY_BORDER_THICKNESS = 8
+
+# IDs ArUco des 4 coins de la surface utile
+CORNER_TAG_IDS = {
+    "TL": 42,
+    "TR": 43,
+    "BR": 40,
+    "BL": 41,
+}
+
+# chemins
+BASE_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = BASE_DIR.parents[2]
+CONFIG_DIR = PROJECT_ROOT / "config"
+
+CAMERA_CALIB_PATH = CONFIG_DIR / "camera_calibration.json"
+PROJECTOR_CALIB_PATH = CONFIG_DIR / "projector_calibration_moreno_refined.json"
+STEREO_CALIB_PATH = CONFIG_DIR / "stereo_camera_projector_calibration.json"
+
+OUTPUT_CALIB_PATH = CONFIG_DIR / "calibration_data.json"
+OUTPUT_POSE_PATH = CONFIG_DIR / "screen_pose_manual.json"
+OUTPUT_DEBUG_PATH = CONFIG_DIR / "manual_pose_debug.png"
+RUNTIME_MAPPING_PATH = CONFIG_DIR / "runtime_mapping.json"
+
+
+# =========================================================
+# OUTILS JSON / CALIB
+# =========================================================
+def ensure_output_dir():
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def load_json(path: Path):
+    if not path.exists():
+        raise FileNotFoundError(f"Fichier introuvable : {path}")
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def flatten_dist(dist):
+    arr = np.array(dist, dtype=np.float64)
+    if arr.ndim == 1:
+        arr = arr.reshape(1, -1)
+    elif arr.ndim == 2 and arr.shape[1] == 1:
+        arr = arr.T
+    return arr
+
+
+def load_calibrations():
+    cam_data = load_json(CAMERA_CALIB_PATH)
+    proj_data = load_json(PROJECTOR_CALIB_PATH)
+    stereo_data = load_json(STEREO_CALIB_PATH)
+
+    K_cam = np.array(cam_data["camera_matrix"], dtype=np.float64)
+    dist_cam = flatten_dist(cam_data["dist_coeffs"])
+
+    K_proj = np.array(proj_data["projector_matrix"], dtype=np.float64)
+    if "projector_dist_coeffs" in proj_data:
+        dist_proj = flatten_dist(proj_data["projector_dist_coeffs"])
+    elif "dist_coeffs" in proj_data:
+        dist_proj = flatten_dist(proj_data["dist_coeffs"])
+    else:
+        raise KeyError("Aucune distorsion projecteur trouvée.")
+
+    R_cp = np.array(stereo_data["R"], dtype=np.float64)
+    T_cp = np.array(stereo_data["T"], dtype=np.float64).reshape(3, 1)
+
+    return K_cam, dist_cam, K_proj, dist_proj, R_cp, T_cp
+
+
+# =========================================================
+# PROJECTEUR
+# =========================================================
+class ProjectorWindow:
+    def __init__(self, screen_id: int):
+        monitors = get_monitors()
+        if screen_id < 0 or screen_id >= len(monitors):
+            raise ValueError(f"screen_id invalide : {screen_id}")
+
+        self.monitor = monitors[screen_id]
+        self.window_name = "ProjectorManualPoseAruco"
+
+        cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
+        cv2.moveWindow(self.window_name, self.monitor.x, self.monitor.y)
+        cv2.setWindowProperty(
+            self.window_name,
+            cv2.WND_PROP_FULLSCREEN,
+            cv2.WINDOW_FULLSCREEN
+        )
+
+    def show(self, image: np.ndarray):
+        cv2.imshow(self.window_name, image)
+        cv2.waitKey(1)
+
+    def close(self):
+        try:
+            cv2.destroyWindow(self.window_name)
+        except Exception:
+            pass
+
+
+def build_display_pattern():
+    """
+    Mire visuelle uniquement pour aider à positionner les tags de coin.
+    """
+    img = np.zeros((PROJECTOR_HEIGHT, PROJECTOR_WIDTH, 3), dtype=np.uint8)
+
+    x0 = (PROJECTOR_WIDTH - DISPLAY_RECT_WIDTH) // 2
+    y0 = (PROJECTOR_HEIGHT - DISPLAY_RECT_HEIGHT) // 2
+    x1 = x0 + DISPLAY_RECT_WIDTH - 1
+    y1 = y0 + DISPLAY_RECT_HEIGHT - 1
+
+    cv2.rectangle(
+        img,
+        (x0, y0),
+        (x1, y1),
+        (DISPLAY_BG_LEVEL, DISPLAY_BG_LEVEL, DISPLAY_BG_LEVEL),
+        thickness=-1
+    )
+    cv2.rectangle(
+        img,
+        (x0, y0),
+        (x1, y1),
+        (255, 255, 255),
+        thickness=DISPLAY_BORDER_THICKNESS
+    )
+
+    for p in [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]:
+        cv2.circle(img, p, 16, (0, 0, 255), -1)
+
+    return img
+
+
+# =========================================================
+# CAMERA
+# =========================================================
+def open_camera():
+    cap = cv2.VideoCapture(CAMERA_ID, cv2.CAP_DSHOW)
+    if not cap.isOpened():
+        raise RuntimeError("Impossible d'ouvrir la caméra.")
+
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+
+    for _ in range(8):
+        cap.read()
+
+    ret, frame = cap.read()
+    if not ret or frame is None:
+        cap.release()
+        raise RuntimeError("Impossible de lire une première frame caméra.")
+
+    h, w = frame.shape[:2]
+    if (w, h) != (CAMERA_WIDTH, CAMERA_HEIGHT):
+        cap.release()
+        raise RuntimeError(
+            f"Résolution caméra incohérente : obtenu {w}x{h}, attendu {CAMERA_WIDTH}x{CAMERA_HEIGHT}"
+        )
+
+    return cap
+
+
+def grab_frame(cap, n_flush=3):
+    for _ in range(n_flush):
+        cap.read()
+
+    ret, frame = cap.read()
+    if not ret or frame is None:
+        raise RuntimeError("Erreur capture caméra.")
+
+    return frame
+
+
+def average_frames(cap, n_frames=8, n_flush_each=1):
+    frames = []
+    for _ in range(n_frames):
+        fr = grab_frame(cap, n_flush=n_flush_each)
+        frames.append(fr.astype(np.float32))
+    return np.mean(frames, axis=0).astype(np.uint8)
+
+
+# =========================================================
+# OUTILS GEOMETRIE
+# =========================================================
+def undistort_pixel_points(points_px, K, dist):
+    pts = np.array(points_px, dtype=np.float32).reshape(-1, 1, 2)
+    und = cv2.undistortPoints(pts, K, dist, P=K)
+    return und.reshape(-1, 2).astype(np.float32)
+
+
+def pose_to_homography(K, R, t):
+    return K @ np.column_stack((R[:, 0], R[:, 1], t.reshape(3)))
+
+
+def compute_reprojection_error(objpoints, imgpoints, rvec, tvec, K, dist):
+    proj, _ = cv2.projectPoints(objpoints, rvec, tvec, K, dist)
+    proj_2d = proj.reshape(-1, 2)
+    img = np.array(imgpoints, dtype=np.float64).reshape(-1, 2)
+    d = np.linalg.norm(img - proj_2d, axis=1)
+    return float(np.mean(d)), d.tolist(), proj
+
+
+# =========================================================
+# ARUCO
+# =========================================================
+def create_aruco_detector():
+    aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
+    parameters = cv2.aruco.DetectorParameters()
+
+    # réglages conservateurs
+    parameters.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
+    parameters.cornerRefinementWinSize = 5
+    parameters.cornerRefinementMaxIterations = 50
+    parameters.cornerRefinementMinAccuracy = 0.01
+
+    detector = cv2.aruco.ArucoDetector(aruco_dict, parameters)
+    return detector
+
+
+def detect_corner_tags(frame, detector):
+    """
+    Détecte les 4 tags de coin et retourne :
+    - detected : dict par ID
+    - cam_points_raw : points dans l'ordre TL, TR, BR, BL
+    - gray : image niveau de gris
+    """
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    corners, ids, _ = detector.detectMarkers(gray)
+
+    if ids is None or len(ids) == 0:
+        return {}, None, gray
+
+    ids = ids.flatten().tolist()
+    detected = {}
+
+    for i, marker_id in enumerate(ids):
+        marker_id = int(marker_id)
+        if marker_id in CORNER_TAG_IDS.values():
+            pts = corners[i][0].astype(np.float32)  # shape (4,2)
+            center = np.mean(pts, axis=0)
+            detected[marker_id] = {
+                "corners": pts,
+                "center": center
+            }
+
+    required_ids = [
+        CORNER_TAG_IDS["TL"],
+        CORNER_TAG_IDS["TR"],
+        CORNER_TAG_IDS["BR"],
+        CORNER_TAG_IDS["BL"],
+    ]
+
+    if not all(tag_id in detected for tag_id in required_ids):
+        return detected, None, gray
+
+    cam_points_raw = np.array([
+        detected[CORNER_TAG_IDS["TL"]]["corners"][0],  # TL -> coin 0 du tag 42
+        detected[CORNER_TAG_IDS["TR"]]["corners"][1],  # TR -> coin 1 du tag 43
+        detected[CORNER_TAG_IDS["BR"]]["corners"][2],  # BR -> coin 2 du tag 40
+        detected[CORNER_TAG_IDS["BL"]]["corners"][3],  # BL -> coin 3 du tag 41
+    ], dtype=np.float32)
+
+    return detected, cam_points_raw, gray
+
+
+def draw_detected_corner_tags(img, detected, cam_points_raw=None):
+    out = img.copy()
+
+    for marker_id, data in detected.items():
+        pts = data["corners"].astype(np.int32)
+        center = data["center"]
+
+        cv2.polylines(out, [pts.reshape(-1, 1, 2)], True, (0, 255, 0), 2)
+        cv2.circle(out, tuple(np.round(center).astype(int)), 6, (0, 0, 255), -1)
+        cv2.putText(
+            out,
+            f"ID {marker_id}",
+            tuple(np.round(center).astype(int) + np.array([10, -10])),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (255, 0, 255),
+            2
+        )
+
+    if detected and all(tag_id in detected for tag_id in CORNER_TAG_IDS.values()):
+        chosen = {
+            "TL": detected[CORNER_TAG_IDS["TL"]]["corners"][0],
+            "TR": detected[CORNER_TAG_IDS["TR"]]["corners"][1],
+            "BR": detected[CORNER_TAG_IDS["BR"]]["corners"][2],
+            "BL": detected[CORNER_TAG_IDS["BL"]]["corners"][3],
+        }
+
+        for label, p in chosen.items():
+            x, y = int(round(float(p[0]))), int(round(float(p[1])))
+            cv2.circle(out, (x, y), 9, (0, 255, 255), 2)
+            cv2.putText(
+                out,
+                f"{label}_sel",
+                (x + 8, y - 8),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0, 255, 255),
+                2
+            )
+
+    if cam_points_raw is not None and len(cam_points_raw) == 4:
+        labels = ["TL", "TR", "BR", "BL"]
+        for i, p in enumerate(cam_points_raw):
+            x, y = int(round(float(p[0]))), int(round(float(p[1])))
+            cv2.circle(out, (x, y), 8, (255, 255, 0), 2)
+            cv2.putText(
+                out,
+                labels[i],
+                (x + 10, y + 20),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (255, 255, 0),
+                2
+            )
+
+        cv2.polylines(out, [np.round(cam_points_raw).astype(np.int32)], True, (255, 255, 0), 2)
+
+    help_lines = [
+        "Pose ecran par ArUco",
+        "Convention : TL=42, TR=43, BR=40, BL=41",
+        "s: sauvegarder | r: rafraichir | q: quitter",
+    ]
+
+    y = 30
+    for line in help_lines:
+        cv2.putText(
+            out,
+            line,
+            (20, y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 255, 255),
+            2
+        )
+        y += 30
+
+    return out
+
+
+# =========================================================
+# MAIN
+# =========================================================
+def main():
+    ensure_output_dir()
+
+    print("=== POSE ECRAN PAR ARUCO ===")
+    print("Convention utilisee :")
+    print(f"  TL = {CORNER_TAG_IDS['TL']}")
+    print(f"  TR = {CORNER_TAG_IDS['TR']}")
+    print(f"  BR = {CORNER_TAG_IDS['BR']}")
+    print(f"  BL = {CORNER_TAG_IDS['BL']}")
+
+    K_cam, dist_cam, K_proj, dist_proj, R_cp, T_cp = load_calibrations()
+
+    projector = ProjectorWindow(PROJECTOR_SCREEN_ID)
+    projector.show(build_display_pattern())
+
+    cap = open_camera()
+    detector = create_aruco_detector()
+
+    try:
+        time.sleep(1.0)
+
+        print("\nTouches :")
+        print("  r = rafraichir")
+        print("  s = sauvegarder la pose")
+        print("  q = quitter")
+
+        cv2.namedWindow("Manual Screen Pose", cv2.WINDOW_NORMAL)
+
+        frozen = None
+        frozen_gray = None
+        cam_points_raw = None
+        detected = {}
+
+        while True:
+            frame = grab_frame(cap, n_flush=1)
+            detected, current_cam_points_raw, gray = detect_corner_tags(frame, detector)
+
+            preview = draw_detected_corner_tags(frame, detected, current_cam_points_raw)
+            cv2.imshow("Manual Screen Pose", preview)
+
+            key = cv2.waitKey(20) & 0xFF
+
+            if key == ord("q"):
+                print("Sortie demandee.")
+                return
+
+            elif key == ord("r"):
+                continue
+
+            elif key == ord("s"):
+                if current_cam_points_raw is None:
+                    print("Les 4 tags de coin ne sont pas detectes correctement.")
+                    continue
+
+                # capture moyenne pour stabiliser l'image au moment de la sauvegarde
+                frozen = average_frames(cap, n_frames=8, n_flush_each=1)
+                detected_frozen, frozen_cam_points_raw, frozen_gray_tmp = detect_corner_tags(frozen, detector)
+
+                if frozen_cam_points_raw is None:
+                    print("Les 4 tags n'ont pas ete retrouves sur la capture moyenne. Reessaie.")
+                    continue
+
+                frozen_gray = frozen_gray_tmp
+                cam_points_raw = frozen_cam_points_raw.copy()
+                detected = detected_frozen
+                break
+
+        print("\nPoints camera bruts detectes (TL, TR, BR, BL) :")
+        print(cam_points_raw)
+
+        cam_points_undist = undistort_pixel_points(cam_points_raw, K_cam, dist_cam)
+
+        # coins physiques de la plaque ecran
+        object_points_m = np.array([
+            [0.0, 0.0, 0.0],
+            [SCREEN_WIDTH_MM / 1000.0, 0.0, 0.0],
+            [SCREEN_WIDTH_MM / 1000.0, SCREEN_HEIGHT_MM / 1000.0, 0.0],
+            [0.0, SCREEN_HEIGHT_MM / 1000.0, 0.0],
+        ], dtype=np.float32)
+
+        graph_points = np.array([
+            [0, 0],
+            [GRID_SIZE - 1, 0],
+            [GRID_SIZE - 1, GRID_SIZE - 1],
+            [0, GRID_SIZE - 1],
+        ], dtype=np.float32)
+
+        screen_points_mm = np.array([
+            [0.0, 0.0],
+            [SCREEN_WIDTH_MM, 0.0],
+            [SCREEN_WIDTH_MM, SCREEN_HEIGHT_MM],
+            [0.0, SCREEN_HEIGHT_MM],
+        ], dtype=np.float32)
+
+        # -------------------------------------------------
+        # estimation pose ecran -> camera
+        # on teste IPPE puis ITERATIVE, on garde la meilleure
+        # -------------------------------------------------
+        candidates = []
+
+        for flag_name, flag in [
+            ("IPPE", cv2.SOLVEPNP_IPPE),
+            ("ITERATIVE", cv2.SOLVEPNP_ITERATIVE),
+        ]:
+            ok, rvec, tvec = cv2.solvePnP(
+                object_points_m,
+                cam_points_raw,
+                K_cam,
+                dist_cam,
+                flags=flag
+            )
+            if ok:
+                mean_err, per_point_errs, proj_pts = compute_reprojection_error(
+                    object_points_m,
+                    cam_points_raw,
+                    rvec,
+                    tvec,
+                    K_cam,
+                    dist_cam
+                )
+                candidates.append((flag_name, rvec, tvec, mean_err, per_point_errs, proj_pts))
+
+        if not candidates:
+            raise RuntimeError("solvePnP a echoue pour toutes les methodes.")
+
+        best = min(candidates, key=lambda x: x[3])
+        best_flag, rvec_sc, tvec_sc, pnp_mean_err, pnp_per_point_errs, pnp_proj_pts = best
+
+        print("\n=== RESULTATS ===")
+        print("Methode solvePnP choisie :", best_flag)
+        print("Erreur reprojection solvePnP (px) :", pnp_mean_err)
+        print("Erreurs par point :", pnp_per_point_errs)
+
+        R_sc, _ = cv2.Rodrigues(rvec_sc)
+
+        # ecran -> projecteur via stereo camera -> projecteur
+        R_sp = R_cp @ R_sc
+        T_sp = R_cp @ tvec_sc + T_cp
+
+        # homographies analytiques
+        H_screen_to_cam = pose_to_homography(K_cam, R_sc, tvec_sc)
+        H_screen_to_proj = pose_to_homography(K_proj, R_sp, T_sp)
+
+        H_proj = H_screen_to_proj @ np.linalg.inv(H_screen_to_cam)
+        H_proj = H_proj / H_proj[2, 2]
+        H_inv_proj = np.linalg.inv(H_proj)
+
+        # camera undistordue -> grille logique
+        H_graph, _ = cv2.findHomography(cam_points_undist, graph_points)
+        H_graph = H_graph / H_graph[2, 2]
+        H_inv_graph = np.linalg.inv(H_graph)
+
+        H_graph_to_proj = H_proj @ H_inv_graph
+        H_graph_to_proj = H_graph_to_proj / H_graph_to_proj[2, 2]
+
+        H_proj_to_graph = np.linalg.inv(H_graph_to_proj)
+        H_proj_to_graph = H_proj_to_graph / H_proj_to_graph[2, 2]
+
+        # camera undistordue -> mm ecran
+        H_cam_to_screen_mm, _ = cv2.findHomography(cam_points_undist, screen_points_mm)
+        H_cam_to_screen_mm = H_cam_to_screen_mm / H_cam_to_screen_mm[2, 2]
+        H_screen_mm_to_cam = np.linalg.inv(H_cam_to_screen_mm)
+
+        # debug image
+        debug = draw_detected_corner_tags(frozen, detected, cam_points_raw)
+        for p in pnp_proj_pts.reshape(-1, 2):
+            x, y = int(round(float(p[0]))), int(round(float(p[1])))
+            cv2.circle(debug, (x, y), 6, (0, 255, 0), 2)
+
+        cv2.imwrite(str(OUTPUT_DEBUG_PATH), debug)
+
+        calib_data = {
+            "H_proj": H_proj.tolist(),
+            "H_inv_proj": H_inv_proj.tolist(),
+            "H_graph": H_graph.tolist(),
+            "H_inv_graph": H_inv_graph.tolist()
+        }
+
+        with open(OUTPUT_CALIB_PATH, "w", encoding="utf-8") as f:
+            json.dump(calib_data, f, indent=4)
+
+        pose_data = {
+            "method": "aruco_screen_corners_solvepnp_centers",
+            "screen_width_mm": SCREEN_WIDTH_MM,
+            "screen_height_mm": SCREEN_HEIGHT_MM,
+            "corner_tag_ids": CORNER_TAG_IDS,
+            "camera_points_raw_TL_TR_BR_BL": cam_points_raw.tolist(),
+            "camera_points_undist_TL_TR_BR_BL": cam_points_undist.tolist(),
+            "screen_points_mm_TL_TR_BR_BL": screen_points_mm.tolist(),
+            "graph_points_TL_TR_BR_BL": graph_points.tolist(),
+            "camera_matrix": K_cam.tolist(),
+            "camera_dist_coeffs": dist_cam.tolist(),
+            "projector_matrix": K_proj.tolist(),
+            "projector_dist_coeffs": dist_proj.tolist(),
+            "R_camera_to_projector": R_cp.tolist(),
+            "T_camera_to_projector": T_cp.tolist(),
+            "solvepnp_method_selected": best_flag,
+            "solvepnp_mean_reprojection_error_px": pnp_mean_err,
+            "solvepnp_per_point_errors_px": pnp_per_point_errs,
+            "rvec_screen_to_camera": rvec_sc.tolist(),
+            "tvec_screen_to_camera": tvec_sc.tolist(),
+            "R_screen_to_camera": R_sc.tolist(),
+            "R_screen_to_projector": R_sp.tolist(),
+            "T_screen_to_projector": T_sp.tolist(),
+            "H_proj": H_proj.tolist(),
+            "H_inv_proj": H_inv_proj.tolist(),
+            "H_graph": H_graph.tolist(),
+            "H_inv_graph": H_inv_graph.tolist(),
+            "H_cam_to_screen_mm": H_cam_to_screen_mm.tolist(),
+            "H_screen_mm_to_cam": H_screen_mm_to_cam.tolist()
+        }
+
+        with open(OUTPUT_POSE_PATH, "w", encoding="utf-8") as f:
+            json.dump(pose_data, f, indent=4)
+
+        runtime_mapping_data = {
+            "metadata": {
+                "grid_size": GRID_SIZE,
+                "projector_width": PROJECTOR_WIDTH,
+                "projector_height": PROJECTOR_HEIGHT,
+                "screen_width_mm": SCREEN_WIDTH_MM,
+                "screen_height_mm": SCREEN_HEIGHT_MM,
+                "source_pose_method": "aruco_screen_corners_solvepnp_centers"
+            },
+            "screen_pose": {
+                "rvec_screen_to_camera": rvec_sc.tolist(),
+                "tvec_screen_to_camera": tvec_sc.tolist(),
+                "R_screen_to_camera": R_sc.tolist(),
+                "R_screen_to_projector": R_sp.tolist(),
+                "T_screen_to_projector": T_sp.tolist()
+            },
+            "homographies": {
+                "H_cam_undist_to_proj": H_proj.tolist(),
+                "H_proj_to_cam_undist": H_inv_proj.tolist(),
+                "H_cam_undist_to_graph": H_graph.tolist(),
+                "H_graph_to_cam_undist": H_inv_graph.tolist(),
+                "H_graph_to_proj": H_graph_to_proj.tolist(),
+                "H_proj_to_graph": H_proj_to_graph.tolist()
+            },
+            "reference_points": {
+                "corner_tag_ids": CORNER_TAG_IDS,
+                "camera_points_raw_TL_TR_BR_BL": cam_points_raw.tolist(),
+                "camera_points_undist_TL_TR_BR_BL": cam_points_undist.tolist(),
+                "screen_points_mm_TL_TR_BR_BL": screen_points_mm.tolist(),
+                "graph_points_TL_TR_BR_BL": graph_points.tolist()
+            }
+        }
+
+        with open(RUNTIME_MAPPING_PATH, "w", encoding="utf-8") as f:
+            json.dump(runtime_mapping_data, f, indent=4)
+
+        print("-", RUNTIME_MAPPING_PATH)
+        print("\nFichiers sauvegardes :")
+        print("-", OUTPUT_CALIB_PATH)
+        print("-", OUTPUT_POSE_PATH)
+        print("-", OUTPUT_DEBUG_PATH)
+
+    finally:
+        cap.release()
+        projector.close()
+        cv2.destroyAllWindows()
+
+
+if __name__ == "__main__":
+    main()
