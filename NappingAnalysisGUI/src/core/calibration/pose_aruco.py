@@ -33,6 +33,19 @@ DISPLAY_RECT_HEIGHT = 2200
 DISPLAY_BG_LEVEL = 220
 DISPLAY_BORDER_THICKNESS = 8
 
+
+# =========================================================
+# POSITIONS PHYSIQUES DES POINTS DE REFERENCE (en mm)
+# Ces points doivent correspondre EXACTEMENT aux coins de tags
+# que tu sélectionnes dans detect_corner_tags().
+# Repère écran :
+#   origine = coin haut-gauche de la surface utile
+#   x vers la droite, y vers le bas
+# =========================================================
+REF_TL_MM = (10.0, 10.0)
+REF_TR_MM = (590.0, 10.0)
+REF_BR_MM = (580.0, 580.0)
+REF_BL_MM = (10.0, 580.0)
 # IDs ArUco des 4 coins de la surface utile
 CORNER_TAG_IDS = {
     "TL": 42,
@@ -236,6 +249,22 @@ def compute_reprojection_error(objpoints, imgpoints, rvec, tvec, K, dist):
     d = np.linalg.norm(img - proj_2d, axis=1)
     return float(np.mean(d)), d.tolist(), proj
 
+def build_reference_points():
+    screen_points_mm = np.array([
+        [REF_TL_MM[0], REF_TL_MM[1]],
+        [REF_TR_MM[0], REF_TR_MM[1]],
+        [REF_BR_MM[0], REF_BR_MM[1]],
+        [REF_BL_MM[0], REF_BL_MM[1]],
+    ], dtype=np.float32)
+
+    object_points_m = np.array([
+        [REF_TL_MM[0] / 1000.0, REF_TL_MM[1] / 1000.0, 0.0],
+        [REF_TR_MM[0] / 1000.0, REF_TR_MM[1] / 1000.0, 0.0],
+        [REF_BR_MM[0] / 1000.0, REF_BR_MM[1] / 1000.0, 0.0],
+        [REF_BL_MM[0] / 1000.0, REF_BL_MM[1] / 1000.0, 0.0],
+    ], dtype=np.float32)
+
+    return screen_points_mm, object_points_m
 def estimate_best_pose_from_frame(frame, detector, K_cam, dist_cam, K_proj, dist_proj, R_cp, T_cp):
     detected, cam_points_raw, gray = detect_corner_tags(frame, detector)
 
@@ -244,25 +273,13 @@ def estimate_best_pose_from_frame(frame, detector, K_cam, dist_cam, K_proj, dist
 
     cam_points_undist = undistort_pixel_points(cam_points_raw, K_cam, dist_cam)
 
-    object_points_m = np.array([
-        [0.0, 0.0, 0.0],
-        [SCREEN_WIDTH_MM / 1000.0, 0.0, 0.0],
-        [SCREEN_WIDTH_MM / 1000.0, SCREEN_HEIGHT_MM / 1000.0, 0.0],
-        [0.0, SCREEN_HEIGHT_MM / 1000.0, 0.0],
-    ], dtype=np.float32)
+    screen_points_mm, object_points_m = build_reference_points()
 
     graph_points = np.array([
         [0, 0],
         [GRID_SIZE - 1, 0],
         [GRID_SIZE - 1, GRID_SIZE - 1],
         [0, GRID_SIZE - 1],
-    ], dtype=np.float32)
-
-    screen_points_mm = np.array([
-        [0.0, 0.0],
-        [SCREEN_WIDTH_MM, 0.0],
-        [SCREEN_WIDTH_MM, SCREEN_HEIGHT_MM],
-        [0.0, SCREEN_HEIGHT_MM],
     ], dtype=np.float32)
 
     candidates = []
@@ -489,6 +506,94 @@ def draw_detected_corner_tags(img, detected, cam_points_raw=None):
 
     return out
 
+def show_projected_validation(projector, H_graph_to_proj):
+    grid_img = build_validation_grid_image()
+
+    warped = cv2.warpPerspective(
+        grid_img,
+        H_graph_to_proj,
+        (PROJECTOR_WIDTH, PROJECTOR_HEIGHT)
+    )
+
+    while True:
+        projector.show(warped)
+        key = cv2.waitKey(30) & 0xFF
+
+        if key == ord("y"):
+            return True
+        elif key == ord("n") or key == ord("q") or key == 27:
+            return False
+
+def build_validation_grid_image():
+    img = np.zeros((GRID_SIZE, GRID_SIZE, 3), dtype=np.uint8)
+
+    # fond noir
+    img[:] = (0, 0, 0)
+
+    # contour complet de la grille logique
+    cv2.rectangle(
+        img,
+        (0, 0),
+        (GRID_SIZE - 1, GRID_SIZE - 1),
+        (255, 255, 255),
+        4
+    )
+
+    # grille
+    n_div = 14
+    xs = np.linspace(0, GRID_SIZE - 1, n_div + 1).astype(int)
+    ys = np.linspace(0, GRID_SIZE - 1, n_div + 1).astype(int)
+
+    for x in xs:
+        cv2.line(img, (x, 0), (x, GRID_SIZE - 1), (0, 255, 0), 2)
+
+    for y in ys:
+        cv2.line(img, (0, y), (GRID_SIZE - 1, y), (0, 255, 0), 2)
+
+    # centre
+    c = (GRID_SIZE // 2, GRID_SIZE // 2)
+    cv2.circle(img, c, 12, (0, 0, 255), -1)
+    cv2.putText(
+        img,
+        "CENTER",
+        (c[0] - 45, c[1] - 18),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.6,
+        (0, 0, 255),
+        2
+    )
+
+    # coins
+    corners = [
+        ((10, 10), "TL"),
+        ((GRID_SIZE - 11, 10), "TR"),
+        ((GRID_SIZE - 11, GRID_SIZE - 11), "BR"),
+        ((10, GRID_SIZE - 11), "BL"),
+    ]
+
+    for (x, y), label in corners:
+        cv2.circle(img, (x, y), 10, (255, 0, 255), -1)
+
+        if label == "TL":
+            tx, ty = x + 12, y + 28
+        elif label == "TR":
+            tx, ty = x - 55, y + 28
+        elif label == "BR":
+            tx, ty = x - 55, y - 12
+        else:
+            tx, ty = x + 12, y - 12
+
+        cv2.putText(
+            img,
+            label,
+            (tx, ty),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.75,
+            (255, 255, 0),
+            2
+        )
+
+    return img
 
 # =========================================================
 # MAIN
@@ -595,6 +700,14 @@ def main():
         H_proj_to_graph = best_result["H_proj_to_graph"]
         H_cam_to_screen_mm = best_result["H_cam_to_screen_mm"]
         H_screen_mm_to_cam = best_result["H_screen_mm_to_cam"]
+        print("\nValidation visuelle de la projection...")
+        print("Touches : y = accepter / n = rejeter")
+
+        accepted = show_projected_validation(projector, H_graph_to_proj)
+
+        if not accepted:
+            print("Pose rejetee.")
+            return 
 
         print("\nPoints camera bruts detectes (TL, TR, BR, BL) :")
         print(cam_points_raw)
@@ -623,7 +736,7 @@ def main():
             json.dump(calib_data, f, indent=4)
 
         pose_data = {
-            "method": "aruco_screen_corners_solvepnp_centers",
+            "method": "aruco_screen_reference_points_solvepnp_best_frame",
             "screen_width_mm": SCREEN_WIDTH_MM,
             "screen_height_mm": SCREEN_HEIGHT_MM,
             "corner_tag_ids": CORNER_TAG_IDS,
@@ -663,7 +776,7 @@ def main():
                 "projector_height": PROJECTOR_HEIGHT,
                 "screen_width_mm": SCREEN_WIDTH_MM,
                 "screen_height_mm": SCREEN_HEIGHT_MM,
-                "source_pose_method": "aruco_screen_corners_solvepnp_centers"
+                "source_pose_method": "aruco_screen_reference_points_solvepnp_best_frame"
             },
             "screen_pose": {
                 "rvec_screen_to_camera": rvec_sc.tolist(),
