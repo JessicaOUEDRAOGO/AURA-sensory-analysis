@@ -381,29 +381,7 @@ class Algorithm_Analysis(QObject):
 
                     state = self._update_marker_state(marker_id_int, camera_point)
 
-                    # Coordonnées V2 via mapper
-                    # projector_point = self.mapper.camera_raw_to_projector(camera_point)
-                    # graph_point = self.mapper.camera_raw_to_graph(camera_point)
-
-                    # projector_coords_ArUco.append([marker_id_int, projector_point])
-                    # graph_coords_ArUco.append([marker_id_int, graph_point])
-
-                    # # taille approx du tag en coordonnées projecteur
-                    # projector_corners = [
-                    #     self.mapper.camera_raw_to_projector(corner[0][j]) for j in range(4)
-                    # ]
-                    # marker_size = int(np.linalg.norm(projector_corners[0] - projector_corners[1])) * 2
-                    # marker_size = max(marker_size, 20)
-
-                    # projector_x = int(projector_point[0])
-                    # projector_y = int(projector_point[1])
                     camera_center = np.mean(corner[0], axis=0).astype(np.float32)
-
-                    projector_center_raw = self.mapper.camera_raw_to_projector(camera_center)
-                    proj_h = self.mapper.projector_height
-                    projector_center = self.display_manager.transform_projector_point_to_display(
-                        projector_center_raw, proj_h
-                    )
 
                     graph_center = self.mapper.camera_raw_to_graph(camera_center)
 
@@ -411,6 +389,14 @@ class Algorithm_Analysis(QObject):
                         [self.mapper.camera_raw_to_projector(corner[0][j]) for j in range(4)],
                         dtype=np.float32
                     )
+
+                    projector_center_raw = np.mean(projector_corners_raw, axis=0)
+
+                    proj_h = self.mapper.projector_height
+                    projector_center = self.display_manager.transform_projector_point_to_display(
+                        projector_center_raw, proj_h
+                    )
+                    
 
                     projector_corners = np.array(
                         [self.display_manager.transform_projector_point_to_display(p, proj_h) for p in projector_corners_raw],
@@ -426,9 +412,9 @@ class Algorithm_Analysis(QObject):
                     projector_y = int(round(projector_center[1]))
                     marker_id = str(marker_id_int)
                     # projection de carré qui represente la projection directe des tags Aruco détectés
-                    # pts = projector_corners.astype(np.int32).reshape((-1, 1, 2))
-                    # cv2.polylines(current_image_background, [pts], True, (0, 255, 0), 2)
-                    # cv2.circle(current_image_background, (projector_x, projector_y), 8, (0, 0, 255), -1)
+                    pts = projector_corners.astype(np.int32).reshape((-1, 1, 2))
+                    cv2.polylines(current_image_background, [pts], True, (0, 255, 0), 2)
+                    cv2.circle(current_image_background, (projector_x, projector_y), 8, (0, 0, 255), -1)
                     # Overlay seulement si statique et module activé
                     if state["is_static"] and overlay_on:
                         if f"marker_{marker_id}" in ra_config:
