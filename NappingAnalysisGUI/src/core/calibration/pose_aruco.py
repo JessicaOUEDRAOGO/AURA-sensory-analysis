@@ -40,6 +40,8 @@ CORNER_TAG_IDS = {
     "BR": 40,
     "BL": 41,
 }
+AUTO_SEARCH_NUM_FRAMES = 120
+AUTO_SEARCH_FLUSH = 1
 
 # chemins
 BASE_DIR = Path(__file__).resolve().parent
@@ -234,7 +236,118 @@ def compute_reprojection_error(objpoints, imgpoints, rvec, tvec, K, dist):
     d = np.linalg.norm(img - proj_2d, axis=1)
     return float(np.mean(d)), d.tolist(), proj
 
+def estimate_best_pose_from_frame(frame, detector, K_cam, dist_cam, K_proj, dist_proj, R_cp, T_cp):
+    detected, cam_points_raw, gray = detect_corner_tags(frame, detector)
 
+    if cam_points_raw is None:
+        return None
+
+    cam_points_undist = undistort_pixel_points(cam_points_raw, K_cam, dist_cam)
+
+    object_points_m = np.array([
+        [0.0, 0.0, 0.0],
+        [SCREEN_WIDTH_MM / 1000.0, 0.0, 0.0],
+        [SCREEN_WIDTH_MM / 1000.0, SCREEN_HEIGHT_MM / 1000.0, 0.0],
+        [0.0, SCREEN_HEIGHT_MM / 1000.0, 0.0],
+    ], dtype=np.float32)
+
+    graph_points = np.array([
+        [0, 0],
+        [GRID_SIZE - 1, 0],
+        [GRID_SIZE - 1, GRID_SIZE - 1],
+        [0, GRID_SIZE - 1],
+    ], dtype=np.float32)
+
+    screen_points_mm = np.array([
+        [0.0, 0.0],
+        [SCREEN_WIDTH_MM, 0.0],
+        [SCREEN_WIDTH_MM, SCREEN_HEIGHT_MM],
+        [0.0, SCREEN_HEIGHT_MM],
+    ], dtype=np.float32)
+
+    candidates = []
+
+    for flag_name, flag in [
+        ("IPPE", cv2.SOLVEPNP_IPPE),
+        ("ITERATIVE", cv2.SOLVEPNP_ITERATIVE),
+    ]:
+        ok, rvec, tvec = cv2.solvePnP(
+            object_points_m,
+            cam_points_raw,
+            K_cam,
+            dist_cam,
+            flags=flag
+        )
+        if ok:
+            mean_err, per_point_errs, proj_pts = compute_reprojection_error(
+                object_points_m,
+                cam_points_raw,
+                rvec,
+                tvec,
+                K_cam,
+                dist_cam
+            )
+            candidates.append((flag_name, rvec, tvec, mean_err, per_point_errs, proj_pts))
+
+    if not candidates:
+        return None
+
+    best_flag, rvec_sc, tvec_sc, pnp_mean_err, pnp_per_point_errs, pnp_proj_pts = min(
+        candidates, key=lambda x: x[3]
+    )
+
+    R_sc, _ = cv2.Rodrigues(rvec_sc)
+
+    R_sp = R_cp @ R_sc
+    T_sp = R_cp @ tvec_sc + T_cp
+
+    H_screen_to_cam = pose_to_homography(K_cam, R_sc, tvec_sc)
+    H_screen_to_proj = pose_to_homography(K_proj, R_sp, T_sp)
+
+    H_proj = H_screen_to_proj @ np.linalg.inv(H_screen_to_cam)
+    H_proj = H_proj / H_proj[2, 2]
+    H_inv_proj = np.linalg.inv(H_proj)
+
+    H_graph, _ = cv2.findHomography(cam_points_undist, graph_points)
+    H_graph = H_graph / H_graph[2, 2]
+    H_inv_graph = np.linalg.inv(H_graph)
+
+    H_graph_to_proj = H_proj @ H_inv_graph
+    H_graph_to_proj = H_graph_to_proj / H_graph_to_proj[2, 2]
+
+    H_proj_to_graph = np.linalg.inv(H_graph_to_proj)
+    H_proj_to_graph = H_proj_to_graph / H_proj_to_graph[2, 2]
+
+    H_cam_to_screen_mm, _ = cv2.findHomography(cam_points_undist, screen_points_mm)
+    H_cam_to_screen_mm = H_cam_to_screen_mm / H_cam_to_screen_mm[2, 2]
+    H_screen_mm_to_cam = np.linalg.inv(H_cam_to_screen_mm)
+
+    return {
+        "frame": frame.copy(),
+        "gray": gray.copy(),
+        "detected": detected,
+        "cam_points_raw": cam_points_raw.copy(),
+        "cam_points_undist": cam_points_undist.copy(),
+        "screen_points_mm": screen_points_mm.copy(),
+        "graph_points": graph_points.copy(),
+        "best_flag": best_flag,
+        "rvec_sc": rvec_sc.copy(),
+        "tvec_sc": tvec_sc.copy(),
+        "R_sc": R_sc.copy(),
+        "R_sp": R_sp.copy(),
+        "T_sp": T_sp.copy(),
+        "pnp_mean_err": float(pnp_mean_err),
+        "pnp_per_point_errs": list(pnp_per_point_errs),
+        "pnp_proj_pts": pnp_proj_pts.copy(),
+        "H_proj": H_proj.copy(),
+        "H_inv_proj": H_inv_proj.copy(),
+        "H_graph": H_graph.copy(),
+        "H_inv_graph": H_inv_graph.copy(),
+        "H_graph_to_proj": H_graph_to_proj.copy(),
+        "H_proj_to_graph": H_proj_to_graph.copy(),
+        "H_cam_to_screen_mm": H_cam_to_screen_mm.copy(),
+        "H_screen_mm_to_cam": H_screen_mm_to_cam.copy(),
+    }
 # =========================================================
 # ARUCO
 # =========================================================
@@ -401,147 +514,95 @@ def main():
     try:
         time.sleep(1.0)
 
-        print("\nTouches :")
-        print("  r = rafraichir")
-        print("  s = sauvegarder la pose")
-        print("  q = quitter")
-
+        print(f"\nRecherche automatique sur {AUTO_SEARCH_NUM_FRAMES} frames...")
         cv2.namedWindow("Manual Screen Pose", cv2.WINDOW_NORMAL)
 
-        frozen = None
-        frozen_gray = None
-        cam_points_raw = None
-        detected = {}
+        best_result = None
+        valid_count = 0
 
-        while True:
-            frame = grab_frame(cap, n_flush=1)
-            detected, current_cam_points_raw, gray = detect_corner_tags(frame, detector)
+        for idx in range(AUTO_SEARCH_NUM_FRAMES):
+            frame = grab_frame(cap, n_flush=AUTO_SEARCH_FLUSH)
 
+            detected, current_cam_points_raw, _ = detect_corner_tags(frame, detector)
             preview = draw_detected_corner_tags(frame, detected, current_cam_points_raw)
+            cv2.putText(
+                preview,
+                f"Frame {idx + 1}/{AUTO_SEARCH_NUM_FRAMES}",
+                (20, 130),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                (0, 255, 255),
+                2
+            )
+
+            if best_result is not None:
+                cv2.putText(
+                    preview,
+                    f"Best err: {best_result['pnp_mean_err']:.3f}px",
+                    (20, 165),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    (0, 255, 0),
+                    2
+                )
+
             cv2.imshow("Manual Screen Pose", preview)
-
-            key = cv2.waitKey(20) & 0xFF
-
+            key = cv2.waitKey(1) & 0xFF
             if key == ord("q"):
                 print("Sortie demandee.")
                 return
 
-            elif key == ord("r"):
+            result = estimate_best_pose_from_frame(
+                frame, detector, K_cam, dist_cam, K_proj, dist_proj, R_cp, T_cp
+            )
+
+            if result is None:
                 continue
 
-            elif key == ord("s"):
-                if current_cam_points_raw is None:
-                    print("Les 4 tags de coin ne sont pas detectes correctement.")
-                    continue
+            valid_count += 1
 
-                # capture moyenne pour stabiliser l'image au moment de la sauvegarde
-                frozen = average_frames(cap, n_frames=8, n_flush_each=1)
-                detected_frozen, frozen_cam_points_raw, frozen_gray_tmp = detect_corner_tags(frozen, detector)
+            if best_result is None or result["pnp_mean_err"] < best_result["pnp_mean_err"]:
+                best_result = result
 
-                if frozen_cam_points_raw is None:
-                    print("Les 4 tags n'ont pas ete retrouves sur la capture moyenne. Reessaie.")
-                    continue
+        if best_result is None:
+            raise RuntimeError("Aucune frame valide avec les 4 tags detectes.")
 
-                frozen_gray = frozen_gray_tmp
-                cam_points_raw = frozen_cam_points_raw.copy()
-                detected = detected_frozen
-                break
+        print(f"\nFrames valides : {valid_count}/{AUTO_SEARCH_NUM_FRAMES}")
+
+        frozen = best_result["frame"]
+        frozen_gray = best_result["gray"]
+        detected = best_result["detected"]
+        cam_points_raw = best_result["cam_points_raw"]
+        cam_points_undist = best_result["cam_points_undist"]
+        screen_points_mm = best_result["screen_points_mm"]
+        graph_points = best_result["graph_points"]
+
+        best_flag = best_result["best_flag"]
+        rvec_sc = best_result["rvec_sc"]
+        tvec_sc = best_result["tvec_sc"]
+        R_sc = best_result["R_sc"]
+        R_sp = best_result["R_sp"]
+        T_sp = best_result["T_sp"]
+        pnp_mean_err = best_result["pnp_mean_err"]
+        pnp_per_point_errs = best_result["pnp_per_point_errs"]
+        pnp_proj_pts = best_result["pnp_proj_pts"]
+
+        H_proj = best_result["H_proj"]
+        H_inv_proj = best_result["H_inv_proj"]
+        H_graph = best_result["H_graph"]
+        H_inv_graph = best_result["H_inv_graph"]
+        H_graph_to_proj = best_result["H_graph_to_proj"]
+        H_proj_to_graph = best_result["H_proj_to_graph"]
+        H_cam_to_screen_mm = best_result["H_cam_to_screen_mm"]
+        H_screen_mm_to_cam = best_result["H_screen_mm_to_cam"]
 
         print("\nPoints camera bruts detectes (TL, TR, BR, BL) :")
         print(cam_points_raw)
-
-        cam_points_undist = undistort_pixel_points(cam_points_raw, K_cam, dist_cam)
-
-        # coins physiques de la plaque ecran
-        object_points_m = np.array([
-            [0.0, 0.0, 0.0],
-            [SCREEN_WIDTH_MM / 1000.0, 0.0, 0.0],
-            [SCREEN_WIDTH_MM / 1000.0, SCREEN_HEIGHT_MM / 1000.0, 0.0],
-            [0.0, SCREEN_HEIGHT_MM / 1000.0, 0.0],
-        ], dtype=np.float32)
-
-        graph_points = np.array([
-            [0, 0],
-            [GRID_SIZE - 1, 0],
-            [GRID_SIZE - 1, GRID_SIZE - 1],
-            [0, GRID_SIZE - 1],
-        ], dtype=np.float32)
-
-        screen_points_mm = np.array([
-            [0.0, 0.0],
-            [SCREEN_WIDTH_MM, 0.0],
-            [SCREEN_WIDTH_MM, SCREEN_HEIGHT_MM],
-            [0.0, SCREEN_HEIGHT_MM],
-        ], dtype=np.float32)
-
-        # -------------------------------------------------
-        # estimation pose ecran -> camera
-        # on teste IPPE puis ITERATIVE, on garde la meilleure
-        # -------------------------------------------------
-        candidates = []
-
-        for flag_name, flag in [
-            ("IPPE", cv2.SOLVEPNP_IPPE),
-            ("ITERATIVE", cv2.SOLVEPNP_ITERATIVE),
-        ]:
-            ok, rvec, tvec = cv2.solvePnP(
-                object_points_m,
-                cam_points_raw,
-                K_cam,
-                dist_cam,
-                flags=flag
-            )
-            if ok:
-                mean_err, per_point_errs, proj_pts = compute_reprojection_error(
-                    object_points_m,
-                    cam_points_raw,
-                    rvec,
-                    tvec,
-                    K_cam,
-                    dist_cam
-                )
-                candidates.append((flag_name, rvec, tvec, mean_err, per_point_errs, proj_pts))
-
-        if not candidates:
-            raise RuntimeError("solvePnP a echoue pour toutes les methodes.")
-
-        best = min(candidates, key=lambda x: x[3])
-        best_flag, rvec_sc, tvec_sc, pnp_mean_err, pnp_per_point_errs, pnp_proj_pts = best
 
         print("\n=== RESULTATS ===")
         print("Methode solvePnP choisie :", best_flag)
         print("Erreur reprojection solvePnP (px) :", pnp_mean_err)
         print("Erreurs par point :", pnp_per_point_errs)
-
-        R_sc, _ = cv2.Rodrigues(rvec_sc)
-
-        # ecran -> projecteur via stereo camera -> projecteur
-        R_sp = R_cp @ R_sc
-        T_sp = R_cp @ tvec_sc + T_cp
-
-        # homographies analytiques
-        H_screen_to_cam = pose_to_homography(K_cam, R_sc, tvec_sc)
-        H_screen_to_proj = pose_to_homography(K_proj, R_sp, T_sp)
-
-        H_proj = H_screen_to_proj @ np.linalg.inv(H_screen_to_cam)
-        H_proj = H_proj / H_proj[2, 2]
-        H_inv_proj = np.linalg.inv(H_proj)
-
-        # camera undistordue -> grille logique
-        H_graph, _ = cv2.findHomography(cam_points_undist, graph_points)
-        H_graph = H_graph / H_graph[2, 2]
-        H_inv_graph = np.linalg.inv(H_graph)
-
-        H_graph_to_proj = H_proj @ H_inv_graph
-        H_graph_to_proj = H_graph_to_proj / H_graph_to_proj[2, 2]
-
-        H_proj_to_graph = np.linalg.inv(H_graph_to_proj)
-        H_proj_to_graph = H_proj_to_graph / H_proj_to_graph[2, 2]
-
-        # camera undistordue -> mm ecran
-        H_cam_to_screen_mm, _ = cv2.findHomography(cam_points_undist, screen_points_mm)
-        H_cam_to_screen_mm = H_cam_to_screen_mm / H_cam_to_screen_mm[2, 2]
-        H_screen_mm_to_cam = np.linalg.inv(H_cam_to_screen_mm)
 
         # debug image
         debug = draw_detected_corner_tags(frozen, detected, cam_points_raw)
