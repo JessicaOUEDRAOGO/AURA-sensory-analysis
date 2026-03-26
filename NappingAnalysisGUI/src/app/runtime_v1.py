@@ -22,10 +22,10 @@ class Algorithm_Analysis(QObject):
         parent,
         display_manager: DisplayManager,
         image_background,
-        H_projector=None,       # conservé pour compatibilité
-        H_inv_projector=None,   # conservé pour compatibilité
-        H_graph=None,           # conservé pour compatibilité
-        H_inv_graph=None,       # conservé pour compatibilité
+        H_projector=None,       # compat legacy
+        H_inv_projector=None,   # compat legacy
+        H_graph=None,           # compat legacy
+        H_inv_graph=None,       # compat legacy
         grid_size=700,
         output_name="data",
         record_window=None,
@@ -36,6 +36,7 @@ class Algorithm_Analysis(QObject):
         protocol=None
     ):
         super().__init__()
+
         self.parent = parent
         self.display_manager = display_manager
         self.grid_size = int(grid_size)
@@ -47,13 +48,13 @@ class Algorithm_Analysis(QObject):
         self.record_window = record_window
 
         # ------------------------------------------------------------------
-        # Validation du fond
+        # Image de fond / média
         # ------------------------------------------------------------------
         self.image_background = self._validate_background_image(image_background)
         self.image_height, self.image_width = self.image_background.shape[:2]
 
         # ------------------------------------------------------------------
-        # Output CSV
+        # Sortie CSV
         # ------------------------------------------------------------------
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         if output_dir is None:
@@ -65,13 +66,18 @@ class Algorithm_Analysis(QObject):
         self.output_csv = os.path.join(output_dir, f"{output_name}_{timestamp}.csv")
 
         # ------------------------------------------------------------------
-        # Mapper V2
+        # Mapper géométrique
         # ------------------------------------------------------------------
         self.mapper = None
+        self.H_graph_to_proj_runtime = None
+
         try:
             self.mapper = CoordinateMapper()
             self.mapper.load()
-            print("[V2] CoordinateMapper chargé avec succès.")
+            self.H_graph_to_proj_runtime = self.mapper.get_graph_to_projector_homography()
+
+            print("[RUNTIME] CoordinateMapper chargé avec succès.")
+            print("[RUNTIME] H_graph_to_proj chargée depuis calibration_data.json.")
         except Exception as e:
             print(f"[WARNING] Impossible de charger CoordinateMapper : {e}")
 
@@ -96,14 +102,14 @@ class Algorithm_Analysis(QObject):
         self.move_threshold = 10.0
         self.stable_count_required = 5
 
-        # Multi-dim
+        # MultiDim
         self.extra_dimensions = {}
         self.current_marker_id = None
         self.mode_multidim = True
         self.colormap = cv2.COLORMAP_COOL
 
         # ------------------------------------------------------------------
-        # Compatibilité legacy (non utilisés dans le flux actif)
+        # Compatibilité legacy
         # ------------------------------------------------------------------
         self.H_projector = H_projector
         self.H_inv_projector = H_inv_projector
@@ -123,7 +129,6 @@ class Algorithm_Analysis(QObject):
                 "Attendu une image couleur (H, W, 3)."
             )
 
-        # on force uint8 si besoin
         if image.dtype != np.uint8:
             image = np.clip(image, 0, 255).astype(np.uint8)
 
@@ -174,51 +179,6 @@ class Algorithm_Analysis(QObject):
             print(f"⚠️ Erreur lecture config ({path}) : {e}")
             return {}
 
-    def _show_timeline_assets(self):
-        projection_on = self.is_enabled("projection_media", False)
-        adv_logs = self.is_enabled("advanced_logs", False)
-
-        if not projection_on:
-            if adv_logs:
-                print("[MODULES] projection_media=OFF -> consignes ignorées")
-            return
-
-        if not self.timeline_steps:
-            if adv_logs:
-                print("[MODULES] projection_media=ON mais timeline_steps vide -> aucune consigne")
-            return
-
-        assets_by_id = {a.id: a for a in self.assets}
-
-        for step in self.timeline_steps:
-            if not self.running:
-                break
-
-            # Pause / step vide
-            if step.pause or step.asset_ref is None:
-                t0 = datetime.now()
-                while self.running and (datetime.now() - t0).total_seconds() < step.duration_s:
-                    self.display_manager.display_image_on_projector_monitor(self.image_background)
-                    _ = self.parent.camera_manager.get_frame()
-                    cv2.waitKey(1)
-                continue
-
-            asset = assets_by_id.get(step.asset_ref)
-            if not asset:
-                continue
-
-            if asset.asset_type == "image":
-                img = cv2.imread(asset.path)
-                if img is None:
-                    continue
-
-                img = self.prepare_instruction_image(img, margin_ratio=0.04)
-
-                self.waiting_for_consigne_key = True
-                while self.running and self.waiting_for_consigne_key:
-                    self.display_manager.display_image_on_projector_monitor(img)
-                    _ = self.parent.camera_manager.get_frame()
-                    cv2.waitKey(1)
     def prepare_instruction_image(self, img, margin_ratio=0.04):
         """
         Place l'image dans un canvas noir avec marge de sécurité,
@@ -245,8 +205,56 @@ class Algorithm_Analysis(QObject):
         y0 = (target_h - new_h) // 2
 
         canvas[y0:y0 + new_h, x0:x0 + new_w] = resized
-
         return canvas
+
+    def _show_timeline_assets(self):
+        """
+        Affiche les éventuelles consignes / médias de timeline.
+        """
+        projection_on = self.is_enabled("projection_media", False)
+        adv_logs = self.is_enabled("advanced_logs", False)
+
+        if not projection_on:
+            if adv_logs:
+                print("[MODULES] projection_media=OFF -> consignes ignorées")
+            return
+
+        if not self.timeline_steps:
+            if adv_logs:
+                print("[MODULES] projection_media=ON mais timeline_steps vide -> aucune consigne")
+            return
+
+        assets_by_id = {a.id: a for a in self.assets}
+
+        for step in self.timeline_steps:
+            if not self.running:
+                break
+
+            if step.pause or step.asset_ref is None:
+                t0 = datetime.now()
+                while self.running and (datetime.now() - t0).total_seconds() < step.duration_s:
+                    self.display_manager.display_image_on_projector_monitor(self.image_background)
+                    _ = self.parent.camera_manager.get_frame()
+                    cv2.waitKey(1)
+                continue
+
+            asset = assets_by_id.get(step.asset_ref)
+            if not asset:
+                continue
+
+            if asset.asset_type == "image":
+                img = cv2.imread(asset.path)
+                if img is None:
+                    continue
+
+                img = self.prepare_instruction_image(img, margin_ratio=0.04)
+
+                self.waiting_for_consigne_key = True
+                while self.running and self.waiting_for_consigne_key:
+                    self.display_manager.display_image_on_projector_monitor(img)
+                    _ = self.parent.camera_manager.get_frame()
+                    cv2.waitKey(1)
+
     # ======================================================================
     # Détection / stabilité
     # ======================================================================
@@ -275,210 +283,61 @@ class Algorithm_Analysis(QObject):
         state["last_pos"] = camera_point.copy()
         self.marker_states[marker_id_int] = state
         return state
-    
+
     # ======================================================================
-    # Boucle principale
+    # Fond de projection
     # ======================================================================
-    def detect_and_process(self):
-        from src.core.config.app_config import CALIBRATION_TAG_IDS
-
-        self.running = True
-        print("detect_and_process started")
-
-        overlay_on = self.is_enabled("overlay_ra", False)
-        projection_on = self.is_enabled("projection_media", False)
-        adv_logs = self.is_enabled("advanced_logs", False)
-
-        print("=== RUNTIME DEBUG ===")
-        print("projection_on:", projection_on, "overlay_on:", overlay_on, "adv_logs:", adv_logs)
-        print("timeline_steps:", len(self.timeline_steps))
-        print("assets:", len(self.assets))
-        if self.timeline_steps:
-            s0 = self.timeline_steps[0]
-            print(
-                "step0:",
-                s0.order_index,
-                s0.label,
-                "asset_ref=",
-                s0.asset_ref,
-                "pause=",
-                s0.pause,
-                "duration=",
-                s0.duration_s,
-            )
-        print("=====================")
-
-        if self.mapper is None:
-            print("[ERREUR] CoordinateMapper non disponible. Arrêt.")
-            self.finished_signal.emit()
-            return
-
-        # Config RA seulement si nécessaire
-        ra_config = {}
-        if overlay_on:
-            ra_config = self.load_config(config_path("ra_config.json"))
-        elif adv_logs:
-            print("[MODULES] overlay_ra désactivé -> pas de RA")
-
-        # Affichage éventuel des consignes
-        self._show_timeline_assets()
-        print("Consignes affichées, on continue avec la détection des marqueurs.")
-
-        while self.running:
-            current_image_background = np.zeros_like(self.image_background)
-            # graph_background = np.full((self.grid_size, self.grid_size, 3), 255, dtype=np.uint8)
-            graph_background = self.build_graph_useful_background()
-            proj_w = self.mapper.projector_width
-            proj_h = self.mapper.projector_height
-
-            H_graph_to_proj_corr = self.display_manager.transform_projector_homography_to_display(
-                self.mapper.H_graph_to_proj,
-                proj_h
-            )
-
-            warped_background = cv2.warpPerspective(
-                graph_background,
-                H_graph_to_proj_corr,
-                (self.image_width, self.image_height)
-            )
-
-            current_image_background = warped_background.copy()
-
-            frame = self.parent.camera_manager.get_frame()
-            if frame is None:
-                print("Erreur : Impossible de lire une frame caméra.")
-                break
-
-            if frame.size == 0:
-                print("Erreur : Frame vide.")
-                break
-
-            corners, ids = self._detect_markers(frame)
-
-            # if ids is not None and len(ids) > 0:
-            #     print("IDs détectés bruts :", [int(x[0]) for x in ids])
-            # else:
-            #     print("Aucun ID détecté")
-
-            projector_coords_ArUco = []
-            graph_coords_ArUco = []
-
-            if ids is not None and len(ids) > 0:
-                valid_indices = [
-                    i for i in range(len(ids))
-                    if int(ids[i][0]) not in CALIBRATION_TAG_IDS
-                ]
-
-                ids = ids[valid_indices]
-                corners = [corners[i] for i in valid_indices]
-
-                for i, corner in enumerate(corners):
-                    marker_id_int = int(ids[i][0])
-
-                    center_x = int(np.mean(corner[0][:, 0]))
-                    center_y = int(np.mean(corner[0][:, 1]))
-                    camera_point = np.array([center_x, center_y], dtype=np.float32)
-
-                    state = self._update_marker_state(marker_id_int, camera_point)
-
-                    camera_center = np.mean(corner[0], axis=0).astype(np.float32)
-
-                    graph_center = self.mapper.camera_raw_to_graph(camera_center)
-
-                    projector_corners_raw = np.array(
-                        [self.mapper.camera_raw_to_projector(corner[0][j]) for j in range(4)],
-                        dtype=np.float32
-                    )
-
-                    projector_center_raw = np.mean(projector_corners_raw, axis=0)
-
-                    proj_h = self.mapper.projector_height
-                    projector_center = self.display_manager.transform_projector_point_to_display(
-                        projector_center_raw, proj_h
-                    )
-                    
-
-                    projector_corners = np.array(
-                        [self.display_manager.transform_projector_point_to_display(p, proj_h) for p in projector_corners_raw],
-                        dtype=np.float32
-                    )
-                    projector_coords_ArUco.append([marker_id_int, projector_center])
-                    graph_coords_ArUco.append([marker_id_int, graph_center])
-
-                    marker_size = int(np.linalg.norm(projector_corners[0] - projector_corners[1])) * 2
-                    marker_size = max(marker_size, 20)
-
-                    projector_x = int(round(projector_center[0]))
-                    projector_y = int(round(projector_center[1]))
-                    marker_id = str(marker_id_int)
-                    # projection de carré qui represente la projection directe des tags Aruco détectés
-                    pts = projector_corners.astype(np.int32).reshape((-1, 1, 2))
-                    cv2.polylines(current_image_background, [pts], True, (0, 255, 0), 2)
-                    cv2.circle(current_image_background, (projector_x, projector_y), 8, (0, 0, 255), -1)
-                    # Overlay seulement si statique et module activé
-                    if state["is_static"] and overlay_on:
-                        if f"marker_{marker_id}" in ra_config:
-                            self.draw_from_config(
-                                current_image_background,
-                                ra_config[f"marker_{marker_id}"],
-                                projector_x,
-                                projector_y,
-                                marker_size,
-                                marker_id_int
-                            )
-                        else:
-                            self.draw_default_marker(
-                                current_image_background,
-                                projector_x,
-                                projector_y,
-                                marker_size,
-                                marker_id_int
-                            )
-
-                        if self.mode_multidim:
-                            color = self.get_marker_color(marker_id_int)
-                            self.draw_dim_value(
-                                current_image_background,
-                                projector_x,
-                                projector_y,
-                                marker_id_int,
-                                color
-                            )
-
-            # Grille
-            if self.show_grid and self.record_window is not None:
-                x_min, x_max, y_min, y_max, x_legend, y_legend = self.record_window.get_bounds_from_inputs()
-                current_image_background = DrawUtils.draw_math_grid_on_image(
-                    current_image_background,
-                    x_min, x_max,
-                    y_min, y_max,
-                    x_legend, y_legend,
-                    self.grid_size
-                )
-
-            # Fenêtre caméra
-            if self.status_popUpCamera:
-                self.show_camera_window(frame, corners=corners if ids is not None else None)
-                self._camera_was_active = True
-            else:
-                if hasattr(self, "_camera_was_active") and self._camera_was_active:
-                    cv2.destroyWindow("Camera")
-                    self._camera_was_active = False
-
-            # Projection + signal UI
-            self.display_manager.display_image_on_projector_monitor(current_image_background)
-            self.data_signal.emit({"data": graph_coords_ArUco})
-
-            # Buffer export
-            self.save_to_buffer(graph_coords_ArUco)
-
-        self.save_to_csv()
-        print("detect_and_process terminé")
-        self.finished_signal.emit()
-    
     def build_graph_useful_background(self):
-        bg = np.full((self.grid_size, self.grid_size, 3), 255, dtype=np.uint8)
-        return bg
+        """
+        Fond logique dans le repère graph.
+        """
+        return np.full((self.grid_size, self.grid_size, 3), 255, dtype=np.uint8)
+
+    def _build_projector_background(self, proj_w, proj_h):
+        """
+        Construit le fond final dans le repère projecteur.
+        """
+        graph_background = self.build_graph_useful_background()
+
+        warped_background = cv2.warpPerspective(
+            graph_background,
+            self.H_graph_to_proj_runtime,
+            (proj_w, proj_h)
+        )
+
+        return warped_background
+
+    # ======================================================================
+    # Calcul des coordonnées de tags
+    # ======================================================================
+    def _compute_marker_projector_geometry(self, corner):
+        """
+        À partir des 4 coins ArUco détectés en caméra brute, calcule :
+        - le centre graph
+        - les 4 coins projecteur
+        - le centre projecteur
+        - une taille utile pour les overlays
+        """
+        camera_center = np.mean(corner[0], axis=0).astype(np.float32)
+        graph_center = self.mapper.camera_raw_to_graph(camera_center)
+
+        projector_corners = np.array(
+            [self.mapper.camera_raw_to_projector(corner[0][j]) for j in range(4)],
+            dtype=np.float32
+        )
+
+        projector_center = np.mean(projector_corners, axis=0)
+
+        marker_size = int(np.linalg.norm(projector_corners[0] - projector_corners[1])) * 2
+        marker_size = max(marker_size, 20)
+
+        return {
+            "graph_center": graph_center,
+            "projector_corners": projector_corners,
+            "projector_center": projector_center,
+            "marker_size": marker_size,
+        }
+
     # ======================================================================
     # Dessin overlays
     # ======================================================================
@@ -535,6 +394,7 @@ class Algorithm_Analysis(QObject):
         if rotation != 0:
             rotation_matrix = cv2.getRotationMatrix2D((abs_x, abs_y), rotation, 1.0)
             temp_image = np.zeros_like(img, dtype=np.uint8)
+
             cv2.putText(
                 temp_image,
                 text,
@@ -544,6 +404,7 @@ class Algorithm_Analysis(QObject):
                 color,
                 2
             )
+
             rotated_text = cv2.warpAffine(temp_image, rotation_matrix, (img.shape[1], img.shape[0]))
             mask = cv2.cvtColor(rotated_text, cv2.COLOR_BGR2GRAY)
             _, mask = cv2.threshold(mask, 1, 255, cv2.THRESH_BINARY)
@@ -602,6 +463,7 @@ class Algorithm_Analysis(QObject):
                     pt1 = tuple(pts[i])
                     pt2 = tuple(pts[(i + 1) % 4])
                     cv2.line(preview, pt1, pt2, (0, 255, 0), thickness=4)
+
                 center = tuple(np.mean(pts, axis=0).astype(int))
                 cv2.circle(preview, center, 10, (0, 0, 255), thickness=-1)
 
@@ -706,3 +568,158 @@ class Algorithm_Analysis(QObject):
             color,
             2
         )
+
+    # ======================================================================
+    # Boucle principale
+    # ======================================================================
+    def detect_and_process(self):
+        from src.core.config.app_config import CALIBRATION_TAG_IDS
+
+        self.running = True
+        print("detect_and_process started")
+
+        overlay_on = self.is_enabled("overlay_ra", False)
+        projection_on = self.is_enabled("projection_media", False)
+        adv_logs = self.is_enabled("advanced_logs", False)
+
+        print("=== RUNTIME DEBUG ===")
+        print("projection_on:", projection_on, "overlay_on:", overlay_on, "adv_logs:", adv_logs)
+        print("timeline_steps:", len(self.timeline_steps))
+        print("assets:", len(self.assets))
+        if self.timeline_steps:
+            s0 = self.timeline_steps[0]
+            print(
+                "step0:",
+                s0.order_index,
+                s0.label,
+                "asset_ref=",
+                s0.asset_ref,
+                "pause=",
+                s0.pause,
+                "duration=",
+                s0.duration_s,
+            )
+        print("=====================")
+
+        if self.mapper is None or self.H_graph_to_proj_runtime is None:
+            print("[ERREUR] Mapper ou homographie graph->projecteur indisponible. Arrêt.")
+            self.finished_signal.emit()
+            return
+
+        ra_config = {}
+        if overlay_on:
+            ra_config = self.load_config(config_path("ra_config.json"))
+        elif adv_logs:
+            print("[MODULES] overlay_ra désactivé -> pas de RA")
+
+        self._show_timeline_assets()
+        print("Consignes affichées, on continue avec la détection des marqueurs.")
+
+        while self.running:
+            proj_w = int(self.mapper.projector_width)
+            proj_h = int(self.mapper.projector_height)
+
+            current_image_background = self._build_projector_background(proj_w, proj_h)
+
+            frame = self.parent.camera_manager.get_frame()
+            if frame is None:
+                print("Erreur : Impossible de lire une frame caméra.")
+                break
+
+            if frame.size == 0:
+                print("Erreur : Frame vide.")
+                break
+
+            corners, ids = self._detect_markers(frame)
+
+            graph_coords_ArUco = []
+
+            if ids is not None and len(ids) > 0:
+                valid_indices = [
+                    i for i in range(len(ids))
+                    if int(ids[i][0]) not in CALIBRATION_TAG_IDS
+                ]
+
+                ids = ids[valid_indices]
+                corners = [corners[i] for i in valid_indices]
+
+                for i, corner in enumerate(corners):
+                    marker_id_int = int(ids[i][0])
+
+                    center_x = int(np.mean(corner[0][:, 0]))
+                    center_y = int(np.mean(corner[0][:, 1]))
+                    camera_point = np.array([center_x, center_y], dtype=np.float32)
+
+                    state = self._update_marker_state(marker_id_int, camera_point)
+
+                    geom = self._compute_marker_projector_geometry(corner)
+
+                    graph_center = geom["graph_center"]
+                    projector_corners = geom["projector_corners"]
+                    projector_center = geom["projector_center"]
+                    marker_size = geom["marker_size"]
+
+                    graph_coords_ArUco.append([marker_id_int, graph_center])
+
+                    projector_x = int(round(projector_center[0]))
+                    projector_y = int(round(projector_center[1]))
+                    marker_id = str(marker_id_int)
+
+                    pts = projector_corners.astype(np.int32).reshape((-1, 1, 2))
+                    cv2.polylines(current_image_background, [pts], True, (0, 255, 0), 2)
+                    cv2.circle(current_image_background, (projector_x, projector_y), 8, (0, 0, 255), -1)
+
+                    if state["is_static"] and overlay_on:
+                        if f"marker_{marker_id}" in ra_config:
+                            self.draw_from_config(
+                                current_image_background,
+                                ra_config[f"marker_{marker_id}"],
+                                projector_x,
+                                projector_y,
+                                marker_size,
+                                marker_id_int
+                            )
+                        else:
+                            self.draw_default_marker(
+                                current_image_background,
+                                projector_x,
+                                projector_y,
+                                marker_size,
+                                marker_id_int
+                            )
+
+                        if self.mode_multidim:
+                            color = self.get_marker_color(marker_id_int)
+                            self.draw_dim_value(
+                                current_image_background,
+                                projector_x,
+                                projector_y,
+                                marker_id_int,
+                                color
+                            )
+
+            if self.show_grid and self.record_window is not None:
+                x_min, x_max, y_min, y_max, x_legend, y_legend = self.record_window.get_bounds_from_inputs()
+                current_image_background = DrawUtils.draw_math_grid_on_image(
+                    current_image_background,
+                    x_min, x_max,
+                    y_min, y_max,
+                    x_legend, y_legend,
+                    self.grid_size
+                )
+
+            if self.status_popUpCamera:
+                self.show_camera_window(frame, corners=corners if ids is not None else None)
+                self._camera_was_active = True
+            else:
+                if hasattr(self, "_camera_was_active") and self._camera_was_active:
+                    cv2.destroyWindow("Camera")
+                    self._camera_was_active = False
+
+            self.display_manager.display_image_on_projector_monitor(current_image_background)
+            self.data_signal.emit({"data": graph_coords_ArUco})
+            self.save_to_buffer(graph_coords_ArUco)
+
+        self.save_to_csv()
+        print("detect_and_process terminé")
+        self.finished_signal.emit()
