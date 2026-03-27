@@ -15,22 +15,16 @@ from src.core.mapping.coordinate_mapper import CoordinateMapper
 from src.core.utils.paths import config_path
 
 
-# =========================================================
-# PARAMETRES
-# =========================================================
 PROJECTOR_SCREEN_ID = 1
 CAMERA_ID = 0
 
-WINDOW_NAME_PROJECTOR = "ProjectorCorrectionDebug"
-WINDOW_NAME_CAMERA = "ProjectorCorrectionDebugCamera"
+WINDOW_NAME_PROJECTOR = "ProjectorCorrectionRuntimeLikeTest"
+WINDOW_NAME_CAMERA = "ProjectorCorrectionRuntimeLikeCamera"
 
 ARUCO_DICT = cv2.aruco.DICT_4X4_50
 EXCLUDED_TAG_IDS = {40, 41, 42, 43}
 
 
-# =========================================================
-# AFFICHAGE PROJECTEUR
-# =========================================================
 class ProjectorWindow:
     def __init__(self, screen_id: int):
         monitors = get_monitors()
@@ -58,9 +52,6 @@ class ProjectorWindow:
             pass
 
 
-# =========================================================
-# OUTILS
-# =========================================================
 def apply_homography(H, pt):
     p = np.array([pt[0], pt[1], 1.0], dtype=np.float64)
     q = H @ p
@@ -72,12 +63,16 @@ def apply_homography(H, pt):
 
 def load_projector_correction():
     path = Path(config_path("projector_correction.json"))
+
     if not path.exists():
         print("[DEBUG] projector_correction.json absent -> identité")
         return np.eye(3, dtype=np.float64)
 
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
+
+    if "H_proj_correction" not in data:
+        raise KeyError("projector_correction.json : clé 'H_proj_correction' absente")
 
     H = np.array(data["H_proj_correction"], dtype=np.float64)
     if H.shape != (3, 3):
@@ -94,8 +89,7 @@ def load_projector_correction():
 def build_aruco_detector():
     aruco_dict = cv2.aruco.getPredefinedDictionary(ARUCO_DICT)
     parameters = cv2.aruco.DetectorParameters()
-    detector = cv2.aruco.ArucoDetector(aruco_dict, parameters)
-    return detector
+    return cv2.aruco.ArucoDetector(aruco_dict, parameters)
 
 
 def detect_markers(detector, frame):
@@ -115,7 +109,6 @@ def filter_useful_markers(corners, ids):
         marker_id = int(marker_id_arr[0])
         if marker_id in EXCLUDED_TAG_IDS:
             continue
-
         filtered_corners.append(corners[i])
         filtered_ids.append([marker_id])
 
@@ -155,78 +148,41 @@ def draw_camera_preview(frame, corners, ids):
     return preview
 
 
+def build_graph_useful_background(grid_size):
+    return np.full((grid_size, grid_size, 3), 255, dtype=np.uint8)
+
+
 def build_nominal_background(mapper: CoordinateMapper):
     proj_w = int(mapper.projector_width)
     proj_h = int(mapper.projector_height)
 
-    graph_bg = np.full((mapper.grid_size, mapper.grid_size, 3), 255, dtype=np.uint8)
+    graph_bg = build_graph_useful_background(mapper.grid_size)
     H_graph_to_proj = mapper.get_graph_to_projector_homography()
 
-    projector_bg = cv2.warpPerspective(
+    return cv2.warpPerspective(
         graph_bg,
         H_graph_to_proj,
         (proj_w, proj_h)
     )
-    return projector_bg
 
 
-def draw_debug_overlay(img, marker_id, center_nominal, center_corrected):
-    x_nom, y_nom = int(round(center_nominal[0])), int(round(center_nominal[1]))
-    x_cor, y_cor = int(round(center_corrected[0])), int(round(center_corrected[1]))
-
-    # nominal = vert
-    cv2.circle(img, (x_nom, y_nom), 16, (0, 255, 0), 3)
-
-    # corrigé = rouge
-    cv2.circle(img, (x_cor, y_cor), 12, (0, 0, 255), 3)
-
-    # relier les deux
-    cv2.line(img, (x_nom, y_nom), (x_cor, y_cor), (255, 0, 255), 2)
-
-    # label
-    cv2.putText(
-        img,
-        f"ID {marker_id}",
-        (x_nom + 15, y_nom - 10),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.7,
-        (0, 0, 0),
-        2,
-        cv2.LINE_AA
-    )
-
-    # distance
-    dist = float(np.linalg.norm(np.array(center_corrected) - np.array(center_nominal)))
-    cv2.putText(
-        img,
-        f"{dist:.1f}px",
-        (x_cor + 15, y_cor + 20),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.6,
-        (0, 0, 255),
-        2,
-        cv2.LINE_AA
-    )
-
-
-# =========================================================
-# MAIN
-# =========================================================
 def main():
-    print("=== DEBUG CORRECTION HORS RUNTIME ===")
-    print("Vert = centre nominal")
-    print("Rouge = centre corrigé")
-    print("Ligne violette = déplacement induit par la correction")
+    print("=== TEST RUNTIME-LIKE ===")
+    print("Carré vert = exactement comme le runtime sans correction")
+    print("Point rouge = exactement comme le runtime sans correction")
+    print("Point bleu = centre corrigé")
+    print("Ligne magenta = déplacement rouge -> bleu")
     print("Q ou Echap pour quitter")
 
     mapper = CoordinateMapper()
     try:
         mapper.load(load_projector_correction=False)
+        print("[DEBUG] mapper chargé sans correction")
     except TypeError:
-        # si load() n'accepte pas encore le paramètre
         mapper.load()
         if hasattr(mapper, "reset_projector_correction_homography"):
             mapper.reset_projector_correction_homography()
+        print("[DEBUG] mapper chargé puis correction réinitialisée")
 
     H_corr = load_projector_correction()
 
@@ -245,26 +201,51 @@ def main():
                 continue
 
             bg = build_nominal_background(mapper)
-
             corners_all, ids_all = detect_markers(detector, frame)
             corners, ids = filter_useful_markers(corners_all, ids_all)
-
             preview = draw_camera_preview(frame, corners, ids)
 
             if ids is not None and len(ids) > 0:
                 for i, corner in enumerate(corners):
                     marker_id = int(ids[i][0])
 
-                    camera_center = np.mean(corner[0], axis=0).astype(np.float32)
+                    # EXACTEMENT comme ton runtime nominal
+                    projector_corners = np.array(
+                        [mapper.camera_raw_to_projector_nominal(corner[0][j]) for j in range(4)],
+                        dtype=np.float32
+                    )
+                    projector_center = np.mean(projector_corners, axis=0)
 
-                    center_nominal = mapper.camera_raw_to_projector_nominal(camera_center)
-                    center_corrected = apply_homography(H_corr, center_nominal)
+                    # Correction appliquée seulement au centre runtime nominal
+                    projector_center_corrected = apply_homography(H_corr, projector_center)
 
-                    draw_debug_overlay(bg, marker_id, center_nominal, center_corrected)
+                    # carré vert nominal EXACT runtime
+                    pts = projector_corners.astype(np.int32).reshape((-1, 1, 2))
+                    cv2.polylines(bg, [pts], True, (0, 255, 0), 2)
 
-                    print(
-                        f"ID {marker_id} | nominal=({center_nominal[0]:.1f},{center_nominal[1]:.1f}) "
-                        f"| corrected=({center_corrected[0]:.1f},{center_corrected[1]:.1f})"
+                    # point rouge nominal EXACT runtime
+                    x_nom = int(round(projector_center[0]))
+                    y_nom = int(round(projector_center[1]))
+                    cv2.circle(bg, (x_nom, y_nom), 8, (0, 0, 255), -1)
+
+                    # point bleu corrigé
+                    x_cor = int(round(projector_center_corrected[0]))
+                    y_cor = int(round(projector_center_corrected[1]))
+                    cv2.circle(bg, (x_cor, y_cor), 10, (255, 0, 0), 2)
+
+                    # ligne déplacement
+                    cv2.line(bg, (x_nom, y_nom), (x_cor, y_cor), (255, 0, 255), 2)
+
+                    # label
+                    cv2.putText(
+                        bg,
+                        f"ID {marker_id}",
+                        (x_nom + 10, y_nom - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7,
+                        (0, 0, 0),
+                        2,
+                        cv2.LINE_AA
                     )
 
             projector.show(bg)
