@@ -69,12 +69,20 @@ class Algorithm_Analysis(QObject):
         # Mapper géométrique
         # ------------------------------------------------------------------
         self.mapper = None
-        self.H_graph_to_proj_runtime = None
 
         try:
             self.mapper = CoordinateMapper()
-            self.mapper.load()
-            self.H_graph_to_proj_runtime = self.mapper.get_graph_to_projector_homography()
+
+            # On charge le mapper sans correction projecteur intégrée
+            try:
+                self.mapper.load(load_projector_correction=False)
+                print("[RUNTIME] CoordinateMapper chargé sans correction projecteur intégrée.")
+            except TypeError:
+                # Compatibilité si la méthode load() ne prend pas encore ce paramètre
+                self.mapper.load()
+                if hasattr(self.mapper, "reset_projector_correction_homography"):
+                    self.mapper.reset_projector_correction_homography()
+                print("[RUNTIME] CoordinateMapper chargé puis correction projecteur réinitialisée.")
 
             print("[RUNTIME] CoordinateMapper chargé avec succès.")
             print("[RUNTIME] H_graph_to_proj chargée depuis calibration_data.json.")
@@ -296,12 +304,15 @@ class Algorithm_Analysis(QObject):
     def _build_projector_background(self, proj_w, proj_h):
         """
         Construit le fond final dans le repère projecteur.
+        Fond nominal uniquement.
         """
         graph_background = self.build_graph_useful_background()
 
+        H_graph_to_proj = self.mapper.get_graph_to_projector_homography()
+
         warped_background = cv2.warpPerspective(
             graph_background,
-            self.H_graph_to_proj_runtime,
+            H_graph_to_proj,
             (proj_w, proj_h)
         )
 
@@ -312,17 +323,14 @@ class Algorithm_Analysis(QObject):
     # ======================================================================
     def _compute_marker_projector_geometry(self, corner):
         """
-        À partir des 4 coins ArUco détectés en caméra brute, calcule :
-        - le centre graph
-        - les 4 coins projecteur
-        - le centre projecteur
-        - une taille utile pour les overlays
+        Version nominale stable :
+        aucune correction projecteur appliquée dans le runtime.
         """
         camera_center = np.mean(corner[0], axis=0).astype(np.float32)
         graph_center = self.mapper.camera_raw_to_graph(camera_center)
 
         projector_corners = np.array(
-            [self.mapper.camera_raw_to_projector(corner[0][j]) for j in range(4)],
+            [self.mapper.camera_raw_to_projector_nominal(corner[0][j]) for j in range(4)],
             dtype=np.float32
         )
 
@@ -601,7 +609,7 @@ class Algorithm_Analysis(QObject):
             )
         print("=====================")
 
-        if self.mapper is None or self.H_graph_to_proj_runtime is None:
+        if self.mapper is None:
             print("[ERREUR] Mapper ou homographie graph->projecteur indisponible. Arrêt.")
             self.finished_signal.emit()
             return
@@ -640,8 +648,12 @@ class Algorithm_Analysis(QObject):
                     if int(ids[i][0]) not in CALIBRATION_TAG_IDS
                 ]
 
-                ids = ids[valid_indices]
-                corners = [corners[i] for i in valid_indices]
+                if len(valid_indices) > 0:
+                    ids = ids[valid_indices]
+                    corners = [corners[i] for i in valid_indices]
+                else:
+                    ids = None
+                    corners = []
 
                 for i, corner in enumerate(corners):
                     marker_id_int = int(ids[i][0])
@@ -700,13 +712,26 @@ class Algorithm_Analysis(QObject):
 
             if self.show_grid and self.record_window is not None:
                 x_min, x_max, y_min, y_max, x_legend, y_legend = self.record_window.get_bounds_from_inputs()
-                current_image_background = DrawUtils.draw_math_grid_on_image(
-                    current_image_background,
+
+                graph_grid = self.build_graph_useful_background()
+
+                graph_grid = DrawUtils.draw_math_grid_on_image(
+                    graph_grid,
                     x_min, x_max,
                     y_min, y_max,
                     x_legend, y_legend,
                     self.grid_size
                 )
+
+                H_graph_to_proj = self.mapper.get_graph_to_projector_homography()
+
+                warped_grid = cv2.warpPerspective(
+                    graph_grid,
+                    H_graph_to_proj,
+                    (proj_w, proj_h)
+                )
+
+                current_image_background = warped_grid
 
             if self.status_popUpCamera:
                 self.show_camera_window(frame, corners=corners if ids is not None else None)
