@@ -326,7 +326,7 @@ def estimate_best_pose_from_frame(frame, detector, K_cam, dist_cam, K_proj, dist
     H_screen_to_proj = pose_to_homography(K_proj, R_sp, T_sp)
 
     #  Homographie caméra non-distordue → projecteur
-    
+
     H_proj = H_screen_to_proj @ np.linalg.inv(H_screen_to_cam)
     H_proj = H_proj / H_proj[2, 2]
     H_inv_proj = np.linalg.inv(H_proj)
@@ -514,7 +514,9 @@ def draw_detected_corner_tags(img, detected, cam_points_raw=None):
 
 def show_projected_validation(projector, H_graph_to_proj):
     grid_img = build_validation_grid_image()
-
+    # applique une transformation de perspective à une image via une homographie.
+    # grille déformée pour s'adapter à l'écran projecteur, affichée pour validation visuelle de la pose. 
+    # Si la grille s'aligne bien, la pose est correcte.
     warped = cv2.warpPerspective(
         grid_img,
         H_graph_to_proj,
@@ -529,7 +531,7 @@ def show_projected_validation(projector, H_graph_to_proj):
             return True
         elif key == ord("n") or key == ord("q") or key == 27:
             return False
-
+# Cette fonction crée une image grille de validation de taille GRID_SIZE × GRID_SIZE (700×700) pour tester la pose estimée.
 def build_validation_grid_image():
     img = np.zeros((GRID_SIZE, GRID_SIZE, 3), dtype=np.uint8)
 
@@ -545,7 +547,7 @@ def build_validation_grid_image():
         4
     )
 
-    # grille
+    # grille verte
     n_div = 14
     xs = np.linspace(0, GRID_SIZE - 1, n_div + 1).astype(int)
     ys = np.linspace(0, GRID_SIZE - 1, n_div + 1).astype(int)
@@ -556,7 +558,7 @@ def build_validation_grid_image():
     for y in ys:
         cv2.line(img, (0, y), (GRID_SIZE - 1, y), (0, 255, 0), 2)
 
-    # centre
+    # centre rouge + label, pour vérifier que le centre de la grille est bien aligné sur l'écran projeté
     c = (GRID_SIZE // 2, GRID_SIZE // 2)
     cv2.circle(img, c, 12, (0, 0, 255), -1)
     cv2.putText(
@@ -600,7 +602,60 @@ def build_validation_grid_image():
         )
 
     return img
+# test : projection d'un point rouge au centre des tag de calibration
+def show_pose_debug_projection(projector, H_proj, cam_points_raw, detector, cap):
+    """
+    Affiche :
+    - points rouges = coins de calibration
+    - points bleus = centres des tags détectés
+    """
 
+    print("\n[TEST] Projection des points de calibration + centres tags")
+    print("Appuie sur ESC pour quitter")
+
+    while True:
+        frame = grab_frame(cap, n_flush=1)
+
+        # Détection des tags
+        detected, _, _ = detect_corner_tags(frame, detector)
+
+        # Image noire pour projeter
+        img = np.zeros((PROJECTOR_HEIGHT, PROJECTOR_WIDTH, 3), dtype=np.uint8)
+
+        # =====================================================
+        # 1. PROJECTION DES 4 POINTS DE CALIBRATION
+        # =====================================================
+        for p in cam_points_raw:
+            pt = np.array([p[0], p[1], 1.0])
+            proj = H_proj @ pt
+            proj /= proj[2]
+
+            x = int(round(proj[0]))
+            y = int(round(proj[1]))
+
+            cv2.circle(img, (x, y), 15, (0, 0, 255), -1)  # rouge
+
+        # =====================================================
+        # 2. PROJECTION CENTRE DES TAGS (IMPORTANT)
+        # =====================================================
+        for marker_id, data in detected.items():
+            center = data["center"]
+
+            pt = np.array([center[0], center[1], 1.0])
+            proj = H_proj @ pt
+            proj /= proj[2]
+
+            x = int(round(proj[0]))
+            y = int(round(proj[1]))
+
+            cv2.circle(img, (x, y), 10, (255, 0, 0), -1)  # bleu
+
+        projector.show(img)
+
+        key = cv2.waitKey(30) & 0xFF
+        if key == 27:  # ESC
+            break
+        # fin test
 # =========================================================
 # MAIN
 # =========================================================
@@ -710,7 +765,9 @@ def main():
         print("Touches : y = accepter / n = rejeter")
 
         accepted = show_projected_validation(projector, H_graph_to_proj)
-
+        if accepted:
+            show_pose_debug_projection(projector, H_proj, cam_points_raw, detector, cap)
+ 
         if not accepted:
             print("Pose rejetee.")
             return 
