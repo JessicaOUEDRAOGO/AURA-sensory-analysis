@@ -40,6 +40,9 @@ DEBUG_JSON_PATH = CONFIG_DIR / "projector_calibration_debug.json"
 SEARCH_RADIUS = 35
 MIN_WHITE_BLACK_DIFF = 40
 MIN_LOCAL_POINTS = 50
+# pour filtrer outliers. Un seuil de reprojection de 2.0 px est assez strict pour 
+# s'assurer que seuls les points très cohérents avec l'homographie locale sont considérés comme inliers. 
+# Cela aide à améliorer la précision de l'estimation du coin projecteur, au prix d'une tolérance réduite aux points légèrement bruyants ou moins précis.
 RANSAC_REPROJ_THRESH = 2.0
 MIN_INLIERS = 35
 
@@ -113,6 +116,7 @@ def load_camera_calibration(json_path: Path):
 
 
 def load_graycode_pattern(width, height):
+    #cv2.structured_light_GrayCodePatterncréé pour décoder les pixels du projecteur à partir des images capturées par la caméra.
     if not hasattr(cv2, "structured_light_GrayCodePattern"):
         raise RuntimeError(
             "opencv-contrib-python est requis pour structured_light_GrayCodePattern."
@@ -205,7 +209,7 @@ def collect_local_correspondences(graycode, captures, white, black, corner_xy, r
     x1 = min(w - 1, cx + radius)
     y0 = max(0, cy - radius)
     y1 = min(h - 1, cy + radius)
-
+# Ces correspondances servent à calculer une homographie locale pour mapper le coin caméra vers le projecteur
     for yy in range(y0, y1 + 1):
         for xx in range(x0, x1 + 1):
             if int(white[yy, xx]) - int(black[yy, xx]) < MIN_WHITE_BLACK_DIFF:
@@ -227,6 +231,7 @@ def collect_local_correspondences(graycode, captures, white, black, corner_xy, r
 
 
 def estimate_projector_corner_local_homography(graycode, captures, white, black, corner_xy, radius):
+    # Appelle collect_local_correspondences pour obtenir points caméra ↔ projecteur autour du coin.
     cam_pts, proj_pts = collect_local_correspondences(
         graycode, captures, white, black, corner_xy, radius
     )
@@ -243,7 +248,11 @@ def estimate_projector_corner_local_homography(graycode, captures, white, black,
 
     if H is None or mask is None:
         return None, 0
+# Inliers : Points de données qui s'ajustent bien au modèle estimé (dans le seuil de reprojection, ici 2.0 px). 
+# Ils sont considérés comme "bons" et utilisés pour raffiner le modèle.
 
+# Outliers : Points qui ne s'ajustent pas au modèle (au-delà du seuil). 
+# Ils sont ignorés car probablement dus à du bruit, des erreurs ou des correspondances incorrectes.
     inliers = int(mask.sum())
     if inliers < MIN_INLIERS:
         return None, inliers
@@ -287,6 +296,8 @@ def compute_reprojection_errors(objpoints, imgpoints, rvecs, tvecs, K, dist):
 
 
 def is_projector_calibration_plausible(K, dist):
+    # fx, fy : longueurs focales (doivent être positives)
+    # cx, cy : centre optique (doit être dans l'image projecteur)
     fx = float(K[0, 0])
     fy = float(K[1, 1])
     cx = float(K[0, 2])

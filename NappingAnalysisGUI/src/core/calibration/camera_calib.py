@@ -63,6 +63,7 @@ def save_detected_checkerboard_image(image, image_path: Path, pattern_size, corn
     Sauvegarde une image annotée avec les coins du damier détectés.
     """
     vis = image.copy()
+    # Dessine les coins du damier détectés sur l'image 
     cv2.drawChessboardCorners(vis, pattern_size, corners, found)
 
     output_path = DETECTED_DIR / image_path.name
@@ -84,7 +85,8 @@ def save_raw_detected_image(image, image_path: Path):
         print(f"[WARN] Impossible d'enregistrer l'image brute : {output_path}")
 
 def build_object_points(pattern_size, square_size_m):
-    objp = np.zeros((pattern_size[0] * pattern_size[1], 3), np.float32)
+    # Crée une matrice de zéros avec 9×6 = 54 lignes et 3 colonnes (x, y, z)
+    objp = np.zeros((pattern_size[0] * pattern_size[1], 3), np.float32)               
     objp[:, :2] = np.mgrid[0:pattern_size[0], 0:pattern_size[1]].T.reshape(-1, 2)
     objp *= square_size_m
     return objp
@@ -130,7 +132,7 @@ def compute_reprojection_errors(object_points, image_points, rvecs, tvecs, camer
     per_image_errors = []
     total_error = 0.0
     total_points = 0
-
+# cv2.projectPoints : Projette les points 3D (object_points[i]) vers 2D en utilisant les paramètres calibrés (rvecs[i], tvecs[i], camera_matrix, dist_coeffs).
     for i in range(len(object_points)):
         projected_points, _ = cv2.projectPoints(
             object_points[i],
@@ -139,7 +141,7 @@ def compute_reprojection_errors(object_points, image_points, rvecs, tvecs, camer
             camera_matrix,
             dist_coeffs
         )
-
+# Distance euclidienne totale entre points détectés et projetés.
         err_l2 = cv2.norm(image_points[i], projected_points, cv2.NORM_L2)
         err_per_point = err_l2 / len(projected_points)
 

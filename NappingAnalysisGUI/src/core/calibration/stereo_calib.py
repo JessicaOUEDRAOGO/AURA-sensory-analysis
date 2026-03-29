@@ -123,6 +123,7 @@ def load_projector_calibration(path: Path):
 # =========================================================
 def detect_checker_corners(image_bgr, pattern_size):
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+    # Transforme une image sombre/claire en une image avec contraste étendu, facilitant findChessboardCorners.
     gray = cv2.equalizeHist(gray)
 
     if hasattr(cv2, "findChessboardCornersSB"):
@@ -189,6 +190,7 @@ def load_pose_images(pose_dir: Path):
 
 def decode_projector_pixel(graycode, captures, x, y):
     try:
+        # Décode les motifs Gray code pour mapper un pixel caméra (x, y) à son équivalent projecteur (px, py). Utilisé pour établir les correspondances dans la calibration Moreno.
         ok, proj_pix = graycode.getProjPixel(captures, int(x), int(y))
     except Exception:
         return None

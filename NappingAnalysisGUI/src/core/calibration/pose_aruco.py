@@ -84,7 +84,7 @@ def load_json(path: Path):
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
-
+# Cette fonction normalise les coefficients de distorsion (dist) en un format cohérent pour OpenCV.
 def flatten_dist(dist):
     arr = np.array(dist, dtype=np.float64)
     if arr.ndim == 1:
@@ -93,15 +93,17 @@ def flatten_dist(dist):
         arr = arr.T
     return arr
 
-
+# Cette fonction charge les données de calibration depuis des fichiers JSON 
+# retourne les matrices nécessaires pour la pose estimation.
 def load_calibrations():
     cam_data = load_json(CAMERA_CALIB_PATH)
     proj_data = load_json(PROJECTOR_CALIB_PATH)
     stereo_data = load_json(STEREO_CALIB_PATH)
-
+    # Matrice intrinsèque caméra (K_cam) : contient les paramètres de la caméra (longueurs focales fx, fy et centre optique cx, cy).
     K_cam = np.array(cam_data["camera_matrix"], dtype=np.float64)
+    # coefficients de distorsion caméra (dist_cam) : décrivent la distorsion optique de la caméra, nécessaire pour corriger les points détectés.
     dist_cam = flatten_dist(cam_data["dist_coeffs"])
-
+    # Matrice intrinsèque projecteur (K_proj) : contient les paramètres du projecteur, similaire à K_cam mais pour le projecteur.
     K_proj = np.array(proj_data["projector_matrix"], dtype=np.float64)
     if "projector_dist_coeffs" in proj_data:
         dist_proj = flatten_dist(proj_data["projector_dist_coeffs"])
@@ -109,7 +111,7 @@ def load_calibrations():
         dist_proj = flatten_dist(proj_data["dist_coeffs"])
     else:
         raise KeyError("Aucune distorsion projecteur trouvée.")
-
+    # stereo_data : Rotation (R_cp) et translation (T_cp) caméra ↔ projecteur
     R_cp = np.array(stereo_data["R"], dtype=np.float64)
     T_cp = np.array(stereo_data["T"], dtype=np.float64).reshape(3, 1)
 
@@ -266,11 +268,12 @@ def build_reference_points():
 
     return screen_points_mm, object_points_m
 def estimate_best_pose_from_frame(frame, detector, K_cam, dist_cam, K_proj, dist_proj, R_cp, T_cp):
+    # Détecte les 4 tags de coin
     detected, cam_points_raw, gray = detect_corner_tags(frame, detector)
 
     if cam_points_raw is None:
         return None
-
+    # Corrige la distorsion des points détectés
     cam_points_undist = undistort_pixel_points(cam_points_raw, K_cam, dist_cam)
 
     screen_points_mm, object_points_m = build_reference_points()
@@ -308,19 +311,22 @@ def estimate_best_pose_from_frame(frame, detector, K_cam, dist_cam, K_proj, dist
 
     if not candidates:
         return None
-
+    # Vecteur rotation écran→caméra (rvec_sc) et translation (tvec_sc) avec la meilleure précision de reprojection (mean_err) parmi les méthodes testées.
     best_flag, rvec_sc, tvec_sc, pnp_mean_err, pnp_per_point_errs, pnp_proj_pts = min(
         candidates, key=lambda x: x[3]
     )
-
+    # R_sc : Matrice rotation écran→caméra (3×3)
+    # R_sp : Matrice rotation écran→projecteur
     R_sc, _ = cv2.Rodrigues(rvec_sc)
-
+    
     R_sp = R_cp @ R_sc
     T_sp = R_cp @ tvec_sc + T_cp
 
     H_screen_to_cam = pose_to_homography(K_cam, R_sc, tvec_sc)
     H_screen_to_proj = pose_to_homography(K_proj, R_sp, T_sp)
 
+    #  Homographie caméra non-distordue → projecteur
+    
     H_proj = H_screen_to_proj @ np.linalg.inv(H_screen_to_cam)
     H_proj = H_proj / H_proj[2, 2]
     H_inv_proj = np.linalg.inv(H_proj)
