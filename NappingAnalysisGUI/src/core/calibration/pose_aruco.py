@@ -603,52 +603,122 @@ def build_validation_grid_image():
 
     return img
 # test : projection d'un point rouge au centre des tag de calibration
-def show_pose_debug_projection(projector, H_proj, cam_points_raw, detector, cap):
+def apply_homography_to_point(H, pt):
+    p = np.array([pt[0], pt[1], 1.0], dtype=np.float64)
+    out = H @ p
+    if abs(out[2]) < 1e-12:
+        return None
+    out /= out[2]
+    return out[:2].astype(np.float32)
+
+
+def draw_projected_point(img, pt_proj, color, radius=14, label=None):
+    if pt_proj is None:
+        return
+
+    x = int(round(float(pt_proj[0])))
+    y = int(round(float(pt_proj[1])))
+
+    if not (0 <= x < PROJECTOR_WIDTH and 0 <= y < PROJECTOR_HEIGHT):
+        return
+
+    cv2.circle(img, (x, y), radius, color, -1)
+
+    if label is not None:
+        cv2.putText(
+            img,
+            label,
+            (x + 18, y - 12),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            color,
+            2
+        )
+
+
+def show_pose_debug_projection(projector, H_proj, cam_points_raw, detector, cap, K_cam, dist_cam):
     """
-    Affiche :
-    - points rouges = coins de calibration
-    - points bleus = centres des tags détectés
+    Debug projection :
+    - rouge  : les 4 points de calibration sélectionnés (TL, TR, BR, BL)
+    - bleu   : les centres des 4 tags de coin détectés (42, 43, 40, 41)
+    IMPORTANT :
+    H_proj = homographie camera UNDISTORDUE -> projecteur
+    donc tous les points doivent être undistordus avant projection.
     """
 
-    print("\n[TEST] Projection des points de calibration + centres tags")
-    print("Appuie sur ESC pour quitter")
+    print("\n[TEST] Debug projection pose")
+    print("Rouge = points calibration sélectionnés")
+    print("Bleu  = centres des tags de coin")
+    print("ESC pour quitter")
+
+    calib_labels = ["TL", "TR", "BR", "BL"]
 
     while True:
         frame = grab_frame(cap, n_flush=1)
 
-        # Détection des tags
         detected, _, _ = detect_corner_tags(frame, detector)
 
-        # Image noire pour projeter
         img = np.zeros((PROJECTOR_HEIGHT, PROJECTOR_WIDTH, 3), dtype=np.uint8)
 
-        # =====================================================
-        # 1. PROJECTION DES 4 POINTS DE CALIBRATION
-        # =====================================================
-        for p in cam_points_raw:
-            pt = np.array([p[0], p[1], 1.0])
-            proj = H_proj @ pt
-            proj /= proj[2]
+        # -------------------------------------------------
+        # 1) Points de calibration sélectionnés
+        # -------------------------------------------------
+        cam_points_undist = undistort_pixel_points(cam_points_raw, K_cam, dist_cam)
 
-            x = int(round(proj[0]))
-            y = int(round(proj[1]))
+        for i, p_und in enumerate(cam_points_undist):
+            proj_pt = apply_homography_to_point(H_proj, p_und)
+            draw_projected_point(
+                img,
+                proj_pt,
+                color=(0, 0, 255),   # rouge
+                radius=16,
+                label=f"CAL_{calib_labels[i]}"
+            )
 
-            cv2.circle(img, (x, y), 15, (0, 0, 255), -1)  # rouge
+        # -------------------------------------------------
+        # 2) Centres des 4 tags de coin détectés
+        # -------------------------------------------------
+        ordered_ids = [
+            CORNER_TAG_IDS["TL"],
+            CORNER_TAG_IDS["TR"],
+            CORNER_TAG_IDS["BR"],
+            CORNER_TAG_IDS["BL"],
+        ]
 
-        # =====================================================
-        # 2. PROJECTION CENTRE DES TAGS (IMPORTANT)
-        # =====================================================
-        for marker_id, data in detected.items():
-            center = data["center"]
+        centers_raw = []
+        center_labels = []
 
-            pt = np.array([center[0], center[1], 1.0])
-            proj = H_proj @ pt
-            proj /= proj[2]
+        for marker_id in ordered_ids:
+            if marker_id in detected:
+                centers_raw.append(detected[marker_id]["center"])
+                center_labels.append(f"ID{marker_id}")
 
-            x = int(round(proj[0]))
-            y = int(round(proj[1]))
+        if len(centers_raw) > 0:
+            centers_raw = np.array(centers_raw, dtype=np.float32)
+            centers_undist = undistort_pixel_points(centers_raw, K_cam, dist_cam)
 
-            cv2.circle(img, (x, y), 10, (255, 0, 0), -1)  # bleu
+            for i, p_und in enumerate(centers_undist):
+                proj_pt = apply_homography_to_point(H_proj, p_und)
+                draw_projected_point(
+                    img,
+                    proj_pt,
+                    color=(255, 0, 0),   # bleu
+                    radius=11,
+                    label=center_labels[i]
+                )
+
+        # -------------------------------------------------
+        # 3) Texte d'aide
+        # -------------------------------------------------
+        cv2.putText(
+            img,
+            "ROUGE = calibration points | BLEU = tag centers",
+            (40, 60),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.0,
+            (255, 255, 255),
+            2
+        )
 
         projector.show(img)
 
@@ -765,12 +835,20 @@ def main():
         print("Touches : y = accepter / n = rejeter")
 
         accepted = show_projected_validation(projector, H_graph_to_proj)
-        if accepted:
-            show_pose_debug_projection(projector, H_proj, cam_points_raw, detector, cap)
- 
+
         if not accepted:
             print("Pose rejetee.")
-            return 
+            return
+
+        show_pose_debug_projection(
+            projector,
+            H_proj,
+            cam_points_raw,
+            detector,
+            cap,
+            K_cam,
+            dist_cam
+        ) 
 
         print("\nPoints camera bruts detectes (TL, TR, BR, BL) :")
         print(cam_points_raw)
