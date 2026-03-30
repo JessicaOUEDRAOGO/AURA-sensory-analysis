@@ -425,10 +425,10 @@ def detect_corner_tags(frame, detector):
         return detected, None, gray
 
     cam_points_raw = np.array([
-        detected[CORNER_TAG_IDS["TL"]]["corners"][0],  # TL -> coin 0 du tag 42
-        detected[CORNER_TAG_IDS["TR"]]["corners"][1],  # TR -> coin 1 du tag 43
-        detected[CORNER_TAG_IDS["BR"]]["corners"][2],  # BR -> coin 2 du tag 40
-        detected[CORNER_TAG_IDS["BL"]]["corners"][3],  # BL -> coin 3 du tag 41
+        select_physical_corner(detected[CORNER_TAG_IDS["TL"]]["corners"], "TL"),
+        select_physical_corner(detected[CORNER_TAG_IDS["TR"]]["corners"], "TR"),
+        select_physical_corner(detected[CORNER_TAG_IDS["BR"]]["corners"], "BR"),
+        select_physical_corner(detected[CORNER_TAG_IDS["BL"]]["corners"], "BL"),
     ], dtype=np.float32)
 
     return detected, cam_points_raw, gray
@@ -572,11 +572,18 @@ def build_validation_grid_image():
     )
 
     # coins
+    # corners = [
+    #     ((10, 10), "TL"),
+    #     ((GRID_SIZE - 11, 10), "TR"),
+    #     ((GRID_SIZE - 11, GRID_SIZE - 11), "BR"),
+    #     ((10, GRID_SIZE - 11), "BL"),
+    # ]
+    # coins
     corners = [
-        ((10, 10), "TL"),
-        ((GRID_SIZE - 11, 10), "TR"),
-        ((GRID_SIZE - 11, GRID_SIZE - 11), "BR"),
-        ((10, GRID_SIZE - 11), "BL"),
+        ((0, 0), "TL"),
+        ((GRID_SIZE - 1, 0), "TR"),
+        ((GRID_SIZE - 1, GRID_SIZE - 1), "BR"),
+        ((0, GRID_SIZE - 1), "BL"),
     ]
 
     for (x, y), label in corners:
@@ -726,6 +733,22 @@ def show_pose_debug_projection(projector, H_proj, cam_points_raw, detector, cap,
         if key == 27:  # ESC
             break
         # fin test
+    
+def select_physical_corner(corners, position):
+    # corners shape (4,2)
+
+    if position == "TL":
+        return corners[np.argmin(corners[:,0] + corners[:,1])]
+
+    elif position == "TR":
+        return corners[np.argmin(-corners[:,0] + corners[:,1])]
+
+    elif position == "BR":
+        return corners[np.argmax(corners[:,0] + corners[:,1])]
+
+    elif position == "BL":
+        return corners[np.argmax(-corners[:,0] + corners[:,1])]    
+
 # =========================================================
 # MAIN
 # =========================================================
