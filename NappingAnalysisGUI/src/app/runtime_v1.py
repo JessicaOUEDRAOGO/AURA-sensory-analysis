@@ -318,32 +318,48 @@ class Algorithm_Analysis(QObject):
 
         return warped_background
 
+    def _select_physical_corner_runtime(self, pts: np.ndarray, position: str) -> np.ndarray:
+        """
+        Sélectionne un coin physique du tag selon la position souhaitée.
+        Même logique que dans pose_aruco.
+        pts: array (4,2)
+        """
+        if position == "TL":
+            return pts[np.argmin(pts[:, 0] + pts[:, 1])].astype(np.float32)
+        elif position == "TR":
+            return pts[np.argmin(-pts[:, 0] + pts[:, 1])].astype(np.float32)
+        elif position == "BR":
+            return pts[np.argmax(pts[:, 0] + pts[:, 1])].astype(np.float32)
+        elif position == "BL":
+            return pts[np.argmax(-pts[:, 0] + pts[:, 1])].astype(np.float32)
+        else:
+            raise ValueError(f"Position inconnue: {position}")
+
+    def _get_marker_anchor_raw(self, corner):
+        """
+        Point de référence unique du tag pour le tracking/runtime.
+        Ici on utilise le coin physique TL du tag.
+        """
+        pts = corner[0].astype(np.float32)
+        return self._select_physical_corner_runtime(pts, "TL")
+
     # ======================================================================
     # Calcul des coordonnées de tags
     # ======================================================================
     def _compute_marker_projector_geometry(self, corner):
         """
-        Version nominale stable :
-        aucune correction projecteur appliquée dans le runtime.
+        Version test minimal :
+        on projette uniquement un point d'ancrage rouge, comme dans pose_aruco.
         """
-        camera_center = np.mean(corner[0], axis=0).astype(np.float32)
-        graph_center = self.mapper.camera_raw_to_graph(camera_center)
+        anchor_raw = self._get_marker_anchor_raw(corner)
 
-        projector_corners = np.array(
-            [self.mapper.camera_raw_to_projector_nominal(corner[0][j]) for j in range(4)],
-            dtype=np.float32
-        )
-
-        projector_center = np.mean(projector_corners, axis=0)
-
-        marker_size = int(np.linalg.norm(projector_corners[0] - projector_corners[1])) * 2
-        marker_size = max(marker_size, 20)
+        graph_anchor = self.mapper.camera_raw_to_graph(anchor_raw)
+        projector_anchor = self.mapper.camera_raw_to_projector_nominal(anchor_raw)
 
         return {
-            "graph_center": graph_center,
-            "projector_corners": projector_corners,
-            "projector_center": projector_center,
-            "marker_size": marker_size,
+            "graph_center": graph_anchor,
+            "projector_center": projector_anchor,
+            "marker_size": 40,  # juste une valeur fixe pour le debug
         }
 
     # ======================================================================
@@ -658,16 +674,13 @@ class Algorithm_Analysis(QObject):
                 for i, corner in enumerate(corners):
                     marker_id_int = int(ids[i][0])
 
-                    center_x = int(np.mean(corner[0][:, 0]))
-                    center_y = int(np.mean(corner[0][:, 1]))
-                    camera_point = np.array([center_x, center_y], dtype=np.float32)
+                    camera_point = self._get_marker_anchor_raw(corner)
 
                     state = self._update_marker_state(marker_id_int, camera_point)
 
                     geom = self._compute_marker_projector_geometry(corner)
 
                     graph_center = geom["graph_center"]
-                    projector_corners = geom["projector_corners"]
                     projector_center = geom["projector_center"]
                     marker_size = geom["marker_size"]
 
@@ -677,9 +690,17 @@ class Algorithm_Analysis(QObject):
                     projector_y = int(round(projector_center[1]))
                     marker_id = str(marker_id_int)
 
-                    pts = projector_corners.astype(np.int32).reshape((-1, 1, 2))
-                    cv2.polylines(current_image_background, [pts], True, (0, 255, 0), 2)
-                    cv2.circle(current_image_background, (projector_x, projector_y), 8, (0, 0, 255), -1)
+                    # Debug minimal : un seul point rouge au coin du tag
+                    cv2.circle(current_image_background, (projector_x, projector_y), 10, (0, 0, 255), -1)
+                    cv2.putText(
+                        current_image_background,
+                        f"ID {marker_id_int}",
+                        (projector_x + 12, projector_y - 12),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.6,
+                        (0, 0, 255),
+                        2
+                    )
 
                     if state["is_static"] and overlay_on:
                         if f"marker_{marker_id}" in ra_config:

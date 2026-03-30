@@ -455,10 +455,10 @@ def draw_detected_corner_tags(img, detected, cam_points_raw=None):
 
     if detected and all(tag_id in detected for tag_id in CORNER_TAG_IDS.values()):
         chosen = {
-            "TL": detected[CORNER_TAG_IDS["TL"]]["corners"][0],
-            "TR": detected[CORNER_TAG_IDS["TR"]]["corners"][1],
-            "BR": detected[CORNER_TAG_IDS["BR"]]["corners"][2],
-            "BL": detected[CORNER_TAG_IDS["BL"]]["corners"][3],
+            "TL": select_physical_corner(detected[CORNER_TAG_IDS["TL"]]["corners"], "TL"),
+            "TR": select_physical_corner(detected[CORNER_TAG_IDS["TR"]]["corners"], "TR"),
+            "BR": select_physical_corner(detected[CORNER_TAG_IDS["BR"]]["corners"], "BR"),
+            "BL": select_physical_corner(detected[CORNER_TAG_IDS["BL"]]["corners"], "BL"),
         }
 
         for label, p in chosen.items():

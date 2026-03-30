@@ -43,7 +43,11 @@ class CameraManager:
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
         cap.set(cv2.CAP_PROP_FPS, self.fps)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
 
+        for _ in range(8):
+            cap.read()
         # Première lecture de validation
         ret, frame = cap.read()
         if not ret or frame is None:
@@ -73,8 +77,11 @@ class CameraManager:
         """
         if self.cap is None or not self.cap.isOpened():
             return None
+        for _ in range(2):
+            self.cap.read()
 
         ret, frame = self.cap.read()
+        
         if not ret or frame is None:
             print("Impossible de lire une frame caméra.")
             return None
