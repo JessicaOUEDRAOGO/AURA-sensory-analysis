@@ -580,6 +580,25 @@ def draw_detected_corner_tags(img, detected, cam_points_raw=None):
 
 #     return debug
 # test : projection des points de calibration dans le projecteur pour vérifier qu'ils tombent sur les coins physiques correspondants.
+def apply_display_transform(img, mode):
+    if mode == "none":
+        return img
+    elif mode == "flip_h":
+        return cv2.flip(img, 1)
+    elif mode == "flip_v":
+        return cv2.flip(img, 0)
+    elif mode == "rot_180":
+        return cv2.rotate(img, cv2.ROTATE_180)
+    elif mode == "transpose":
+        return cv2.transpose(img)
+    elif mode == "transpose_flip_h":
+        return cv2.flip(cv2.transpose(img), 1)
+    elif mode == "transpose_flip_v":
+        return cv2.flip(cv2.transpose(img), 0)
+    elif mode == "transpose_rot_180":
+        return cv2.rotate(cv2.transpose(img), cv2.ROTATE_180)
+    else:
+        raise ValueError(f"Mode inconnu: {mode}")
 def show_projector_pose_test_B(projector, H_proj, cam_points_raw, detector, cap, K_cam, dist_cam):
     """
     Test B :
