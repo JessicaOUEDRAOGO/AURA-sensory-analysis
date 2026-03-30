@@ -511,6 +511,160 @@ def draw_detected_corner_tags(img, detected, cam_points_raw=None):
         y += 30
 
     return out
+# test pose camera : affiche les points détectés et reprojetés pour vérifier la précision de solvePnP.
+# def show_camera_pose_debug(frame, cam_points_raw, pnp_proj_pts, title="Camera Pose Debug"):
+#     """
+#     Affiche dans l'image caméra :
+#     - jaune  : points détectés utilisés pour solvePnP
+#     - vert   : points reprojectés par solvePnP
+#     - cyan   : segments entre détecté et reprojeté
+#     """
+#     debug = frame.copy()
+
+#     labels = ["TL", "TR", "BR", "BL"]
+
+#     detected_pts = np.array(cam_points_raw, dtype=np.float32).reshape(-1, 2)
+#     reproj_pts = np.array(pnp_proj_pts, dtype=np.float32).reshape(-1, 2)
+
+#     for i, (pd, pr) in enumerate(zip(detected_pts, reproj_pts)):
+#         xd, yd = int(round(float(pd[0]))), int(round(float(pd[1])))
+#         xr, yr = int(round(float(pr[0]))), int(round(float(pr[1])))
+
+#         # point détecté
+#         cv2.circle(debug, (xd, yd), 8, (0, 255, 255), -1)   # jaune
+#         cv2.putText(
+#             debug,
+#             f"{labels[i]}_det",
+#             (xd + 10, yd - 10),
+#             cv2.FONT_HERSHEY_SIMPLEX,
+#             0.65,
+#             (0, 255, 255),
+#             2
+#         )
+
+#         # point reprojeté
+#         cv2.circle(debug, (xr, yr), 8, (0, 255, 0), 2)      # vert
+#         cv2.putText(
+#             debug,
+#             f"{labels[i]}_rep",
+#             (xr + 10, yr + 20),
+#             cv2.FONT_HERSHEY_SIMPLEX,
+#             0.65,
+#             (0, 255, 0),
+#             2
+#         )
+
+#         # segment erreur
+#         cv2.line(debug, (xd, yd), (xr, yr), (255, 255, 0), 2)
+
+#         err = np.linalg.norm(pd - pr)
+#         cv2.putText(
+#             debug,
+#             f"{err:.2f}px",
+#             ((xd + xr) // 2 + 8, (yd + yr) // 2),
+#             cv2.FONT_HERSHEY_SIMPLEX,
+#             0.55,
+#             (255, 255, 0),
+#             2
+#         )
+
+#     cv2.putText(
+#         debug,
+#         "JAUNE=detecte | VERT=reprojete solvePnP",
+#         (20, 35),
+#         cv2.FONT_HERSHEY_SIMPLEX,
+#         0.8,
+#         (255, 255, 255),
+#         2
+#     )
+
+#     return debug
+# test : projection des points de calibration dans le projecteur pour vérifier qu'ils tombent sur les coins physiques correspondants.
+def show_projector_pose_test_B(projector, H_proj, cam_points_raw, detector, cap, K_cam, dist_cam):
+    """
+    Test B :
+    - rouge : projection des 4 points exacts utilisés pour la pose
+    - bleu  : projection des centres des 4 tags de coin
+    """
+
+    print("\n=== TEST B : VALIDATION CAMERA -> PROJECTEUR ===")
+    print("ROUGE = coins de calibration")
+    print("BLEU  = centres des tags")
+    print("ESC pour quitter")
+
+    labels = ["TL", "TR", "BR", "BL"]
+
+    while True:
+        frame = grab_frame(cap, n_flush=1)
+        detected, _, _ = detect_corner_tags(frame, detector)
+
+        img = np.zeros((PROJECTOR_HEIGHT, PROJECTOR_WIDTH, 3), dtype=np.uint8)
+
+        # -------------------------------------------------
+        # 1) Rouge = coins de calibration
+        # -------------------------------------------------
+        cam_points_undist = undistort_pixel_points(cam_points_raw, K_cam, dist_cam)
+
+        for i, p_und in enumerate(cam_points_undist):
+            proj_pt = apply_homography_to_point(H_proj, p_und)
+
+            if proj_pt is not None:
+                print(f"{labels[i]} projected = ({proj_pt[0]:.2f}, {proj_pt[1]:.2f})")
+
+            draw_projected_point(
+                img,
+                proj_pt,
+                color=(0, 0, 255),
+                radius=16,
+                label=labels[i]
+            )
+
+        # -------------------------------------------------
+        # 2) Bleu = centres des tags
+        # -------------------------------------------------
+        ordered_ids = [
+            CORNER_TAG_IDS["TL"],
+            CORNER_TAG_IDS["TR"],
+            CORNER_TAG_IDS["BR"],
+            CORNER_TAG_IDS["BL"],
+        ]
+
+        centers_raw = []
+        center_labels = []
+
+        for marker_id in ordered_ids:
+            if marker_id in detected:
+                centers_raw.append(detected[marker_id]["center"])
+                center_labels.append(f"ID{marker_id}")
+
+        if len(centers_raw) > 0:
+            centers_raw = np.array(centers_raw, dtype=np.float32)
+            centers_undist = undistort_pixel_points(centers_raw, K_cam, dist_cam)
+
+            for i, p_und in enumerate(centers_undist):
+                proj_pt = apply_homography_to_point(H_proj, p_und)
+                draw_projected_point(
+                    img,
+                    proj_pt,
+                    color=(255, 0, 0),
+                    radius=10,
+                    label=center_labels[i]
+                )
+
+        cv2.putText(
+            img,
+            "ROUGE=coins calibration | BLEU=centres tags",
+            (40, 60),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.9,
+            (255, 255, 255),
+            2
+        )
+
+        projector.show(img)
+        key = cv2.waitKey(30) & 0xFF
+        if key == 27:
+            break
 
 def show_projected_validation(projector, H_graph_to_proj):
     grid_img = build_validation_grid_image()
@@ -619,23 +773,34 @@ def apply_homography_to_point(H, pt):
     return out[:2].astype(np.float32)
 
 
-def draw_projected_point(img, pt_proj, color, radius=14, label=None):
+def draw_projected_point(img, pt_proj, color, radius=16, label=None):
     if pt_proj is None:
         return
 
     x = int(round(float(pt_proj[0])))
     y = int(round(float(pt_proj[1])))
 
-    if not (0 <= x < PROJECTOR_WIDTH and 0 <= y < PROJECTOR_HEIGHT):
+    # On ne rejette que si le point est vraiment loin hors image
+    if x < -radius or x >= PROJECTOR_WIDTH + radius or y < -radius or y >= PROJECTOR_HEIGHT + radius:
         return
 
     cv2.circle(img, (x, y), radius, color, -1)
 
     if label is not None:
+        tx = x + 18
+        ty = y - 12
+
+        if ty < 25:
+            ty = y + 28
+        if tx > PROJECTOR_WIDTH - 80:
+            tx = x - 60
+        if tx < 5:
+            tx = 5
+
         cv2.putText(
             img,
             label,
-            (x + 18, y - 12),
+            (tx, ty),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.8,
             color,
@@ -846,6 +1011,15 @@ def main():
         pnp_per_point_errs = best_result["pnp_per_point_errs"]
         pnp_proj_pts = best_result["pnp_proj_pts"]
 
+        # print("\n=== TEST A : VERIFICATION POSE ECRAN -> CAMERA ===")
+        # print("Ferme la fenetre ou appuie sur une touche pour continuer.")
+
+        # camera_debug = show_camera_pose_debug(frozen, cam_points_raw, pnp_proj_pts)
+        # cv2.imshow("Camera Pose Debug", camera_debug)
+        # cv2.waitKey(0)
+        # cv2.destroyWindow("Camera Pose Debug")
+
+        
         H_proj = best_result["H_proj"]
         H_inv_proj = best_result["H_inv_proj"]
         H_graph = best_result["H_graph"]
@@ -854,6 +1028,15 @@ def main():
         H_proj_to_graph = best_result["H_proj_to_graph"]
         H_cam_to_screen_mm = best_result["H_cam_to_screen_mm"]
         H_screen_mm_to_cam = best_result["H_screen_mm_to_cam"]
+        show_projector_pose_test_B(
+            projector,
+            H_proj,
+            cam_points_raw,
+            detector,
+            cap,
+            K_cam,
+            dist_cam
+        )
         print("\nValidation visuelle de la projection...")
         print("Touches : y = accepter / n = rejeter")
 
