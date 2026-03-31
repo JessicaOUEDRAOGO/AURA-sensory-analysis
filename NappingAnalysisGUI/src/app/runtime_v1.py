@@ -123,10 +123,21 @@ class Algorithm_Analysis(QObject):
         self.H_inv_projector = H_inv_projector
         self.H_graph = H_graph
         self.H_inv_graph = H_inv_graph
-
+        self.projector_offset_x = 30
+        self.projector_offset_y = -40
     # ======================================================================
     # Validation / helpers
     # ======================================================================
+
+    def _apply_projector_offset(self, pt):
+        """
+        Applique un décalage global manuel dans le repère projecteur.
+        """
+        pt = np.array(pt, dtype=np.float32).copy()
+        pt[0] += float(self.projector_offset_x)
+        pt[1] += float(self.projector_offset_y)
+        return pt
+
     def _validate_background_image(self, image):
         if not isinstance(image, np.ndarray):
             raise TypeError(f"image_background invalide : type={type(image)}")
@@ -351,15 +362,19 @@ class Algorithm_Analysis(QObject):
         Version test minimal :
         on projette uniquement un point d'ancrage rouge, comme dans pose_aruco.
         """
+        print("GEOM CALLED")
         anchor_raw = self._get_marker_anchor_raw(corner)
 
         graph_anchor = self.mapper.camera_raw_to_graph(anchor_raw)
         projector_anchor = self.mapper.camera_raw_to_projector_nominal(anchor_raw)
+        
+        # offset global manuel
+        projector_anchor = self._apply_projector_offset(projector_anchor)
 
         return {
             "graph_center": graph_anchor,
             "projector_center": projector_anchor,
-            "marker_size": 40,  # juste une valeur fixe pour le debug
+            "marker_size": 40,
         }
 
     # ======================================================================
@@ -765,7 +780,7 @@ class Algorithm_Analysis(QObject):
             self.display_manager.display_image_on_projector_monitor(current_image_background)
             self.data_signal.emit({"data": graph_coords_ArUco})
             self.save_to_buffer(graph_coords_ArUco)
-
+            
         self.save_to_csv()
         print("detect_and_process terminé")
         self.finished_signal.emit()
