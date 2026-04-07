@@ -395,6 +395,10 @@ def detect_corner_tags(frame, detector):
     - cam_points_raw : points dans l'ordre TL, TR, BR, BL
     - gray : image niveau de gris
     """
+    # coin 0 → haut-gauche  (top-left)
+    # coin 1 → haut-droite  (top-right)
+    # coin 2 → bas-droite   (bottom-right)
+    # coin 3 → bas-gauche   (bottom-left)
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     corners, ids, _ = detector.detectMarkers(gray)
 
@@ -599,80 +603,154 @@ def apply_display_transform(img, mode):
         return cv2.rotate(cv2.transpose(img), cv2.ROTATE_180)
     else:
         raise ValueError(f"Mode inconnu: {mode}")
-def show_projector_pose_test_B(projector, H_proj, cam_points_raw, detector, cap, K_cam, dist_cam):
+# def show_projector_pose_test_B(projector, H_proj, cam_points_raw, detector, cap, K_cam, dist_cam):
+#     """
+#     Test B :
+#     - rouge : quadrilatère plein défini par la projection des 4 points exacts utilisés pour la pose
+#     - bleu  : projection des centres des 4 tags de coin
+#     """
+
+#     print("\n=== TEST B : VALIDATION CAMERA -> PROJECTEUR ===")
+#     print("ROUGE = coins de calibration")
+#     print("BLEU  = centres des tags")
+#     print("ESC pour quitter")
+
+#     labels = ["TL", "TR", "BR", "BL"]
+
+#     while True:
+#         frame = grab_frame(cap, n_flush=1)
+#         detected, _, _ = detect_corner_tags(frame, detector)
+
+#         img = np.zeros((PROJECTOR_HEIGHT, PROJECTOR_WIDTH, 3), dtype=np.uint8)
+
+#         # -------------------------------------------------
+#         # 1) Rouge = quadrilatère plein des coins de calibration
+#         # -------------------------------------------------
+#         cam_points_undist = undistort_pixel_points(cam_points_raw, K_cam, dist_cam)
+
+#         projected_calib_pts = []
+
+#         for i, p_und in enumerate(cam_points_undist):
+#             proj_pt = apply_homography_to_point(H_proj, p_und)
+
+#             if proj_pt is not None:
+#                 # print(f"{labels[i]} projected = ({proj_pt[0]:.2f}, {proj_pt[1]:.2f})")
+#                 projected_calib_pts.append(proj_pt)
+
+#         if len(projected_calib_pts) == 4:
+#             projected_calib_pts = np.array(projected_calib_pts, dtype=np.float32)
+#             poly = np.round(projected_calib_pts).astype(np.int32)
+
+#             cv2.fillPoly(img, [poly], (0, 0, 255))
+
+#         # -------------------------------------------------
+#         # 2) Bleu = centres des tags
+#         # -------------------------------------------------
+#         ordered_ids = [
+#             CORNER_TAG_IDS["TL"],
+#             CORNER_TAG_IDS["TR"],
+#             CORNER_TAG_IDS["BR"],
+#             CORNER_TAG_IDS["BL"],
+#         ]
+
+#         centers_raw = []
+#         center_labels = []
+
+#         for marker_id in ordered_ids:
+#             if marker_id in detected:
+#                 centers_raw.append(detected[marker_id]["center"])
+#                 center_labels.append(f"ID{marker_id}")
+
+#         if len(centers_raw) > 0:
+#             centers_raw = np.array(centers_raw, dtype=np.float32)
+#             centers_undist = undistort_pixel_points(centers_raw, K_cam, dist_cam)
+
+#             for i, p_und in enumerate(centers_undist):
+#                 proj_pt = apply_homography_to_point(H_proj, p_und)
+#                 draw_projected_point(
+#                     img,
+#                     proj_pt,
+#                     color=(255, 0, 0),
+#                     radius=10,
+#                     label=center_labels[i]
+#                 )
+
+#         cv2.putText(
+#             img,
+#             "ROUGE=coins calibration | BLEU=centres tags",
+#             (40, 60),
+#             cv2.FONT_HERSHEY_SIMPLEX,
+#             0.9,
+#             (255, 255, 255),
+#             2
+#         )
+
+#         projector.show(img)
+#         key = cv2.waitKey(30) & 0xFF
+#         if key == 27:
+#             break
+
+def show_projector_pose_test_C(projector, H_proj, R_sp, T_sp, K_proj, dist_proj, cam_points_raw, K_cam, dist_cam):
     """
-    Test B :
-    - rouge : projection des 4 points exacts utilisés pour la pose
-    - bleu  : projection des centres des 4 tags de coin
+    Test C :
+    - rouge : via H_proj (camera → projecteur)
+    - vert  : via projection 3D (écran → projecteur)
     """
 
-    print("\n=== TEST B : VALIDATION CAMERA -> PROJECTEUR ===")
-    print("ROUGE = coins de calibration")
-    print("BLEU  = centres des tags")
+    print("\n=== TEST C : H_proj vs projection 3D ===")
+    print("ROUGE = H_proj")
+    print("VERT  = projection 3D écran")
     print("ESC pour quitter")
 
     labels = ["TL", "TR", "BR", "BL"]
 
-    while True:
-        frame = grab_frame(cap, n_flush=1)
-        detected, _, _ = detect_corner_tags(frame, detector)
+    # points écran en 3D (mètres)
+    screen_points_3D = np.array([
+        [REF_TL_MM[0]/1000.0, REF_TL_MM[1]/1000.0, 0.0],
+        [REF_TR_MM[0]/1000.0, REF_TR_MM[1]/1000.0, 0.0],
+        [REF_BR_MM[0]/1000.0, REF_BR_MM[1]/1000.0, 0.0],
+        [REF_BL_MM[0]/1000.0, REF_BL_MM[1]/1000.0, 0.0],
+    ], dtype=np.float32)
 
+    while True:
         img = np.zeros((PROJECTOR_HEIGHT, PROJECTOR_WIDTH, 3), dtype=np.uint8)
 
         # -------------------------------------------------
-        # 1) Rouge = coins de calibration
+        #  ROUGE : via H_proj
         # -------------------------------------------------
         cam_points_undist = undistort_pixel_points(cam_points_raw, K_cam, dist_cam)
 
-        for i, p_und in enumerate(cam_points_undist):
-            proj_pt = apply_homography_to_point(H_proj, p_und)
+        red_pts = []
+        for p in cam_points_undist:
+            proj = apply_homography_to_point(H_proj, p)
+            if proj is not None:
+                red_pts.append(proj)
 
-            if proj_pt is not None:
-                print(f"{labels[i]} projected = ({proj_pt[0]:.2f}, {proj_pt[1]:.2f})")
-
-            draw_projected_point(
-                img,
-                proj_pt,
-                color=(0, 0, 255),
-                radius=16,
-                label=labels[i]
-            )
+        if len(red_pts) == 4:
+            poly = np.round(np.array(red_pts)).astype(np.int32)
+            cv2.polylines(img, [poly], True, (0, 0, 255), 5)
 
         # -------------------------------------------------
-        # 2) Bleu = centres des tags
+        #  VERT : projection 3D correcte
         # -------------------------------------------------
-        ordered_ids = [
-            CORNER_TAG_IDS["TL"],
-            CORNER_TAG_IDS["TR"],
-            CORNER_TAG_IDS["BR"],
-            CORNER_TAG_IDS["BL"],
-        ]
+        rvec, _ = cv2.Rodrigues(R_sp)
 
-        centers_raw = []
-        center_labels = []
+        proj_pts, _ = cv2.projectPoints(
+            screen_points_3D,
+            rvec,
+            T_sp,
+            K_proj,
+            dist_proj
+        )
 
-        for marker_id in ordered_ids:
-            if marker_id in detected:
-                centers_raw.append(detected[marker_id]["center"])
-                center_labels.append(f"ID{marker_id}")
+        green_pts = proj_pts.reshape(-1, 2)
 
-        if len(centers_raw) > 0:
-            centers_raw = np.array(centers_raw, dtype=np.float32)
-            centers_undist = undistort_pixel_points(centers_raw, K_cam, dist_cam)
-
-            for i, p_und in enumerate(centers_undist):
-                proj_pt = apply_homography_to_point(H_proj, p_und)
-                draw_projected_point(
-                    img,
-                    proj_pt,
-                    color=(255, 0, 0),
-                    radius=10,
-                    label=center_labels[i]
-                )
+        poly = np.round(green_pts).astype(np.int32)
+        cv2.polylines(img, [poly], True, (0, 255, 0), 5)
 
         cv2.putText(
             img,
-            "ROUGE=coins calibration | BLEU=centres tags",
+            "ROUGE=H_proj | VERT=projection 3D",
             (40, 60),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.9,
@@ -681,10 +759,11 @@ def show_projector_pose_test_B(projector, H_proj, cam_points_raw, detector, cap,
         )
 
         projector.show(img)
+
         key = cv2.waitKey(30) & 0xFF
         if key == 27:
             break
-
+        
 def show_projected_validation(projector, H_graph_to_proj):
     grid_img = build_validation_grid_image()
     # applique une transformation de perspective à une image via une homographie.
@@ -1040,14 +1119,8 @@ def main():
 
         
         H_proj = best_result["H_proj"]
-        H_inv_proj = best_result["H_inv_proj"]
-        H_graph = best_result["H_graph"]
-        H_inv_graph = best_result["H_inv_graph"]
-        H_graph_to_proj = best_result["H_graph_to_proj"]
-        H_proj_to_graph = best_result["H_proj_to_graph"]
-        H_cam_to_screen_mm = best_result["H_cam_to_screen_mm"]
-        H_screen_mm_to_cam = best_result["H_screen_mm_to_cam"]
-        show_projector_pose_test_B(
+        H_screen_to_proj = pose_to_homography(K_proj, R_sp, T_sp)
+        show_projector_pose_test_C(
             projector,
             H_proj,
             cam_points_raw,
@@ -1056,6 +1129,22 @@ def main():
             K_cam,
             dist_cam
         )
+        H_inv_proj = best_result["H_inv_proj"]
+        H_graph = best_result["H_graph"]
+        H_inv_graph = best_result["H_inv_graph"]
+        H_graph_to_proj = best_result["H_graph_to_proj"]
+        H_proj_to_graph = best_result["H_proj_to_graph"]
+        H_cam_to_screen_mm = best_result["H_cam_to_screen_mm"]
+        H_screen_mm_to_cam = best_result["H_screen_mm_to_cam"]
+        # show_projector_pose_test_B(
+        #     projector,
+        #     H_proj,
+        #     cam_points_raw,
+        #     detector,
+        #     cap,
+        #     K_cam,
+        #     dist_cam
+        # )
         print("\nValidation visuelle de la projection...")
         print("Touches : y = accepter / n = rejeter")
 

@@ -72,18 +72,7 @@ class Algorithm_Analysis(QObject):
 
         try:
             self.mapper = CoordinateMapper()
-
-            # On charge le mapper sans correction projecteur intégrée
-            try:
-                self.mapper.load(load_projector_correction=False)
-                print("[RUNTIME] CoordinateMapper chargé sans correction projecteur intégrée.")
-            except TypeError:
-                # Compatibilité si la méthode load() ne prend pas encore ce paramètre
-                self.mapper.load()
-                if hasattr(self.mapper, "reset_projector_correction_homography"):
-                    self.mapper.reset_projector_correction_homography()
-                print("[RUNTIME] CoordinateMapper chargé puis correction projecteur réinitialisée.")
-
+            self.mapper.load()
             print("[RUNTIME] CoordinateMapper chargé avec succès.")
             print("[RUNTIME] H_graph_to_proj chargée depuis calibration_data.json.")
         except Exception as e:
@@ -125,10 +114,10 @@ class Algorithm_Analysis(QObject):
         self.H_inv_graph = H_inv_graph
         self.projector_offset_x = 30
         self.projector_offset_y = -40
+
     # ======================================================================
     # Validation / helpers
     # ======================================================================
-
     def _apply_projector_offset(self, pt):
         """
         Applique un décalage global manuel dans le repère projecteur.
@@ -329,6 +318,9 @@ class Algorithm_Analysis(QObject):
 
         return warped_background
 
+    # ======================================================================
+    # Logique pose_aruco : sélection du point du tag
+    # ======================================================================
     def _select_physical_corner_runtime(self, pts: np.ndarray, position: str) -> np.ndarray:
         """
         Sélectionne un coin physique du tag selon la position souhaitée.
@@ -353,7 +345,10 @@ class Algorithm_Analysis(QObject):
         """
         pts = corner[0].astype(np.float32)
         return self._select_physical_corner_runtime(pts, "TL")
-
+    
+    def _get_marker_anchor_raw_center(self, corner):
+        pts = corner[0].astype(np.float32)
+        return np.mean(pts, axis=0).astype(np.float32)  
     # ======================================================================
     # Calcul des coordonnées de tags
     # ======================================================================
@@ -362,13 +357,13 @@ class Algorithm_Analysis(QObject):
         Version test minimal :
         on projette uniquement un point d'ancrage rouge, comme dans pose_aruco.
         """
-        print("GEOM CALLED")
-        anchor_raw = self._get_marker_anchor_raw(corner)
+        # anchor_raw = self._get_marker_anchor_raw(corner)
+        anchor_raw = self._get_marker_anchor_raw_center(corner)
 
         graph_anchor = self.mapper.camera_raw_to_graph(anchor_raw)
         projector_anchor = self.mapper.camera_raw_to_projector_nominal(anchor_raw)
-        
-        # offset global manuel
+
+        # offset global manuel conservé
         projector_anchor = self._apply_projector_offset(projector_anchor)
 
         return {
@@ -689,8 +684,8 @@ class Algorithm_Analysis(QObject):
                 for i, corner in enumerate(corners):
                     marker_id_int = int(ids[i][0])
 
-                    camera_point = self._get_marker_anchor_raw(corner)
-
+                    # camera_point = self._get_marker_anchor_raw(corner)
+                    camera_point = self._get_marker_anchor_raw_center(corner)
                     state = self._update_marker_state(marker_id_int, camera_point)
 
                     geom = self._compute_marker_projector_geometry(corner)
@@ -705,8 +700,28 @@ class Algorithm_Analysis(QObject):
                     projector_y = int(round(projector_center[1]))
                     marker_id = str(marker_id_int)
 
-                    # Debug minimal : un seul point rouge au coin du tag
-                    cv2.circle(current_image_background, (projector_x, projector_y), 10, (0, 0, 255), -1)
+                        
+                    # point rouge au centre
+                    cv2.circle(
+                        current_image_background,
+                        (projector_x, projector_y),
+                        10,
+                        (0, 0, 255),
+                        -1
+                    )
+
+                    # anneau autour de la tasse
+                    ring_radius = int(marker_size * 2.0)   # ajuste 1.2 / 1.5 / 2.0 si besoin
+                    ring_thickness = max(3, int(marker_size * 0.12))
+
+                    cv2.circle(
+                        current_image_background,
+                        (projector_x, projector_y),
+                        ring_radius,
+                        (0, 0, 255),
+                        ring_thickness
+                    )
+
                     cv2.putText(
                         current_image_background,
                         f"ID {marker_id_int}",
@@ -780,7 +795,7 @@ class Algorithm_Analysis(QObject):
             self.display_manager.display_image_on_projector_monitor(current_image_background)
             self.data_signal.emit({"data": graph_coords_ArUco})
             self.save_to_buffer(graph_coords_ArUco)
-            
+
         self.save_to_csv()
         print("detect_and_process terminé")
         self.finished_signal.emit()

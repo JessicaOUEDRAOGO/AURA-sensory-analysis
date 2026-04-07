@@ -1,63 +1,54 @@
 # -*- coding: utf-8 -*-
-from pathlib import Path
 import json
-
 import cv2
 import numpy as np
-from screeninfo import get_monitors
 
+from src.core.mapping.coordinate_mapper import CoordinateMapper
+from src.core.projection.display_manager import DisplayManager
+from src.core.utils.paths import config_path
 
-# =========================================================
-# PARAMETRES
-# =========================================================
-PROJECTOR_SCREEN_ID = 1
-PROJECTOR_WIDTH = 3840
-PROJECTOR_HEIGHT = 2160
 
 CAMERA_ID = 0
 CAMERA_WIDTH = 1920
 CAMERA_HEIGHT = 1080
 
-OUTPUT_PATH = Path(__file__).resolve().parents[2] / "config" / "projector_useful_area.json"
+PROJECTOR_SCREEN_ID = 1
 
-STEP_NORMAL = 5
-POINT_RADIUS = 18
-
-
-# =========================================================
-# FENETRE PROJECTEUR
-# =========================================================
-class ProjectorWindow:
-    def __init__(self, screen_id: int):
-        monitors = get_monitors()
-        if screen_id < 0 or screen_id >= len(monitors):
-            raise ValueError(f"screen_id invalide : {screen_id}")
-
-        self.monitor = monitors[screen_id]
-        self.window_name = "ProjectorUsefulAreaCalibration"
-
-        cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
-        cv2.moveWindow(self.window_name, self.monitor.x, self.monitor.y)
-        cv2.setWindowProperty(
-            self.window_name,
-            cv2.WND_PROP_FULLSCREEN,
-            cv2.WINDOW_FULLSCREEN
-        )
-
-    def show(self, image: np.ndarray):
-        cv2.imshow(self.window_name, image)
-        cv2.waitKey(1)
-
-    def close(self):
-        try:
-            cv2.destroyWindow(self.window_name)
-        except Exception:
-            pass
+CALIBRATION_TAG_IDS = {40, 41, 42, 43}
 
 
-# =========================================================
-# CAMERA
-# =========================================================
+def load_projector_useful_homography(grid_size: int):
+    path = config_path("projector_useful_area.json")
+
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    useful_pts = np.array(
+        data["useful_area_points_TL_TR_BR_BL"],
+        dtype=np.float32
+    )
+
+    graph_pts = np.array([
+        [0, 0],
+        [grid_size - 1, 0],
+        [grid_size - 1, grid_size - 1],
+        [0, grid_size - 1],
+    ], dtype=np.float32)
+
+    H, _ = cv2.findHomography(graph_pts, useful_pts)
+    H = H / H[2, 2]
+    return H, useful_pts
+
+
+def apply_homography_to_point(H, pt):
+    p = np.array([pt[0], pt[1], 1.0], dtype=np.float64)
+    out = H @ p
+    if abs(out[2]) < 1e-12:
+        return None
+    out /= out[2]
+    return out[:2].astype(np.float32)
+
+
 def open_camera():
     cap = cv2.VideoCapture(CAMERA_ID, cv2.CAP_DSHOW)
     if not cap.isOpened():
@@ -90,216 +81,191 @@ def grab_frame(cap, n_flush=1):
     return frame
 
 
-def build_camera_preview(frame, active_label):
-    out = frame.copy()
+def create_aruco_detector():
+    aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
+    parameters = cv2.aruco.DetectorParameters()
+    return cv2.aruco.ArucoDetector(aruco_dict, parameters)
 
-    h, w = out.shape[:2]
-    cx, cy = w // 2, h // 2
 
-    # croix centrale
-    cv2.line(out, (cx - 40, cy), (cx + 40, cy), (0, 255, 255), 2)
-    cv2.line(out, (cx, cy - 40), (cx, cy + 40), (0, 255, 255), 2)
-    cv2.circle(out, (cx, cy), 8, (0, 0, 255), -1)
+def select_physical_corner_runtime(pts: np.ndarray, position: str) -> np.ndarray:
+    if position == "TL":
+        return pts[np.argmin(pts[:, 0] + pts[:, 1])].astype(np.float32)
+    elif position == "TR":
+        return pts[np.argmin(-pts[:, 0] + pts[:, 1])].astype(np.float32)
+    elif position == "BR":
+        return pts[np.argmax(pts[:, 0] + pts[:, 1])].astype(np.float32)
+    elif position == "BL":
+        return pts[np.argmax(-pts[:, 0] + pts[:, 1])].astype(np.float32)
+    else:
+        raise ValueError(f"Position inconnue: {position}")
 
-    help_lines = [
-        "Vue camera",
-        f"Coin actif: {active_label}",
-        "Regle les points sur le projecteur en regardant cette vue",
-        "1=TL  2=TR  3=BR  4=BL",
-        "Fleches = deplacer | S = sauvegarder | Q = quitter",
-    ]
 
-    y = 30
-    for line in help_lines:
+def get_marker_anchor_raw(corner):
+    pts = corner[0].astype(np.float32)
+    return select_physical_corner_runtime(pts, "TL")
+
+
+def draw_useful_area_outline(img, useful_pts):
+    poly = np.round(useful_pts).astype(np.int32).reshape(-1, 1, 2)
+    cv2.polylines(img, [poly], True, (0, 255, 255), 2)
+
+    labels = ["TL", "TR", "BR", "BL"]
+    for i, p in enumerate(useful_pts):
+        x, y = int(round(float(p[0]))), int(round(float(p[1])))
+        cv2.circle(img, (x, y), 10, (255, 0, 255), 2)
         cv2.putText(
-            out,
-            line,
-            (20, y),
+            img,
+            labels[i],
+            (x + 10, y - 10),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.7,
-            (0, 255, 255),
+            (255, 255, 0),
             2
         )
-        y += 30
-
-    return out
 
 
-# =========================================================
-# AFFICHAGE PROJECTEUR
-# =========================================================
-def build_image(points, active_label):
-    img = np.zeros((PROJECTOR_HEIGHT, PROJECTOR_WIDTH, 3), dtype=np.uint8)
+def show_camera_window(frame, corners=None, ids=None):
+    preview = frame.copy()
 
-    ordered_labels = ["TL", "TR", "BR", "BL"]
+    if corners is not None and ids is not None:
+        for i, marker_corners in enumerate(corners):
+            pts = marker_corners[0].astype(int)
 
-    poly = np.array([points[k] for k in ordered_labels], dtype=np.int32)
-    cv2.polylines(img, [poly.reshape(-1, 1, 2)], True, (0, 255, 255), 2)
+            for j in range(4):
+                pt1 = tuple(pts[j])
+                pt2 = tuple(pts[(j + 1) % 4])
+                cv2.line(preview, pt1, pt2, (0, 255, 0), 2)
 
-    center = np.mean(np.array([points[k] for k in ordered_labels], dtype=np.float32), axis=0)
-    cx, cy = int(round(center[0])), int(round(center[1]))
-    cv2.circle(img, (cx, cy), 14, (0, 0, 255), -1)
+            center = tuple(np.mean(pts, axis=0).astype(int))
+            marker_id = int(ids[i][0])
+            cv2.circle(preview, center, 6, (0, 0, 255), -1)
+            cv2.putText(
+                preview,
+                f"ID {marker_id}",
+                (center[0] + 10, center[1] - 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0, 255, 255),
+                2
+            )
+
+            anchor = get_marker_anchor_raw(marker_corners)
+            ax, ay = int(round(float(anchor[0]))), int(round(float(anchor[1])))
+            cv2.circle(preview, (ax, ay), 8, (255, 255, 0), 2)
+            cv2.putText(
+                preview,
+                "A",
+                (ax + 8, ay - 8),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (255, 255, 0),
+                2
+            )
+
     cv2.putText(
-        img,
-        "CENTER",
-        (cx + 20, cy - 20),
+        preview,
+        "ESC = quitter",
+        (20, 35),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.9,
-        (0, 0, 255),
+        0.8,
+        (0, 255, 255),
         2
     )
 
-    for label in ordered_labels:
-        x, y = points[label]
-
-        if label == active_label:
-            color = (0, 255, 0)
-            thickness = -1
-        else:
-            color = (255, 0, 255)
-            thickness = 2
-
-        cv2.circle(img, (x, y), POINT_RADIUS, color, thickness)
-
-        tx = x + 20
-        ty = y - 20
-
-        if label == "TR":
-            tx = x - 90
-            ty = y + 35
-        elif label == "BR":
-            tx = x - 90
-            ty = y - 20
-        elif label == "BL":
-            tx = x + 20
-            ty = y - 20
-        elif label == "TL":
-            tx = x + 20
-            ty = y + 35
-
-        cv2.putText(
-            img,
-            label,
-            (tx, ty),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            1.0,
-            color,
-            2
-        )
-
-    help_lines = [
-        "Calibration zone utile projecteur",
-        "1=TL  2=TR  3=BR  4=BL",
-        "Fleches = deplacer le point actif",
-        "S = sauvegarder | Q ou ESC = quitter",
-    ]
-
-    y0 = 50
-    for line in help_lines:
-        cv2.putText(
-            img,
-            line,
-            (40, y0),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.9,
-            (255, 255, 255),
-            2
-        )
-        y0 += 38
-
-    return img
+    resized = cv2.resize(preview, (1200, 700), interpolation=cv2.INTER_AREA)
+    cv2.imshow("Camera", resized)
 
 
-# =========================================================
-# SAUVEGARDE
-# =========================================================
-def save_points(points):
-    data = {
-        "projector_width": PROJECTOR_WIDTH,
-        "projector_height": PROJECTOR_HEIGHT,
-        "useful_area_points_TL_TR_BR_BL": [
-            [int(points["TL"][0]), int(points["TL"][1])],
-            [int(points["TR"][0]), int(points["TR"][1])],
-            [int(points["BR"][0]), int(points["BR"][1])],
-            [int(points["BL"][0]), int(points["BL"][1])],
-        ]
-    }
-
-    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(OUTPUT_PATH, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=4)
-
-    print(f"Sauvegarde OK : {OUTPUT_PATH}")
-    print(json.dumps(data, indent=4))
-
-
-# =========================================================
-# MAIN
-# =========================================================
 def main():
-    print("=== CALIBRATION ZONE UTILE PROJECTEUR ===")
-    print("1=TL  2=TR  3=BR  4=BL")
-    print("Fleches = deplacement")
-    print("S = sauvegarder")
-    print("Q ou ESC = quitter")
+    print("=== TEST RUNTIME MINIMAL SURFACE UTILE ===")
 
-    points = {
-        "TL": [300, 250],
-        "TR": [PROJECTOR_WIDTH - 300, 250],
-        "BR": [PROJECTOR_WIDTH - 300, PROJECTOR_HEIGHT - 250],
-        "BL": [300, PROJECTOR_HEIGHT - 250],
-    }
+    mapper = CoordinateMapper()
+    mapper.load()
+    print("[OK] CoordinateMapper chargé")
 
-    active_label = "TL"
+    H_graph_to_useful, useful_pts = load_projector_useful_homography(mapper.grid_size)
+    print("[OK] projector_useful_area.json chargé")
 
-    projector = ProjectorWindow(PROJECTOR_SCREEN_ID)
+    display = DisplayManager(projector_screen_id=PROJECTOR_SCREEN_ID)
     cap = open_camera()
-
-    cv2.namedWindow("Camera Preview", cv2.WINDOW_NORMAL)
+    detector = create_aruco_detector()
 
     try:
         while True:
-            proj_img = build_image(points, active_label)
-            projector.show(proj_img)
-
             frame = grab_frame(cap, n_flush=1)
-            cam_preview = build_camera_preview(frame, active_label)
-            cam_preview = cv2.resize(cam_preview, (1200, 700), interpolation=cv2.INTER_AREA)
-            cv2.imshow("Camera Preview", cam_preview)
 
-            key = cv2.waitKeyEx(30)
+            proj_w = int(mapper.projector_width)
+            proj_h = int(mapper.projector_height)
 
-            if key in (27, ord("q"), ord("Q")):
-                print("Sortie sans sauvegarde.")
+            current_image_background = np.zeros((proj_h, proj_w, 3), dtype=np.uint8)
+            draw_useful_area_outline(current_image_background, useful_pts)
+
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            corners, ids, _ = detector.detectMarkers(gray)
+
+            if ids is not None and len(ids) > 0:
+                valid_indices = [
+                    i for i in range(len(ids))
+                    if int(ids[i][0]) not in CALIBRATION_TAG_IDS
+                ]
+
+                if len(valid_indices) > 0:
+                    ids = ids[valid_indices]
+                    corners = [corners[i] for i in valid_indices]
+                else:
+                    ids = None
+                    corners = []
+
+            else:
+                ids = None
+                corners = []
+
+            if ids is not None and len(corners) > 0:
+                for i, corner in enumerate(corners):
+                    marker_id_int = int(ids[i][0])
+
+                    anchor_raw = get_marker_anchor_raw(corner)
+
+                    # camera_raw -> graph
+                    graph_anchor = mapper.camera_raw_to_graph(anchor_raw)
+
+                    # graph -> useful projector area
+                    projector_anchor = apply_homography_to_point(H_graph_to_useful, graph_anchor)
+
+                    if projector_anchor is None:
+                        continue
+
+                    projector_x = int(round(float(projector_anchor[0])))
+                    projector_y = int(round(float(projector_anchor[1])))
+
+                    cv2.circle(current_image_background, (projector_x, projector_y), 10, (0, 0, 255), -1)
+                    cv2.putText(
+                        current_image_background,
+                        f"ID {marker_id_int}",
+                        (projector_x + 12, projector_y - 12),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.6,
+                        (0, 0, 255),
+                        2
+                    )
+
+                    # debug console
+                    print(
+                        f"ID {marker_id_int} | raw=({anchor_raw[0]:.1f},{anchor_raw[1]:.1f}) "
+                        f"| graph=({graph_anchor[0]:.1f},{graph_anchor[1]:.1f}) "
+                        f"| useful=({projector_anchor[0]:.1f},{projector_anchor[1]:.1f})"
+                    )
+
+            display.display_image_on_projector_monitor(current_image_background)
+            show_camera_window(frame, corners=corners if ids is not None else None, ids=ids)
+
+            key = cv2.waitKey(1) & 0xFF
+            if key == 27:
                 break
-
-            elif key == ord("1"):
-                active_label = "TL"
-            elif key == ord("2"):
-                active_label = "TR"
-            elif key == ord("3"):
-                active_label = "BR"
-            elif key == ord("4"):
-                active_label = "BL"
-
-            elif key in (ord("s"), ord("S")):
-                save_points(points)
-
-            elif key == 2424832:      # LEFT
-                points[active_label][0] -= STEP_NORMAL
-            elif key == 2555904:      # RIGHT
-                points[active_label][0] += STEP_NORMAL
-            elif key == 2490368:      # UP
-                points[active_label][1] -= STEP_NORMAL
-            elif key == 2621440:      # DOWN
-                points[active_label][1] += STEP_NORMAL
-
-            points[active_label][0] = int(np.clip(points[active_label][0], 0, PROJECTOR_WIDTH - 1))
-            points[active_label][1] = int(np.clip(points[active_label][1], 0, PROJECTOR_HEIGHT - 1))
 
     finally:
         cap.release()
-        projector.close()
+        display.close_display()
         cv2.destroyAllWindows()
 
 
