@@ -35,8 +35,8 @@ PROJECTED_TAG_IDS = list(range(0, 16))   # 16 tags => grille 4x4
 # Parametres de la grille projetee
 GRID_ROWS = 4
 GRID_COLS = 4
-TAG_SIZE_PX = 220
-TAG_GAP_PX = 80
+TAG_SIZE_PX = 120
+TAG_GAP_PX = 50
 MARGIN_PX = 180
 BACKGROUND_LEVEL = 255
 
@@ -200,10 +200,24 @@ def build_projected_aruco_grid(dictionary):
 
     total_w = GRID_COLS * TAG_SIZE_PX + (GRID_COLS - 1) * TAG_GAP_PX
     total_h = GRID_ROWS * TAG_SIZE_PX + (GRID_ROWS - 1) * TAG_GAP_PX
+    # Limiter la grille à 60% du projecteur
+    scale = min(
+        (PROJECTOR_WIDTH * 0.6) / total_w,
+        (PROJECTOR_HEIGHT * 0.6) / total_h
+    )
 
+    TAG_SIZE_PX = int(TAG_SIZE_PX * scale)
+    TAG_GAP_PX = int(TAG_GAP_PX * scale)
+
+    # recalcul
+    total_w = GRID_COLS * TAG_SIZE_PX + (GRID_COLS - 1) * TAG_GAP_PX
+    total_h = GRID_ROWS * TAG_SIZE_PX + (GRID_ROWS - 1) * TAG_GAP_PX
     # On centre la grille dans le projecteur
-    x_start = (PROJECTOR_WIDTH - total_w) // 2
-    y_start = (PROJECTOR_HEIGHT - total_h) // 2
+    margin_x = int(PROJECTOR_WIDTH * 0.2)
+    margin_y = int(PROJECTOR_HEIGHT * 0.2)
+
+    x_start = margin_x
+    y_start = margin_y
 
     src_points_by_id = {}
 
@@ -269,6 +283,22 @@ def extract_projected_grid_correspondences(detections, src_points_by_id, K_cam, 
     img_pts = []
     cam_pts = []
 
+    h_cam, w_cam = 1080, 1920  # ou frame.shape
+
+    filtered_img_pts = []
+    filtered_cam_pts = []
+
+    for p_img, p_cam in zip(img_pts, cam_pts):
+        if (
+            50 < p_cam[0] < (w_cam - 50) and
+            50 < p_cam[1] < (h_cam - 50)
+        ):
+            filtered_img_pts.append(p_img)
+            filtered_cam_pts.append(p_cam)
+
+    img_pts = np.array(filtered_img_pts, dtype=np.float32)
+    cam_pts = np.array(filtered_cam_pts, dtype=np.float32)
+    
     for det in detections:
         marker_id = det["id"]
 
@@ -358,7 +388,17 @@ def main():
     time.sleep(0.5)
 
     print("Projection de la grille...")
-    proj.show(projected_grid_img)
+    # 1. fond blanc
+    white = np.full((PROJECTOR_HEIGHT, PROJECTOR_WIDTH, 3), 255, np.uint8)
+    proj.show(white)
+    time.sleep(0.5)
+
+    # 2. grille SUR fond blanc (pas remplacer)
+    grid_with_bg = white.copy()
+    mask = projected_grid_img < 250
+    grid_with_bg[mask] = projected_grid_img[mask]
+
+    proj.show(grid_with_bg)
     time.sleep(SETTLE_TIME_SEC)
 
     table_pts = np.array([
