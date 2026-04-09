@@ -1123,9 +1123,11 @@ def main():
         show_projector_pose_test_C(
             projector,
             H_proj,
+            R_sp,
+            T_sp,
+            K_proj,
+            dist_proj,
             cam_points_raw,
-            detector,
-            cap,
             K_cam,
             dist_cam
         )
