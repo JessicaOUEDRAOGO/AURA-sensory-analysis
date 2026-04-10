@@ -1,0 +1,72 @@
+{
+    "used_images": [
+        "im_00.jpg",
+        "im_01.jpg",
+        "im_02.jpg",
+        "im_03.jpg",
+        "im_04.jpg",
+        "im_05.jpg",
+        "im_06.jpg",
+        "im_07.jpg",
+        "im_08.jpg",
+        "im_09.jpg",
+        "im_10.jpg",
+        "im_11.jpg",
+        "im_12.jpg"
+    ],
+    "rejected_images": [],
+    "per_image_reprojection_error_px": [
+        {
+            "file": "im_00.jpg",
+            "error_px": 0.031595671667107805
+        },
+        {
+            "file": "im_01.jpg",
+            "error_px": 0.02490368497309568
+        },
+        {
+            "file": "im_02.jpg",
+            "error_px": 0.022826354041367274
+        },
+        {
+            "file": "im_03.jpg",
+            "error_px": 0.01899461797439361
+        },
+        {
+            "file": "im_04.jpg",
+            "error_px": 0.02162035007249518
+        },
+        {
+            "file": "im_05.jpg",
+            "error_px": 0.028121060972287008
+        },
+        {
+            "file": "im_06.jpg",
+            "error_px": 0.032833729225933486
+        },
+        {
+            "file": "im_07.jpg",
+            "error_px": 0.029573676243555082
+        },
+        {
+            "file": "im_08.jpg",
+            "error_px": 0.020409431229071687
+        },
+        {
+            "file": "im_09.jpg",
+            "error_px": 0.020718609375030086
+        },
+        {
+            "file": "im_10.jpg",
+            "error_px": 0.013194813048903827
+        },
+        {
+            "file": "im_11.jpg",
+            "error_px": 0.01279765252669087
+        },
+        {
+            "file": "im_12.jpg",
+            "error_px": 0.012841479767547579
+        }
+    ]
+}
