@@ -102,7 +102,13 @@ NappingAnalysisGUI/assets/textures/background_*_final.png
 *_debug.json
 *_debug.png
 projected_grid_test*.png
+# dossiers calibration (images temporaires)
+src/core/calibration/camera_calibration/img_checker*
+src/core/calibration/camera_calibration/detected_checkerboards*
 
+# images générées
+*.png
+*.jpg
 # python
 __pycache__/
 *.pyc
