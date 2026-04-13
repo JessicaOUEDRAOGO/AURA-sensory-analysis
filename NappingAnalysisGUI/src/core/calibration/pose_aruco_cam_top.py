@@ -1,6 +1,4 @@
 # -*- coding: utf-8 -*-
-from math import dist
-
 import cv2
 import numpy as np
 import json
@@ -9,29 +7,26 @@ from pathlib import Path
 # =========================================================
 # PARAMETRES
 # =========================================================
-CAMERA_ID = 0   # ⚠️ caméra TOP
+CAMERA_ID = 0
 CAMERA_WIDTH = 1920
 CAMERA_HEIGHT = 1080
-
-GRID_SIZE = 700
 
 CONFIG_DIR = Path("config")
 OUTPUT_PATH = CONFIG_DIR / "camera_top_mapping.json"
 
-# IDs des coins (identiques à bottom)
-CORNER_TAG_IDS = {
-    "TL": 42,
-    "TR": 43,
-    "BR": 40,
-    "BL": 41,
-}
+# on garde les 4 IDs utiles, mais sans leur imposer un rôle spatial
+CORNER_TAG_IDS = [42, 43, 40, 41]
+
+# repère cible défini PAR RAPPORT A L'IMAGE CAM_TOP
+TABLE_W = 600
+TABLE_H = 600
+MARGIN = 10
 
 # =========================================================
 # CAMERA
 # =========================================================
 def open_camera():
     cap = cv2.VideoCapture(CAMERA_ID, cv2.CAP_DSHOW)
-
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
@@ -41,6 +36,7 @@ def open_camera():
 
     return cap
 
+
 def grab_frame(cap):
     for _ in range(3):
         cap.read()
@@ -49,118 +45,127 @@ def grab_frame(cap):
         raise RuntimeError("Erreur capture")
     return frame
 
+
+# =========================================================
+# CALIB
+# =========================================================
 def load_camera_top_calibration():
-    data = json.load(open("config/camera_calibration_top.json"))
+    with open(CONFIG_DIR / "camera_calibration_top.json", "r", encoding="utf-8") as f:
+        data = json.load(f)
 
     K = np.array(data["camera_matrix"], dtype=np.float64)
     dist = np.array(data["dist_coeffs"], dtype=np.float64)
-
     return K, dist
 
+
 def undistort_points(pts, K, dist):
-    pts = pts.reshape(-1,1,2)
+    pts = np.asarray(pts, dtype=np.float32).reshape(-1, 1, 2)
     und = cv2.undistortPoints(pts, K, dist, P=K)
-    return und.reshape(-1,2)
+    return und.reshape(-1, 2)
+
 
 # =========================================================
 # ARUCO
 # =========================================================
 def create_detector():
-    dict_aruco = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
+    aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
     params = cv2.aruco.DetectorParameters()
     params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
-    return cv2.aruco.ArucoDetector(dict_aruco, params)
+    return cv2.aruco.ArucoDetector(aruco_dict, params)
 
-def select_corner(corners, pos):
-    if pos == "TL":
-        return corners[np.argmax(-corners[:,0] + corners[:,1])]
-    elif pos == "TR":
-        return corners[np.argmax(corners[:,0] + corners[:,1])]
-    elif pos == "BR":
-        return corners[np.argmin(-corners[:,0] + corners[:,1])]
-    elif pos == "BL":
-        return corners[np.argmin(corners[:,0] + corners[:,1])]
+
+def select_outer_corner(corners):
+    """
+    corners : (4,2) d'un tag ArUco
+    Retourne le coin du tag le plus éloigné du centre global de l'image,
+    ce qui correspond bien au coin 'extérieur' du tag placé au bord de la table.
+    Cette stratégie est indépendante du nom TL/TR/BR/BL hérité de la bottom.
+    """
+    center_img = np.array([CAMERA_WIDTH / 2.0, CAMERA_HEIGHT / 2.0], dtype=np.float32)
+    dists = np.linalg.norm(corners - center_img, axis=1)
+    return corners[np.argmax(dists)]
+
+
+def order_points_image_top(pts):
+    """
+    Trie 4 points selon LE REPERE DE L'IMAGE CAM_TOP :
+    retourne [TL, TR, BR, BL]
+    """
+    pts = np.asarray(pts, dtype=np.float32)
+
+    s = pts.sum(axis=1)
+    diff = np.diff(pts, axis=1).reshape(-1)
+
+    tl = pts[np.argmin(s)]
+    br = pts[np.argmax(s)]
+    tr = pts[np.argmin(diff)]
+    bl = pts[np.argmax(diff)]
+
+    return np.array([tl, tr, br, bl], dtype=np.float32)
+
 
 def detect_tags(frame, detector):
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     corners, ids, _ = detector.detectMarkers(gray)
 
     if ids is None:
-        return None, None
+        return {}, None, None, gray
 
     ids = ids.flatten()
     detected = {}
 
-    # -------------------------------------------------
-    # 1) Stockage des tags détectés
-    # -------------------------------------------------
-    for i, id_ in enumerate(ids):
-        id_ = int(id_)
-        if id_ in CORNER_TAG_IDS.values():
-            pts = corners[i][0].astype(np.float32)  # (4,2)
-
-            # centre du tag (robuste)
+    for i, marker_id in enumerate(ids):
+        marker_id = int(marker_id)
+        if marker_id in CORNER_TAG_IDS:
+            pts = corners[i][0].astype(np.float32)
             center = np.mean(pts, axis=0)
 
-            detected[id_] = {
+            detected[marker_id] = {
                 "corners": pts,
-                "center": center
+                "center": center,
+                "selected_outer_corner": select_outer_corner(pts),
             }
 
-    # -------------------------------------------------
-    # 2) Vérifie que les 4 coins sont présents
-    # -------------------------------------------------
-    required_ids = [
-        CORNER_TAG_IDS["TL"],  # 42
-        CORNER_TAG_IDS["TR"],  # 43
-        CORNER_TAG_IDS["BR"],  # 40
-        CORNER_TAG_IDS["BL"],  # 41
-    ]
+    if len(detected) != 4:
+        return detected, None, None, gray
 
-    if not all(tag_id in detected for tag_id in required_ids):
-        return detected, None
+    raw_selected = np.array(
+        [detected[mid]["selected_outer_corner"] for mid in detected.keys()],
+        dtype=np.float32
+    )
 
-    # -------------------------------------------------
-    # 3) Construction des points à partir des coins des tags
-    # -------------------------------------------------
-    pts = np.array([
-        detected[CORNER_TAG_IDS["TL"]]["center"],
-        detected[CORNER_TAG_IDS["TR"]]["center"],
-        detected[CORNER_TAG_IDS["BR"]]["center"],
-        detected[CORNER_TAG_IDS["BL"]]["center"],
-    ], dtype=np.float32)
+    ordered_pts = order_points_image_top(raw_selected)
 
-    return detected, pts
+    return detected, raw_selected, ordered_pts, gray
+
 
 # =========================================================
-# HOMOGRAPHIE TOP -> GRAPH
+# HOMOGRAPHIE TOP -> TABLE (repère cam_top)
 # =========================================================
-def compute_H_top(pts, K, dist):
+def compute_H_top(ordered_pts, K, dist):
+    pts_undist = undistort_points(ordered_pts, K, dist)
 
-    pts_undist = undistort_points(pts, K, dist)
-
-    table_pts= np.array([
-        [10, 580],   # TL_top → BL_table
-        [580, 580],  # TR_top → BR_table
-        [590, 10],   # BR_top → TR_table
-        [10, 10],    # BL_top → TL_table
+    table_pts = np.array([
+        [MARGIN, MARGIN],                              # TL dans l'image top
+        [TABLE_W - MARGIN, MARGIN],                    # TR
+        [TABLE_W - MARGIN, TABLE_H - MARGIN],          # BR
+        [MARGIN, TABLE_H - MARGIN],                    # BL
     ], dtype=np.float32)
 
     H, _ = cv2.findHomography(pts_undist, table_pts)
+    return H, pts_undist, table_pts
 
-    return H, pts_undist
 
 def apply_H(H, pt):
-    p = np.array([pt[0], pt[1], 1.0])
+    p = np.array([pt[0], pt[1], 1.0], dtype=np.float64)
     out = H @ p
+    if abs(out[2]) < 1e-12:
+        return None
     out /= out[2]
     return out[:2]
 
+
 def line_intersection(p1, p2, p3, p4):
-    """
-    Intersection de deux droites 2D :
-    (p1,p2) et (p3,p4)
-    """
     p1 = np.asarray(p1, dtype=np.float64)
     p2 = np.asarray(p2, dtype=np.float64)
     p3 = np.asarray(p3, dtype=np.float64)
@@ -179,61 +184,75 @@ def line_intersection(p1, p2, p3, p4):
     py = ((x1*y2 - y1*x2)*(y3 - y4) - (y1 - y2)*(x3*y4 - y3*x4)) / denom
 
     return np.array([px, py], dtype=np.float32)
+
+
 # =========================================================
-# DEBUG VISUEL
+# DEBUG
 # =========================================================
-def draw_debug(frame, detected, pts, H, pts_undist=None):
+def draw_debug(frame, detected, raw_selected, ordered_pts, H, pts_undist=None):
     out = frame.copy()
 
-    # dessin des tags
-    if detected:
-        for id_, data in detected.items():
-            corners = data["corners"]
-            center = data["center"]
+    for marker_id, data in detected.items():
+        corners = data["corners"]
+        center = data["center"]
+        sel = data["selected_outer_corner"]
 
-            cv2.polylines(out, [corners.astype(int)], True, (0,255,0), 2)
-            cv2.circle(out, (int(center[0]), int(center[1])), 5, (0,0,255), -1)
-            cv2.putText(out, str(id_), (int(center[0]), int(center[1])), 0, 1, (255,0,0), 2)
+        cv2.polylines(out, [corners.astype(np.int32)], True, (0, 255, 0), 2)
+        cv2.circle(out, tuple(np.round(center).astype(int)), 5, (0, 0, 255), -1)
+        cv2.putText(out, str(marker_id), tuple(np.round(center).astype(int)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
 
-    if pts is not None:
-        labels = ["TL","TR","BR","BL"]
+        cv2.circle(out, tuple(np.round(sel).astype(int)), 9, (0, 255, 255), 2)
 
-        for i, p in enumerate(pts):
-            x,y = int(p[0]), int(p[1])
-            cv2.circle(out, (x,y), 8, (255,255,0), 2)
-            cv2.putText(out, labels[i], (x+10,y), 0, 0.8, (255,255,0),2)
+    if raw_selected is not None:
+        for p in raw_selected:
+            x, y = int(round(float(p[0]))), int(round(float(p[1])))
+            cv2.circle(out, (x, y), 6, (255, 0, 255), -1)
 
-        # centre projeté
-        center_cam = line_intersection(
-            pts_undist[0], pts_undist[2],
-            pts_undist[1], pts_undist[3]
-        )
+    if ordered_pts is not None:
+        labels = ["TL", "TR", "BR", "BL"]
+        for i, p in enumerate(ordered_pts):
+            x, y = int(round(float(p[0]))), int(round(float(p[1])))
+            cv2.circle(out, (x, y), 8, (255, 255, 0), 2)
+            cv2.putText(out, labels[i], (x + 10, y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
 
-        if center_cam is not None:
-            center_graph = apply_H(H, center_cam)
+        cv2.polylines(out, [np.round(ordered_pts).astype(np.int32)], True, (255, 255, 0), 2)
 
-        cv2.putText(
-            out,
-            f"GRAPH: {center_graph[0]:.1f},{center_graph[1]:.1f}",
-            (50,50),
-            0,1,(0,255,255),2
-        )
+        if pts_undist is not None and H is not None:
+            center_cam = line_intersection(
+                pts_undist[0], pts_undist[2],
+                pts_undist[1], pts_undist[3]
+            )
+            if center_cam is not None:
+                center_table = apply_H(H, center_cam)
+                if center_table is not None:
+                    cv2.putText(
+                        out,
+                        f"TABLE: {center_table[0]:.1f},{center_table[1]:.1f}",
+                        (50, 50),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        1.0,
+                        (0, 255, 255),
+                        2
+                    )
 
     return out
 
-# =========================================================
-# GRILLE DEBUG
-# =========================================================
-def draw_graph_grid():
-    img = np.zeros((GRID_SIZE, GRID_SIZE, 3), dtype=np.uint8)
 
-    for i in range(0, GRID_SIZE, 50):
-        cv2.line(img, (i,0), (i,GRID_SIZE), (0,255,0),1)
-        cv2.line(img, (0,i), (GRID_SIZE,i), (0,255,0),1)
+def draw_table_grid():
+    img = np.zeros((TABLE_H, TABLE_W, 3), dtype=np.uint8)
 
-    cv2.circle(img, (GRID_SIZE//2, GRID_SIZE//2), 10, (0,0,255), -1)
+    for i in range(0, TABLE_W, 50):
+        cv2.line(img, (i, 0), (i, TABLE_H - 1), (0, 255, 0), 1)
+    for j in range(0, TABLE_H, 50):
+        cv2.line(img, (0, j), (TABLE_W - 1, j), (0, 255, 0), 1)
 
+    cv2.circle(img, (TABLE_W // 2, TABLE_H // 2), 10, (0, 0, 255), -1)
+    cv2.putText(img, "CENTER", (TABLE_W // 2 - 35, TABLE_H // 2 - 15),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
     return img
+
 
 # =========================================================
 # MAIN
@@ -243,30 +262,38 @@ def main():
 
     cap = open_camera()
     detector = create_detector()
+    K, dist = load_camera_top_calibration()
 
     H_final = None
 
     while True:
         frame = grab_frame(cap)
 
-        detected, pts = detect_tags(frame, detector)
-        K, dist = load_camera_top_calibration()
-        if pts is not None:
+        detected, raw_selected, ordered_pts, gray = detect_tags(frame, detector)
 
-            H, pts_undist = compute_H_top(pts, K, dist)
+        if ordered_pts is not None:
+            H, pts_undist, table_pts = compute_H_top(ordered_pts, K, dist)
             H_final = H
 
-            debug = draw_debug(frame, detected, pts, H, pts_undist)
+            # DEBUG : affiche les points ordonnés
+            labels = ["TL", "TR", "BR", "BL"]
+            for i, (cam_pt, undist_pt, table_pt) in enumerate(zip(ordered_pts, pts_undist, table_pts)):
+                print(f"{labels[i]}: cam={cam_pt} → undist={undist_pt} → table_target={table_pt}")
+            
+            # Affiche aussi sur img
+            print(f"\nImage size: {CAMERA_WIDTH}x{CAMERA_HEIGHT}")
+            print(f"Cam corners bounds: x=[{ordered_pts[:,0].min():.0f}, {ordered_pts[:,0].max():.0f}], y=[{ordered_pts[:,1].min():.0f}, {ordered_pts[:,1].max():.0f}]")
 
-            # test projection centre
+            debug = draw_debug(frame, detected, raw_selected, ordered_pts, H, pts_undist)
+
             center_cam = line_intersection(
-                pts_undist[0], pts_undist[2],   # TL -> BR
-                pts_undist[1], pts_undist[3]    # TR -> BL
+                pts_undist[0], pts_undist[2],
+                pts_undist[1], pts_undist[3]
             )
-
             if center_cam is not None:
                 proj = apply_H(H, center_cam)
-                print(f"CENTER TABLE: {proj}")
+                if proj is not None:
+                    print(f"CENTER TABLE: {proj}")
 
         else:
             debug = frame
@@ -274,21 +301,27 @@ def main():
         cv2.imshow("Camera TOP Debug", debug)
 
         if H_final is not None:
-            grid = draw_graph_grid()
-            cv2.imshow("Graph View", grid)
+            cv2.imshow("Table View", draw_table_grid())
 
         key = cv2.waitKey(1)
 
-        if key == ord('s') and H_final is not None:
-            with open(OUTPUT_PATH, "w") as f:
-                json.dump({"H_top_to_graph": H_final.tolist()}, f, indent=4)
-            print("✅ Sauvegarde OK")
+        if key == ord("s") and H_final is not None:
+            with open(OUTPUT_PATH, "w", encoding="utf-8") as f:
+                json.dump({
+                    "H_top_to_table": H_final.tolist(),
+                    "table_width": TABLE_W,
+                    "table_height": TABLE_H,
+                    "margin": MARGIN,
+                    "point_order_in_cam_top": ["TL", "TR", "BR", "BL"]
+                }, f, indent=4)
+            print("Sauvegarde OK")
 
         elif key == 27:
             break
 
     cap.release()
     cv2.destroyAllWindows()
+
 
 if __name__ == "__main__":
     main()
