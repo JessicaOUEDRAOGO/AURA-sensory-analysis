@@ -95,9 +95,38 @@ def main():
     aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
     detector = cv2.aruco.ArucoDetector(aruco_dict)
 
-    print("\n[INFO] Appuie sur 't' pour tester, 'q' pour quitter")
+    print("\n[INFO] Test automatique activé, appuie sur 'q' pour quitter")
 
     last_centers = {}
+    tested = False
+
+    def run_test(centers):
+        print("\n=== TEST COINS (H chargée) ===")
+        for name, tag_id in TAG_IDS.items():
+            if tag_id in centers:
+                cx, cy = centers[tag_id]
+                x_mm, y_mm = pixel_to_mm((cx, cy), H)
+                print(f"{name} -> ({x_mm:.2f}, {y_mm:.2f}) mm")
+            else:
+                print(f"{name} -> non détecté")
+
+        print("\n=== TEST TAG ===")
+        if TEST_TAG_ID in centers:
+            cx, cy = centers[TEST_TAG_ID]
+            x_mm, y_mm = pixel_to_mm((cx, cy), H)
+
+            error_x = x_mm - EXPECTED_MM[0]
+            error_y = y_mm - EXPECTED_MM[1]
+            error_total = np.sqrt(error_x**2 + error_y**2)
+
+            print(f"ID = {TEST_TAG_ID}")
+            print(f"Mesuré (mm) : ({x_mm:.2f}, {y_mm:.2f})")
+            print(f"Attendu (mm) : {EXPECTED_MM}")
+            print(f"Erreur X : {error_x:.2f} mm")
+            print(f"Erreur Y : {error_y:.2f} mm")
+            print(f"Erreur totale : {error_total:.2f} mm")
+        else:
+            print(f"Tag {TEST_TAG_ID} non détecté")
 
     while True:
         ret, frame = cap.read()
@@ -128,39 +157,18 @@ def main():
                 cv2.putText(display, str(int(marker_id)), (int(cx) + 8, int(cy) - 8),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
 
+        if all(tag_id in last_centers for tag_id in TAG_IDS.values()):
+            if not tested:
+                run_test(last_centers)
+                tested = True
+        else:
+            tested = False
+
         cv2.imshow("TEST HOMOGRAPHIE", display)
         key = cv2.waitKey(1) & 0xFF
 
         if key == ord('q'):
             break
-
-        elif key == ord('t'):
-            print("\n=== TEST COINS (H chargée) ===")
-            for name, tag_id in TAG_IDS.items():
-                if tag_id in last_centers:
-                    cx, cy = last_centers[tag_id]
-                    x_mm, y_mm = pixel_to_mm((cx, cy), H)
-                    print(f"{name} -> ({x_mm:.2f}, {y_mm:.2f}) mm")
-                else:
-                    print(f"{name} -> non détecté")
-
-            print("\n=== TEST TAG ===")
-            if TEST_TAG_ID in last_centers:
-                cx, cy = last_centers[TEST_TAG_ID]
-                x_mm, y_mm = pixel_to_mm((cx, cy), H)
-
-                error_x = x_mm - EXPECTED_MM[0]
-                error_y = y_mm - EXPECTED_MM[1]
-                error_total = np.sqrt(error_x**2 + error_y**2)
-
-                print(f"ID = {TEST_TAG_ID}")
-                print(f"Mesuré (mm) : ({x_mm:.2f}, {y_mm:.2f})")
-                print(f"Attendu (mm) : {EXPECTED_MM}")
-                print(f"Erreur X : {error_x:.2f} mm")
-                print(f"Erreur Y : {error_y:.2f} mm")
-                print(f"Erreur totale : {error_total:.2f} mm")
-            else:
-                print(f"Tag {TEST_TAG_ID} non détecté")
 
     cap.release()
     cv2.destroyAllWindows()
