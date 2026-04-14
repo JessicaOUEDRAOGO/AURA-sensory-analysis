@@ -13,7 +13,7 @@ HOMOGRAPHY_PATH = CONFIG_DIR / "homography_camtop_to_table.json"
 
 CAMERA_ID = 0
 TEST_TAG_ID = 7
-EXPECTED_MM = (400.0, 300.0)
+EXPECTED_MM = (290,500)
 
 TAG_IDS = {
     "TL": 41,
