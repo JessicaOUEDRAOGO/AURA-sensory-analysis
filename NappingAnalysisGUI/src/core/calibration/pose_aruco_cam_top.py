@@ -3,11 +3,11 @@ import cv2
 import numpy as np
 import json
 from pathlib import Path
+
 # =========================================================
 # PARAMÈTRES
 # =========================================================
 CAMERA_ID = 0
-
 
 TAG_IDS = {
     "TL": 41,
@@ -17,6 +17,7 @@ TAG_IDS = {
 }
 
 TABLE_SIZE_MM = 580.0
+
 # =========================================================
 # CHEMINS PROJET
 # =========================================================
@@ -25,7 +26,7 @@ PROJECT_ROOT = BASE_DIR.parents[2]
 CONFIG_DIR = PROJECT_ROOT / "config"
 
 CAMERA_CALIB_PATH = CONFIG_DIR / "camera_calibration_top.json"
-OUTPUT_JSON = CONFIG_DIR / "homography_camtop_to_table.json"
+OUTPUT_JSON = CONFIG_DIR / "camtop_table_pose.json"
 
 
 # =========================================================
@@ -37,107 +38,250 @@ def load_json(path: Path):
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
+
 def load_camera_calibration(path: Path):
     data = load_json(path)
-
     K = np.array(data["camera_matrix"])
     dist = np.array(data["dist_coeffs"])
-
     return K, dist
+
+
+# =========================================================
+# GEOMETRIE 3D TABLE
+# =========================================================
+
+def estimate_table_pose(centers, K):
+    """
+    Estime la pose de la table via solvePnP.
+    On passe dist=zeros car l'image est déjà undistordue (new_K utilisé).
+    Retourne (rvec, tvec) ou (None, None) si échec.
+    """
+    object_points = np.array([
+        [0,              0,              0],
+        [TABLE_SIZE_MM,  0,              0],
+        [TABLE_SIZE_MM,  TABLE_SIZE_MM,  0],
+        [0,              TABLE_SIZE_MM,  0],
+    ], dtype=np.float64)
+
+    image_points = np.array([
+        centers[TAG_IDS["TL"]],
+        centers[TAG_IDS["TR"]],
+        centers[TAG_IDS["BR"]],
+        centers[TAG_IDS["BL"]],
+    ], dtype=np.float64)
+
+    dist_zero = np.zeros((5, 1), dtype=np.float64)
+
+    success, rvec, tvec = cv2.solvePnP(
+        object_points,
+        image_points,
+        K,
+        dist_zero,
+        flags=cv2.SOLVEPNP_ITERATIVE
+    )
+
+    if not success:
+        return None, None
+
+    # Raffiner avec solvePnPRefineLM pour plus de précision
+    rvec, tvec = cv2.solvePnPRefineLM(
+        object_points,
+        image_points,
+        K,
+        dist_zero,
+        rvec,
+        tvec
+    )
+
+    return rvec, tvec
+
+
+def pixel_to_ray(u, v, K):
+    """Calcule le rayon unitaire passant par le pixel (u, v) dans le repère caméra."""
+    K_inv = np.linalg.inv(K)
+    pt = np.array([u, v, 1.0], dtype=np.float64)
+    ray = K_inv @ pt
+    ray = ray / np.linalg.norm(ray)
+    return ray
+
+
+def intersect_ray_with_table_plane(ray, rvec, tvec):
+    """
+    Intersecte le rayon (depuis l'origine caméra) avec le plan de la table (Z=0 en repère table).
+    Le plan est défini par sa normale (axe Z de la table dans le repère caméra)
+    et un point appartenant au plan (tvec = origine de la table dans le repère caméra).
+    """
+    R, _ = cv2.Rodrigues(rvec)
+
+    # Normale au plan table = 3ème colonne de R (axe Z table exprimé en repère caméra)
+    normal = R[:, 2]
+
+    # Un point du plan : l'origine de la table dans le repère caméra
+    plane_origin = tvec.reshape(3)
+
+    # Origine du rayon = centre optique de la caméra = (0, 0, 0) dans le repère caméra
+    ray_origin = np.zeros(3, dtype=np.float64)
+
+    denom = np.dot(normal, ray)
+    if abs(denom) < 1e-9:
+        return None  # Rayon parallèle au plan
+
+    t = np.dot(normal, plane_origin - ray_origin) / denom
+
+    if t < 0:
+        return None  # Intersection derrière la caméra
+
+    intersection_cam = ray_origin + t * ray
+    return intersection_cam
+
+
+def camera_to_table(point_cam, rvec, tvec):
+    """
+    Transforme un point du repère caméra vers le repère table.
+    Retourne (x_mm, y_mm) dans le plan de la table.
+    """
+    R, _ = cv2.Rodrigues(rvec)
+    # Transformation inverse : point_table = R^T * (point_cam - tvec)
+    point_table = R.T @ (point_cam - tvec.reshape(3))
+    return float(point_table[0]), float(point_table[1])
+
+
+def pixel_to_table_mm(u, v, rvec, tvec, K):
+    """
+    Convertit un pixel (u, v) en coordonnées millimètriques dans le repère table.
+    Retourne (x_mm, y_mm) ou None si impossible.
+    """
+    ray = pixel_to_ray(u, v, K)
+    point_cam = intersect_ray_with_table_plane(ray, rvec, tvec)
+
+    if point_cam is None:
+        return None
+
+    x_mm, y_mm = camera_to_table(point_cam, rvec, tvec)
+    return x_mm, y_mm
+
+
 # =========================================================
 # OUTILS
 # =========================================================
+
 def compute_center_diagonals(pts):
+    """Calcule le centre d'un quadrilatère par intersection de ses diagonales."""
     p1, p2, p3, p4 = pts
 
     def line(p, q):
         A = q[1] - p[1]
         B = p[0] - q[0]
-        C = A*p[0] + B*p[1]
+        C = A * p[0] + B * p[1]
         return A, B, C
 
     A1, B1, C1 = line(p1, p3)
     A2, B2, C2 = line(p2, p4)
 
-    det = A1*B2 - A2*B1
-
+    det = A1 * B2 - A2 * B1
     if abs(det) < 1e-6:
         return None
 
-    x = (B2*C1 - B1*C2) / det
-    y = (A1*C2 - A2*C1) / det
-
+    x = (B2 * C1 - B1 * C2) / det
+    y = (A1 * C2 - A2 * C1) / det
     return (x, y)
 
 
 def get_marker_centers(corners, ids):
+    """Retourne un dict {marker_id: (cx, cy)} pour chaque tag détecté."""
     centers = {}
-
     for i, marker_id in enumerate(ids.flatten()):
         pts = corners[i][0]
-
         center = compute_center_diagonals(pts)
-
         if center is not None:
             cx, cy = center
         else:
-            cx = np.mean(pts[:, 0])
-            cy = np.mean(pts[:, 1])
-
+            cx = float(np.mean(pts[:, 0]))
+            cy = float(np.mean(pts[:, 1]))
         centers[int(marker_id)] = (cx, cy)
-
     return centers
 
 
-def build_homography(centers):
-    pts_img = np.array([
-        centers[TAG_IDS["TL"]],
-        centers[TAG_IDS["TR"]],
-        centers[TAG_IDS["BR"]],
-        centers[TAG_IDS["BL"]],
-    ], dtype=np.float32)
-
-    pts_mm = np.array([
-        [0, 0],
-        [TABLE_SIZE_MM, 0],
-        [TABLE_SIZE_MM, TABLE_SIZE_MM],
-        [0, TABLE_SIZE_MM],
-    ], dtype=np.float32)
-
-    H, _ = cv2.findHomography(pts_img, pts_mm, cv2.RANSAC)
-
-    return H, pts_img, pts_mm
-
-
-def pixel_to_mm(pt, H):
-    p = np.array([pt[0], pt[1], 1.0])
-    p_mm = H @ p
-    p_mm /= p_mm[2]
-    return p_mm[0], p_mm[1]
-
-
-def save_json(H, pts_img, pts_mm):
+def save_pose(rvec, tvec, new_K):
+    """
+    Sauvegarde la pose de la table.
+    On sauvegarde new_K (matrice après getOptimalNewCameraMatrix) car c'est
+    celle utilisée lors du calcul : l'image est undistordue avec new_K et dist=0.
+    """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
     data = {
-        "H_pixel_to_mm": H.tolist(),
-        "points_image_px": pts_img.tolist(),
-        "points_table_mm": pts_mm.tolist(),
+        "rvec": rvec.tolist(),
+        "tvec": tvec.tolist(),
+        # new_K est la matrice à utiliser pour pixel_to_table_mm (dist = zeros)
+        "camera_matrix": new_K.tolist(),
+        "dist_coeffs": np.zeros((5, 1)).tolist(),
         "table_size_mm": TABLE_SIZE_MM,
-        "tag_ids": TAG_IDS
+        "tag_ids": TAG_IDS,
+        "note": (
+            "camera_matrix = new_K (après getOptimalNewCameraMatrix). "
+            "dist_coeffs = 0 car l'image est préalablement undistordue."
+        )
     }
 
     with open(OUTPUT_JSON, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=4)
 
-    print(f"[OK] Sauvegardé dans {OUTPUT_JSON}")
+    print(f"[OK] Pose sauvegardée dans {OUTPUT_JSON}")
+
+
+def run_validation_tests(centers, rvec, tvec, new_K, frame_undist):
+    """Affiche les résultats de validation après capture."""
+
+    print("\n=== TEST COINS (doivent être proches de 0 ou 580) ===")
+    errors = []
+    expected = {
+        "TL": (0.0,           0.0),
+        "TR": (TABLE_SIZE_MM, 0.0),
+        "BR": (TABLE_SIZE_MM, TABLE_SIZE_MM),
+        "BL": (0.0,           TABLE_SIZE_MM),
+    }
+    for name, tag_id in TAG_IDS.items():
+        cx, cy = centers[tag_id]
+        result = pixel_to_table_mm(cx, cy, rvec, tvec, new_K)
+        if result is None:
+            print(f"  {name} -> ERREUR intersection")
+            continue
+        x_mm, y_mm = result
+        ex, ey = expected[name]
+        err = np.sqrt((x_mm - ex)**2 + (y_mm - ey)**2)
+        errors.append(err)
+        print(f"  {name} -> ({x_mm:7.2f}, {y_mm:7.2f}) mm  |  erreur = {err:.2f} mm")
+
+    if errors:
+        print(f"  Erreur moyenne : {np.mean(errors):.2f} mm | max : {np.max(errors):.2f} mm")
+
+    print("\n=== TEST CENTRE IMAGE ===")
+    h, w = frame_undist.shape[:2]
+    cx_img, cy_img = w / 2.0, h / 2.0
+    result = pixel_to_table_mm(cx_img, cy_img, rvec, tvec, new_K)
+    if result is not None:
+        x_mm, y_mm = result
+        print(f"  Pixel ({cx_img:.0f}, {cy_img:.0f}) -> ({x_mm:.1f}, {y_mm:.1f}) mm")
+        print(f"  (Centre géométrique table = {TABLE_SIZE_MM/2:.1f}, {TABLE_SIZE_MM/2:.1f} mm)")
+        print(f"  Décalage caméra/centre table : Δx={x_mm - TABLE_SIZE_MM/2:.1f} mm, "
+              f"Δy={y_mm - TABLE_SIZE_MM/2:.1f} mm")
+    else:
+        print("  Impossible de calculer l'intersection")
+
+    print("\n=== TEST CENTRE TABLE (290, 290) vers pixel ===")
+    # Projection inverse : point table -> pixel (pour vérification croisée)
+    dist_zero = np.zeros((5, 1), dtype=np.float64)
+    pt_3d = np.array([[TABLE_SIZE_MM / 2, TABLE_SIZE_MM / 2, 0.0]], dtype=np.float64)
+    projected, _ = cv2.projectPoints(pt_3d, rvec, tvec, new_K, dist_zero)
+    px, py = projected[0][0]
+    print(f"  Centre table (290, 290) mm -> pixel ({px:.1f}, {py:.1f})")
 
 
 # =========================================================
 # MAIN
 # =========================================================
 def main():
-
     cap = cv2.VideoCapture(CAMERA_ID)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
@@ -148,69 +292,66 @@ def main():
 
     # Charger calibration
     K, dist = load_camera_calibration(CAMERA_CALIB_PATH)
-    
-    # Lire une frame pour init new_K
+
+    # Lire une frame pour initialiser new_K
     ret, frame = cap.read()
     if not ret:
         print("[ERREUR] Impossible de lire la caméra")
+        cap.release()
         return
 
     h, w = frame.shape[:2]
-    print("frame size =", w, h)
-    new_K, _ = cv2.getOptimalNewCameraMatrix(K, dist, (w, h), 1, (w, h))
+    print(f"[INFO] Résolution : {w}x{h}")
+
+    new_K, roi = cv2.getOptimalNewCameraMatrix(K, dist, (w, h), 1, (w, h))
+    print(f"[INFO] new_K diagonal : fx={new_K[0,0]:.1f}, fy={new_K[1,1]:.1f}, "
+          f"cx={new_K[0,2]:.1f}, cy={new_K[1,2]:.1f}")
 
     # ArUco
     aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
     detector = cv2.aruco.ArucoDetector(aruco_dict)
 
-    print("[INFO] Appuie sur 'c' pour capturer et calculer l'homographie")
-    # TEST_TAG_ID = 7
+    print("[INFO] Appuie sur 'c' pour capturer et calculer la pose | 'q' pour quitter")
+
     while True:
         ret, frame = cap.read()
         if not ret:
             break
 
-        # UNDISTORTION
+        # Undistortion avec new_K
         frame_undist = cv2.undistort(frame, K, dist, None, new_K)
-
         gray = cv2.cvtColor(frame_undist, cv2.COLOR_BGR2GRAY)
         corners, ids, _ = detector.detectMarkers(gray)
 
         display = frame_undist.copy()
+        all_tags_found = False
 
         if ids is not None:
             cv2.aruco.drawDetectedMarkers(display, corners, ids)
-
             centers = get_marker_centers(corners, ids)
 
             if all(tag_id in centers for tag_id in TAG_IDS.values()):
-
+                all_tags_found = True
                 for name, tag_id in TAG_IDS.items():
                     cx, cy = centers[tag_id]
-
                     cv2.circle(display, (int(cx), int(cy)), 6, (0, 0, 255), -1)
-                    cv2.putText(display, name, (int(cx)+5, int(cy)-5),
+                    cv2.putText(display, name, (int(cx) + 5, int(cy) - 5),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
 
-                cv2.putText(display, "4 TAGS OK - press 'c'",
-                            (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,0), 2)
-            # # Affichage du tag test
-            # if TEST_TAG_ID in centers:
-            #     cx, cy = centers[TEST_TAG_ID]
-
-            #     cv2.circle(display, (int(cx), int(cy)), 8, (255, 0, 0), -1)
-            #     cv2.putText(display, "TEST 7", (int(cx)+10, int(cy)),
-            #                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+                cv2.putText(display, "4 TAGS OK - appuie sur 'c'",
+                            (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+            else:
+                detected = [int(i) for i in ids.flatten()]
+                cv2.putText(display, f"Tags detectes: {detected}",
+                            (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 165, 255), 2)
 
         cv2.imshow("Detection camera top", display)
-
         key = cv2.waitKey(1) & 0xFF
 
         if key == ord('q'):
             break
 
         elif key == ord('c'):
-
             if ids is None:
                 print("[ERREUR] Aucun tag détecté")
                 continue
@@ -218,54 +359,25 @@ def main():
             centers = get_marker_centers(corners, ids)
 
             if not all(tag_id in centers for tag_id in TAG_IDS.values()):
-                print("[ERREUR] Les 4 tags ne sont pas visibles")
+                missing = [name for name, tid in TAG_IDS.items() if tid not in centers]
+                print(f"[ERREUR] Tags manquants : {missing}")
                 continue
 
-            H, pts_img, pts_mm = build_homography(centers)
+            print("\n[INFO] Calcul de la pose en cours...")
+            rvec, tvec = estimate_table_pose(centers, new_K)
 
-            print("\n=== MATRICE H (pixel -> mm) ===")
-            print(H)
+            if rvec is None or tvec is None:
+                print("[ERREUR] solvePnP a échoué")
+                continue
 
-            # TEST CENTRE IMAGE (UNDISTORDUE)
-            h, w = frame_undist.shape[:2]
-            test_pt = (w//2, h//2)
+            print(f"  rvec : {rvec.flatten()}")
+            print(f"  tvec : {tvec.flatten()} mm")
 
-            x_mm, y_mm = pixel_to_mm(test_pt, H)
+            # Validation
+            run_validation_tests(centers, rvec, tvec, new_K, frame_undist)
 
-            print(f"\nTest point centre image -> ({x_mm:.1f} mm, {y_mm:.1f} mm)")
-            # # =========================================================
-            # # TEST TAG ID = 7 (position connue)
-            # # =========================================================
-            # TEST_TAG_ID = 7
-            # EXPECTED_MM = (400.0, 300.0)
-
-            # if TEST_TAG_ID in centers:
-            #     cx, cy = centers[TEST_TAG_ID]
-
-            #     x_mm, y_mm = pixel_to_mm((cx, cy), H)
-
-            #     print("\n=== TEST TAG ID 7 ===")
-            #     print(f"Position détectée (mm) : ({x_mm:.2f}, {y_mm:.2f})")
-            #     print(f"Position attendue (mm) : ({EXPECTED_MM[0]}, {EXPECTED_MM[1]})")
-
-            #     error_x = x_mm - EXPECTED_MM[0]
-            #     error_y = y_mm - EXPECTED_MM[1]
-            #     error_total = np.sqrt(error_x**2 + error_y**2)
-
-            #     print(f"Erreur X : {error_x:.2f} mm")
-            #     print(f"Erreur Y : {error_y:.2f} mm")
-            #     print(f"Erreur totale : {error_total:.2f} mm")
-
-            # else:
-            #     print("\n[ERREUR] Tag ID 7 non détecté")
-            # TEST COINS (TRÈS IMPORTANT)
-            print("\n=== TEST COINS ===")
-            for name, tag_id in TAG_IDS.items():
-                cx, cy = centers[tag_id]
-                x_mm, y_mm = pixel_to_mm((cx, cy), H)
-                print(f"{name} -> ({x_mm:.1f}, {y_mm:.1f}) mm")
-
-            save_json(H, pts_img, pts_mm)
+            # Sauvegarde avec new_K (cohérent avec dist=zeros)
+            save_pose(rvec, tvec, new_K)
 
     cap.release()
     cv2.destroyAllWindows()
