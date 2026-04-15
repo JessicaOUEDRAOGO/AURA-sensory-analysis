@@ -28,24 +28,52 @@ def load_camera_top_calibration():
 
     return K, dist
 
-def load_H_top():
-    data = json.load(open(H_PATH))
-    return np.array(data["H_top_to_table"], dtype=np.float64)
+POSE_PATH = Path("config/camtop_table_pose.json")
 
+def load_pose():
+    data = json.load(open(POSE_PATH))
+
+    rvec = np.array(data["rvec"], dtype=np.float64)
+    tvec = np.array(data["tvec"], dtype=np.float64)
+    K    = np.array(data["camera_matrix"], dtype=np.float64)
+
+    return rvec, tvec, K
+
+rvec, tvec, K = load_pose()
 # =========================================================
 # OUTILS GEO
 # =========================================================
-def undistort_points(pts, K, dist):
-    pts = pts.reshape(-1,1,2)
-    und = cv2.undistortPoints(pts, K, dist, P=K)
-    return und.reshape(-1,2)
 
-def apply_H(H, pt):
-    p = np.array([pt[0], pt[1], 1.0], dtype=np.float64)
-    out = H @ p
-    out /= out[2]
-    return out[:2]
+def pixel_to_ray(u, v, K):
+    ray = np.linalg.inv(K) @ np.array([u, v, 1.0])
+    return ray / np.linalg.norm(ray)
 
+def intersect_ray_plane(ray, rvec, tvec):
+    R, _ = cv2.Rodrigues(rvec)
+    normal = R[:, 2]
+    plane_origin = tvec.reshape(3)
+
+    denom = np.dot(normal, ray)
+    if abs(denom) < 1e-9:
+        return None
+
+    t = np.dot(normal, plane_origin) / denom
+    if t < 0:
+        return None
+
+    return t * ray
+
+def camera_to_table(pt_cam, rvec, tvec):
+    R, _ = cv2.Rodrigues(rvec)
+    pt = R.T @ (pt_cam - tvec.reshape(3))
+    return pt[0], pt[1]
+
+def pixel_to_table(u, v, rvec, tvec, K):
+    ray = pixel_to_ray(u, v, K)
+    pt_cam = intersect_ray_plane(ray, rvec, tvec)
+    if pt_cam is None:
+        return None
+    return camera_to_table(pt_cam, rvec, tvec)
 # =========================================================
 # MEDIAPIPE
 # =========================================================
@@ -63,9 +91,12 @@ detector = vision.HandLandmarker.create_from_options(options)
 # INIT
 # =========================================================
 K, dist = load_camera_top_calibration()
-H_top_to_table = load_H_top()
+
 
 cap = cv2.VideoCapture(0)
+
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
 
 # =========================================================
 # LOOP
@@ -96,20 +127,17 @@ while True:
                     lm.y * frame.shape[0]
                 ], dtype=np.float32)
 
-                # 1. undistortion
-                # pt_undist = undistort_points(pt.reshape(1,2), K, dist)[0]
+                res = pixel_to_table(pt[0], pt[1], rvec, tvec, K)
 
-                # 2. projection table
-                pt_table = apply_H(H_top_to_table, pt)
-
-                # affichage caméra
                 x, y = int(pt[0]), int(pt[1])
                 cv2.circle(frame, (x, y), 4, (0,255,0), -1)
 
-                # affichage coordonnées table
-                print(f"Point détecté sur la main {hand_idx + 1}, landmark {lm_idx}:")
-                print(f"  Coordonnées caméra: ({x}, {y})")
-                print(f"  Coordonnées table: ({int(pt_table[0])}, {int(pt_table[1])})")
+                if res is not None:
+                    x_mm, y_mm = res
+
+                    print(f"Main {hand_idx+1}, landmark {lm_idx}")
+                    print(f"  Cam: ({x}, {y})")
+                    print(f"  Table: ({int(x_mm)}, {int(y_mm)})")
 
     cv2.imshow("Hand Tracking → Table", frame)
 
