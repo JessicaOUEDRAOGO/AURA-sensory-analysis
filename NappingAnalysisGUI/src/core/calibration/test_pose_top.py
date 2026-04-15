@@ -4,170 +4,134 @@ import numpy as np
 import json
 from pathlib import Path
 
+# =========================================================
+# PARAMS
+# =========================================================
+CAMERA_ID = 0
+TEST_TAG_ID = 7
+
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = BASE_DIR.parents[2]
 CONFIG_DIR = PROJECT_ROOT / "config"
 
-CAMERA_CALIB_PATH = CONFIG_DIR / "camera_calibration_top.json"
-HOMOGRAPHY_PATH = CONFIG_DIR / "homography_camtop_to_table.json"
+POSE_PATH = CONFIG_DIR / "camtop_table_pose.json"
 
-CAMERA_ID = 0
-TEST_TAG_ID = 7
-EXPECTED_MM = (290,500)
+# =========================================================
+# LOAD POSE
+# =========================================================
+def load_pose(path):
+    with open(path, "r") as f:
+        data = json.load(f)
 
-TAG_IDS = {
-    "TL": 41,
-    "TR": 40,
-    "BR": 43,
-    "BL": 42
-}
+    rvec = np.array(data["rvec"], dtype=np.float64)
+    tvec = np.array(data["tvec"], dtype=np.float64)
+    K    = np.array(data["camera_matrix"], dtype=np.float64)
 
-def load_json(path: Path):
-    if not path.exists():
-        raise FileNotFoundError(f"Fichier introuvable : {path}")
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+    return rvec, tvec, K
 
-def load_camera_calibration(path):
-    data = load_json(path)
-    K = np.array(data["camera_matrix"], dtype=np.float64)
-    dist = np.array(data["dist_coeffs"], dtype=np.float64)
-    return K, dist
+# =========================================================
+# GEOMETRY
+# =========================================================
+def pixel_to_ray(u, v, K):
+    ray = np.linalg.inv(K) @ np.array([u, v, 1.0])
+    return ray / np.linalg.norm(ray)
 
-def load_homography(path):
-    data = load_json(path)
-    H = np.array(data["H_pixel_to_mm"], dtype=np.float64)
-    return H
+def intersect_ray_plane(ray, rvec, tvec):
+    R, _ = cv2.Rodrigues(rvec)
+    normal = R[:, 2]
+    plane_origin = tvec.reshape(3)
 
-def pixel_to_mm(pt, H):
-    p = np.array([pt[0], pt[1], 1.0], dtype=np.float64)
-    p_mm = H @ p
-    p_mm /= p_mm[2]
-    return float(p_mm[0]), float(p_mm[1])
-
-def compute_center_diagonals(pts):
-    p1, p2, p3, p4 = pts
-
-    def line(p, q):
-        A = q[1] - p[1]
-        B = p[0] - q[0]
-        C = A * p[0] + B * p[1]
-        return A, B, C
-
-    A1, B1, C1 = line(p1, p3)
-    A2, B2, C2 = line(p2, p4)
-
-    det = A1 * B2 - A2 * B1
-    if abs(det) < 1e-6:
+    denom = np.dot(normal, ray)
+    if abs(denom) < 1e-9:
         return None
 
-    x = (B2 * C1 - B1 * C2) / det
-    y = (A1 * C2 - A2 * C1) / det
-    return (float(x), float(y))
+    t = np.dot(normal, plane_origin) / denom
+    if t < 0:
+        return None
 
+    return t * ray
+
+def camera_to_table(pt_cam, rvec, tvec):
+    R, _ = cv2.Rodrigues(rvec)
+    pt = R.T @ (pt_cam - tvec.reshape(3))
+    return float(pt[0]), float(pt[1])
+
+def pixel_to_table(u, v, rvec, tvec, K):
+    ray = pixel_to_ray(u, v, K)
+    pt_cam = intersect_ray_plane(ray, rvec, tvec)
+    if pt_cam is None:
+        return None
+    return camera_to_table(pt_cam, rvec, tvec)
+
+# =========================================================
+# CENTER
+# =========================================================
+def get_center(pts):
+    return np.mean(pts, axis=0)
+
+# =========================================================
+# MAIN
+# =========================================================
 def main():
-    print("=== CHARGEMENT ===")
-    print("Calibration :", CAMERA_CALIB_PATH)
-    print("Homographie :", HOMOGRAPHY_PATH)
 
-    K, dist = load_camera_calibration(CAMERA_CALIB_PATH)
-    H = load_homography(HOMOGRAPHY_PATH)
-
-    print("\nH utilisée =\n", H)
-    print("\nK =\n", K)
-    print("dist =", dist.ravel())
+    rvec, tvec, K = load_pose(POSE_PATH)
 
     cap = cv2.VideoCapture(CAMERA_ID)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
 
-    ret, frame = cap.read()
-    if not ret:
-        print("[ERREUR] caméra")
-        return
-
-    h, w = frame.shape[:2]
-    print("frame size =", w, h)
-
-    # IMPORTANT : même alpha que dans le script de pose
-    new_K, _ = cv2.getOptimalNewCameraMatrix(K, dist, (w, h), 1, (w, h))
-
     aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
     detector = cv2.aruco.ArucoDetector(aruco_dict)
 
-    print("\n[INFO] Test automatique activé, appuie sur 'q' pour quitter")
+    print("\n[TEST] Bouge le tag 7 (pose vs levé)\n")
 
-    last_centers = {}
-    tested = False
-
-    def run_test(centers):
-        print("\n=== TEST COINS (H chargée) ===")
-        for name, tag_id in TAG_IDS.items():
-            if tag_id in centers:
-                cx, cy = centers[tag_id]
-                x_mm, y_mm = pixel_to_mm((cx, cy), H)
-                print(f"{name} -> ({x_mm:.2f}, {y_mm:.2f}) mm")
-            else:
-                print(f"{name} -> non détecté")
-
-        print("\n=== TEST TAG ===")
-        if TEST_TAG_ID in centers:
-            cx, cy = centers[TEST_TAG_ID]
-            x_mm, y_mm = pixel_to_mm((cx, cy), H)
-
-            error_x = x_mm - EXPECTED_MM[0]
-            error_y = y_mm - EXPECTED_MM[1]
-            error_total = np.sqrt(error_x**2 + error_y**2)
-
-            print(f"ID = {TEST_TAG_ID}")
-            print(f"Mesuré (mm) : ({x_mm:.2f}, {y_mm:.2f})")
-            print(f"Attendu (mm) : {EXPECTED_MM}")
-            print(f"Erreur X : {error_x:.2f} mm")
-            print(f"Erreur Y : {error_y:.2f} mm")
-            print(f"Erreur totale : {error_total:.2f} mm")
-        else:
-            print(f"Tag {TEST_TAG_ID} non détecté")
+    last_xy = None
 
     while True:
         ret, frame = cap.read()
         if not ret:
             break
 
-        frame_undist = cv2.undistort(frame, K, dist, None, new_K)
-        gray = cv2.cvtColor(frame_undist, cv2.COLOR_BGR2GRAY)
-
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         corners, ids, _ = detector.detectMarkers(gray)
-        display = frame_undist.copy()
 
-        last_centers = {}
+        display = frame.copy()
 
         if ids is not None:
-            cv2.aruco.drawDetectedMarkers(display, corners, ids)
-
             for i, marker_id in enumerate(ids.flatten()):
-                pts = corners[i][0]
-                center = compute_center_diagonals(pts)
-                if center is None:
-                    continue
 
-                cx, cy = center
-                last_centers[int(marker_id)] = (cx, cy)
+                if marker_id == TEST_TAG_ID:
 
-                cv2.circle(display, (int(cx), int(cy)), 5, (0, 0, 255), -1)
-                cv2.putText(display, str(int(marker_id)), (int(cx) + 8, int(cy) - 8),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+                    pts = corners[i][0]
+                    cx, cy = get_center(pts)
 
-        if all(tag_id in last_centers for tag_id in TAG_IDS.values()):
-            if not tested:
-                run_test(last_centers)
-                tested = True
-        else:
-            tested = False
+                    res = pixel_to_table(cx, cy, rvec, tvec, K)
 
-        cv2.imshow("TEST HOMOGRAPHIE", display)
-        key = cv2.waitKey(1) & 0xFF
+                    if res is not None:
+                        x_mm, y_mm = res
 
-        if key == ord('q'):
+                        cv2.circle(display, (int(cx), int(cy)), 6, (0,0,255), -1)
+
+                        text = f"X={x_mm:.1f} mm  Y={y_mm:.1f} mm"
+                        cv2.putText(display, text, (50, 50),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,0), 2)
+
+                        # stabilité
+                        if last_xy is not None:
+                            dx = x_mm - last_xy[0]
+                            dy = y_mm - last_xy[1]
+                            drift = np.sqrt(dx*dx + dy*dy)
+
+                            cv2.putText(display,
+                                f"Drift={drift:.2f} mm",
+                                (50, 100),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1, (255,0,0), 2)
+
+                        last_xy = (x_mm, y_mm)
+
+        cv2.imshow("TEST Z != 0", display)
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
     cap.release()
