@@ -48,13 +48,11 @@ def get_grip_point(hand, w, h):
     # landmarks utiles
     p4 = hand[4]   # pouce
     p8 = hand[8]   # index
-    p12 = hand[12] # majeur
 
-    pts = []
-    for lm in [p4, p8, p12]:
-        pts.append(np.array([lm.x * w, lm.y * h]))
+    pt4 = np.array([p4.x * w, p4.y * h])
+    pt8 = np.array([p8.x * w, p8.y * h])
 
-    grip = np.mean(pts, axis=0)
+    grip = (pt4 + pt8) / 2
     return grip
 
 
