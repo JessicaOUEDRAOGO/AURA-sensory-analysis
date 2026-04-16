@@ -40,6 +40,32 @@ def load_pose():
     return rvec, tvec, K
 
 rvec, tvec, K = load_pose()
+
+TABLE_SIZE_MM = 580.0
+GRID_SIZE = 700
+
+def get_grip_point(hand, w, h):
+    # landmarks utiles
+    p4 = hand[4]   # pouce
+    p8 = hand[8]   # index
+    p12 = hand[12] # majeur
+
+    pts = []
+    for lm in [p4, p8, p12]:
+        pts.append(np.array([lm.x * w, lm.y * h]))
+
+    grip = np.mean(pts, axis=0)
+    return grip
+
+
+def flip_y(x_mm, y_mm):
+    return x_mm, TABLE_SIZE_MM - y_mm
+
+
+def mm_to_graph(x_mm, y_mm):
+    xg = (x_mm / TABLE_SIZE_MM) * GRID_SIZE
+    yg = (y_mm / TABLE_SIZE_MM) * GRID_SIZE
+    return xg, yg
 # =========================================================
 # OUTILS GEO
 # =========================================================
@@ -93,7 +119,7 @@ detector = vision.HandLandmarker.create_from_options(options)
 K, dist = load_camera_top_calibration()
 
 
-cap = cv2.VideoCapture(0)
+cap = cv2.VideoCapture(1)
 
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
@@ -119,25 +145,48 @@ while True:
 
     if result.hand_landmarks:
         for hand_idx, hand in enumerate(result.hand_landmarks):
-            for lm_idx, lm in enumerate(hand):
 
-                # coordonnées pixel caméra
-                pt = np.array([
-                    lm.x * frame.shape[1],
-                    lm.y * frame.shape[0]
-                ], dtype=np.float32)
+            # =====================================================
+            # 1. POINT DE PRÉHENSION
+            # =====================================================
+            grip = get_grip_point(hand, w, h)
+            u, v = grip
 
-                res = pixel_to_table(pt[0], pt[1], rvec, tvec, K)
+            cv2.circle(frame, (int(u), int(v)), 8, (0,0,255), -1)
 
-                x, y = int(pt[0]), int(pt[1])
-                cv2.circle(frame, (x, y), 4, (0,255,0), -1)
+            # =====================================================
+            # 2. PIXEL → MM
+            # =====================================================
+            res = pixel_to_table(u, v, rvec, tvec, K)
 
-                if res is not None:
-                    x_mm, y_mm = res
+            if res is None:
+                continue
 
-                    print(f"Main {hand_idx+1}, landmark {lm_idx}")
-                    print(f"  Cam: ({x}, {y})")
-                    print(f"  Table: ({int(x_mm)}, {int(y_mm)})")
+            x_mm, y_mm = res
+
+            # =====================================================
+            # 3. ALIGNEMENT avec CAM1
+            # =====================================================
+            x_mm, y_mm = flip_y(x_mm, y_mm)
+
+            # =====================================================
+            # 4. CONVERSION GRAPH
+            # =====================================================
+            xg, yg = mm_to_graph(x_mm, y_mm)
+
+            # =====================================================
+            # DEBUG
+            # =====================================================
+            print(f"\nMain {hand_idx+1}")
+            print(f"  Pixel: ({int(u)}, {int(v)})")
+            print(f"  Table mm: ({int(x_mm)}, {int(y_mm)})")
+            print(f"  Graph: ({int(xg)}, {int(yg)})")
+
+            cv2.putText(frame,
+                f"G({int(xg)},{int(yg)})",
+                (int(u)+10, int(v)-10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6, (255,0,255), 2)
 
     cv2.imshow("Hand Tracking → Table", frame)
 
