@@ -18,6 +18,7 @@ from src.ui.views.ui_reality_augmented_bg import RealityAugementedWindowWithBG
 from src.ui.views.ui_background_window import BackgroundWindow
 from src.ui.views.ui_projection_background_bg import ProjectionBackgroundWindowWithBG
 from src.ui.views.ui_settings_menu import SettingsMenu
+from src.core.Hand_tracking.hand_tracking_thread import HandTrackingThread
 
 def build_useful_background(projector_width, projector_height, useful_x, useful_y, useful_w, useful_h):
         bg = np.zeros((projector_height, projector_width, 3), dtype=np.uint8)
@@ -42,9 +43,12 @@ class MainApp(QtWidgets.QMainWindow):
         )
         # SETTINGS GLOBALS
         # --------------------------------------------------
+        self.camera_top_id = 0
+        self.camera_bottom_id = 1
+
         self.settings = {
             "projector_screen_id": 1,
-            "camera_id": 0,
+            "camera_id": self.camera_bottom_id,  # ← IMPORTANT
             "projector_resolution": (3840, 2160)
         }
         self.projector_screen_id = PROJECTOR_SCREEN_ID
@@ -123,8 +127,17 @@ class MainApp(QtWidgets.QMainWindow):
         self.init_default_protocol()
         self.current_protocol_id = self.record_window.active_protocol_id
         self.current_protocol_locked = False
+
+        
+
+        self.hand_thread = HandTrackingThread(camera_id=0)  # TOP
+        self.hand_thread.hands_signal.connect(self.update_hands)
+        self.hand_thread.start()
+
+        self.current_hands = []
     
-    
+    def update_hands(self, hands):
+        self.current_hands = hands
 
     def init_default_protocol(self):
         repo = ProtocolRepository()

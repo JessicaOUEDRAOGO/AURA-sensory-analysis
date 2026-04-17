@@ -27,7 +27,7 @@ class CalibrationMenu(QtWidgets.QWidget):
 
         # Cam + affichage preview dans le QLabel de la UI
         self.camera_manager = CameraManager(
-            camera_index=self.parent.settings["camera_id"],
+            camera_index=self.parent.camera_bottom_id,
             width=self.cam_width,
             height=self.cam_height
         )

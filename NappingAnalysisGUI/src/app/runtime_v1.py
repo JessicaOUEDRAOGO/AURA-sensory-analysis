@@ -3,8 +3,9 @@ import os
 import cv2
 import json
 import numpy as np
+import time as pytime
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, time
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from src.core.utils.paths import config_path, data_path
@@ -126,6 +127,12 @@ class Algorithm_Analysis(QObject):
         self.N_LIFT = 5                # nb frames avant levée
         self.DIST_HAND_THRESHOLD = 80  # (utilisé plus tard)
         self.DIST_RECOVERY = 50        # (utilisé plus tard)
+
+        self.get_hands = None
+    
+    def set_hands_provider(self, func):
+        self.get_hands = func
+
     # ======================================================================
     # Validation / helpers
     # ======================================================================
@@ -181,6 +188,7 @@ class Algorithm_Analysis(QObject):
         self.status_popUpCamera = not self.status_popUpCamera
 
     def stop(self):
+        print("[ALGO] STOP demandé")
         self.running = False
         self.waiting_for_consigne_key = False
 
@@ -698,20 +706,32 @@ class Algorithm_Analysis(QObject):
         self._show_timeline_assets()
         print("Consignes affichées, on continue avec la détection des marqueurs.")
 
-        while self.running:
+        while True:
+            # STOP propre immédiat
+            if not self.running:
+                break
             proj_w = int(self.mapper.projector_width)
             proj_h = int(self.mapper.projector_height)
 
             current_image_background = self._build_projector_background(proj_w, proj_h)
 
-            frame = self.parent.camera_manager.get_frame()
-            if frame is None:
-                print("Erreur : Impossible de lire une frame caméra.")
+            
+
+            # STOP AVANT toute lecture caméra
+            if not self.running:
                 break
 
-            if frame.size == 0:
-                print("Erreur : Frame vide.")
+            frame = self.parent.camera_manager.get_frame()
+
+            # RECHECK après lecture
+            if not self.running:
                 break
+
+            if frame is None:
+                continue
+
+            if frame.size == 0:
+                continue
 
             corners, ids = self._detect_markers(frame)
 
@@ -813,6 +833,11 @@ class Algorithm_Analysis(QObject):
                             )
                             
             self.update_cups_bottom(detected_markers)
+            hands = []
+            if self.get_hands:
+                hands = self.get_hands()
+
+            print("[HANDS]", hands)
             # Debug
             for marker_id, cup in self.cups.items():
                 print(f"[CUP] ID={marker_id} | state={cup['state']} | lost={cup['lost_frames']}")
@@ -851,7 +876,8 @@ class Algorithm_Analysis(QObject):
             self.display_manager.display_image_on_projector_monitor(current_image_background)
             self.data_signal.emit({"data": graph_coords_ArUco})
             self.save_to_buffer(graph_coords_ArUco)
-
+        
+            pytime.sleep(0.005)
         self.save_to_csv()
         print("detect_and_process terminé")
         self.finished_signal.emit()

@@ -3,7 +3,7 @@
 # -----------------------------
 # CAMERA
 # -----------------------------
-CAMERA_ID = 0
+CAMERA_ID = 1
 CAMERA_WIDTH = 1920
 CAMERA_HEIGHT = 1080
 CAMERA_FPS = 30

@@ -73,29 +73,36 @@ class CameraManager:
     # --------------------------------------------------
     def get_frame(self):
         """
-        Retourne une frame BGR.
+        Retourne une frame BGR (robuste, non bloquante, safe stop).
         """
-        if self.cap is None or not self.cap.isOpened():
-            return None
-        for _ in range(2):
-            self.cap.read()
 
-        ret, frame = self.cap.read()
-        
+        # 1. caméra non dispo
+        if self.cap is None:
+            return None
+
+        if not self.cap.isOpened():
+            return None
+
+        # 2. lecture sécurisée (évite crash si cap release en parallèle)
+        try:
+            ret, frame = self.cap.read()
+        except Exception:
+            return None
+
+        # 3. lecture invalide
         if not ret or frame is None:
-            print("Impossible de lire une frame caméra.")
             return None
 
-        h, w = frame.shape[:2]
+        # 4. sécurité dimension (évite corruption pipeline)
+        try:
+            h, w = frame.shape[:2]
+        except Exception:
+            return None
+
         if (w, h) != (self.width, self.height):
-            print(
-                f"Frame ignorée : résolution inattendue {w}x{h} "
-                f"(attendu {self.width}x{self.height})"
-            )
             return None
 
         return frame
-
     # --------------------------------------------------
     # FERMETURE CAMERA
     # --------------------------------------------------

@@ -367,6 +367,7 @@ class RecordWindow(QtWidgets.QWidget):
             timeline_steps=steps,
             protocol=p_db
         )
+        self.algorithm_analysis.set_hands_provider(lambda: self.parent.current_hands)
         self.algorithm_analysis.set_show_grid(self.checkBox_DisplayGrid.isChecked())
 
         # Key handler -> algo
@@ -411,43 +412,31 @@ class RecordWindow(QtWidgets.QWidget):
 
     def stop_recording(self):
 
+        print("[UI] STOP demandé")
+
+        # 1. STOP algo
         if self.algorithm_analysis:
             self.algorithm_analysis.stop()
 
-        # Fermer la caméra AVANT d'attendre le thread
+        # 2. STOP thread proprement (ATTENTE BLOQUANTE)
+        if self.algorithm_thread and self.algorithm_thread.isRunning():
+            self.algorithm_thread.quit()
+            self.algorithm_thread.wait()   # ⚠️ PAS DE TIMEOUT
+
+        # 3. fermer caméra
         if self.camera_manager:
             self.camera_manager.close_camera()
 
-        # Maintenant on attend le thread
-        try:
-            if self.algorithm_thread and self.algorithm_thread.isRunning():
-                self.algorithm_thread.quit()
-                self.algorithm_thread.wait()
-        except RuntimeError:
-            # thread déjà supprimé → on ignore
-            pass
-
-
+        # 4. UI
         self.timer.stop()
         self.timer_started = False
 
-        # V2 session close
-        if self.session_id:
-            try:
-                self.event_store.log(self.session_id, "session_ended", {})
-                self.session_service.end_session(self.session_id)
-                self.export_service.export_session_minimal(self.session_id)
-            except Exception as e:
-                print(f"[WARNING] Fin session V2 échouée: {e}")
-
-        self.session_id = None
-        self.session_output_dir = None
-
         self.pushButton_Start.setEnabled(True)
         self.pushButton_Stop.setEnabled(False)
+
+        # 5. cleanup APRÈS arrêt réel
         self.algorithm_thread = None
         self.algorithm_analysis = None
-
 
 
 
