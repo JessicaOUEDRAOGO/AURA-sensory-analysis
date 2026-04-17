@@ -418,23 +418,40 @@ class RecordWindow(QtWidgets.QWidget):
         if self.algorithm_analysis:
             self.algorithm_analysis.stop()
 
-        # 2. STOP thread proprement (ATTENTE BLOQUANTE)
+        # 2. STOP thread proprement avec timeout
         if self.algorithm_thread and self.algorithm_thread.isRunning():
             self.algorithm_thread.quit()
-            self.algorithm_thread.wait()   # ⚠️ PAS DE TIMEOUT
+            
+            # Attendre 1.5 sec max
+            if not self.algorithm_thread.wait(1500):
+                print("[WARNING] Thread ne s'arrête pas, on force terminate")
+                self.algorithm_thread.terminate()
+                self.algorithm_thread.wait(500)
 
         # 3. fermer caméra
         if self.camera_manager:
             self.camera_manager.close_camera()
 
-        # 4. UI
+        # 4. Timer
         self.timer.stop()
         self.timer_started = False
+
+        # 5. Session cleanup
+        if self.session_id:
+            try:
+                self.event_store.log(self.session_id, "session_ended", {})
+                self.session_service.end_session(self.session_id)
+                self.export_service.export_session_minimal(self.session_id)
+            except Exception as e:
+                print(f"[WARNING] Fin session V2 échouée: {e}")
+
+        self.session_id = None
+        self.session_output_dir = None
 
         self.pushButton_Start.setEnabled(True)
         self.pushButton_Stop.setEnabled(False)
 
-        # 5. cleanup APRÈS arrêt réel
+        # 6. cleanup APRÈS arrêt réel
         self.algorithm_thread = None
         self.algorithm_analysis = None
 
