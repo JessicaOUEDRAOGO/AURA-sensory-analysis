@@ -115,6 +115,17 @@ class Algorithm_Analysis(QObject):
         self.projector_offset_x = 30
         self.projector_offset_y = -40
 
+        self.data_buffer = []
+        self.running = False
+
+        # =========================
+        # Multi-cam tracking V2
+        # =========================
+        self.cups = {}
+
+        self.N_LIFT = 5                # nb frames avant levée
+        self.DIST_HAND_THRESHOLD = 80  # (utilisé plus tard)
+        self.DIST_RECOVERY = 50        # (utilisé plus tard)
     # ======================================================================
     # Validation / helpers
     # ======================================================================
@@ -371,6 +382,44 @@ class Algorithm_Analysis(QObject):
             "projector_center": projector_anchor,
             "marker_size": 40,
         }
+    
+    def update_cups_bottom(self, detected_markers):
+        """
+        detected_markers = dict {id: np.array([x, y])} en coordonnées graph
+        """
+
+        # =========================
+        # 1. Mise à jour des tasses vues
+        # =========================
+        for marker_id, pos in detected_markers.items():
+
+            if marker_id not in self.cups:
+                self.cups[marker_id] = {
+                    "state": "POSEE",
+                    "last_pos": pos.copy(),
+                    "lost_frames": 0,
+                    "carrier_hand_id": None
+                }
+
+            cup = self.cups[marker_id]
+
+            cup["last_pos"] = pos.copy()
+            cup["lost_frames"] = 0
+            cup["carrier_hand_id"] = None
+            cup["state"] = "POSEE"
+
+        # =========================
+        # 2. Gestion des disparitions
+        # =========================
+        for marker_id, cup in self.cups.items():
+
+            if marker_id not in detected_markers:
+                cup["lost_frames"] += 1
+
+                if cup["lost_frames"] < self.N_LIFT:
+                    cup["state"] = "PEUT_ETRE_SOULEVEE"
+                else:
+                    cup["state"] = "SOULEVEE"
 
     # ======================================================================
     # Dessin overlays
@@ -667,6 +716,7 @@ class Algorithm_Analysis(QObject):
             corners, ids = self._detect_markers(frame)
 
             graph_coords_ArUco = []
+            detected_markers = {}
 
             if ids is not None and len(ids) > 0:
                 valid_indices = [
@@ -695,6 +745,7 @@ class Algorithm_Analysis(QObject):
                     marker_size = geom["marker_size"]
 
                     graph_coords_ArUco.append([marker_id_int, graph_center])
+                    detected_markers[marker_id_int] = graph_center
 
                     projector_x = int(round(projector_center[0]))
                     projector_y = int(round(projector_center[1]))
@@ -760,6 +811,11 @@ class Algorithm_Analysis(QObject):
                                 marker_id_int,
                                 color
                             )
+                            
+            self.update_cups_bottom(detected_markers)
+            # Debug
+            for marker_id, cup in self.cups.items():
+                print(f"[CUP] ID={marker_id} | state={cup['state']} | lost={cup['lost_frames']}")
 
             if self.show_grid and self.record_window is not None:
                 x_min, x_max, y_min, y_max, x_legend, y_legend = self.record_window.get_bounds_from_inputs()
