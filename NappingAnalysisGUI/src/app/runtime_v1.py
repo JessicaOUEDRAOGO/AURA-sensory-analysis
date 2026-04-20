@@ -123,11 +123,12 @@ class Algorithm_Analysis(QObject):
         # Multi-cam tracking V2
         # =========================
         self.cups = {}
-
-        self.N_LIFT = 5                # nb frames avant levée
-        self.DIST_HAND_THRESHOLD = 80  # (utilisé plus tard)
-        self.DIST_RECOVERY = 50        # (utilisé plus tard)
-
+    # ======================================================================
+        self.N_LIFT                = 5     # frames avant de passer SOULEVEE
+        self.N_LIFT_CONFIRM        = 3     # frames PEUT_ETRE_SOULEVEE avant SOULEVEE
+        self.DIST_HAND_THRESHOLD   = 120   # seuil association main↔tasse (agrandi)
+        self.DIST_HAND_CONFIRM     = 180   # seuil lors de la phase PEUT_ETRE (plus large)
+        self.DIST_RECOVERY         = 60    # seuil retour au sol
         self.get_hands = None
     
     def set_hands_provider(self, func):
@@ -394,68 +395,101 @@ class Algorithm_Analysis(QObject):
     
     def update_cups_bottom(self, detected_markers):
         """
-        detected_markers = dict {id: np.array([x, y])} en coordonnées graph
+        detected_markers = dict {id: np.array([x, y])} en coordonnées graph.
+
+        Améliorations :
+        - Transition PEUT_ETRE_SOULEVEE → SOULEVEE uniquement après
+          N_LIFT_CONFIRM frames consécutives sans réapparition (hystérésis).
+        - La position de la tasse n'est plus figée au moment de la disparition :
+          elle sera mise à jour par associate_hands_to_cups à chaque frame.
+        - Réapparition du marqueur → retour immédiat à POSEE avec remise à zéro.
         """
+        N_LIFT_CONFIRM = getattr(self, "N_LIFT_CONFIRM", 3)
 
-        # =========================
-        # 1. Mise à jour des tasses vues
-        # =========================
         for marker_id, pos in detected_markers.items():
-
             if marker_id not in self.cups:
                 self.cups[marker_id] = {
-                    "state": "POSEE",
-                    "last_pos": pos.copy(),
-                    "lost_frames": 0,
-                    "carrier_hand_id": None
+                    "state":           "POSEE",
+                    "last_pos":        pos.copy(),
+                    "lost_frames":     0,
+                    "carrier_hand_id": None,
+                    "lift_frames":     0,  # NOUVEAU : compteur de confirmation levée
                 }
 
             cup = self.cups[marker_id]
-
-            cup["last_pos"] = pos.copy()
-            cup["lost_frames"] = 0
+            # Marqueur vu → réinitialisation complète
+            cup["last_pos"]        = pos.copy()
+            cup["lost_frames"]     = 0
+            cup["lift_frames"]     = 0
             cup["carrier_hand_id"] = None
-            cup["state"] = "POSEE"
+            cup["state"]           = "POSEE"
 
-        # =========================
-        # 2. Gestion des disparitions
-        # =========================
         for marker_id, cup in self.cups.items():
+            if marker_id in detected_markers:
+                continue  # déjà traité ci-dessus
 
-            if marker_id not in detected_markers:
-                cup["lost_frames"] += 1
+            cup["lost_frames"] += 1
 
-                if cup["lost_frames"] < self.N_LIFT:
-                    cup["state"] = "PEUT_ETRE_SOULEVEE"
-                else:
+            if cup["state"] == "POSEE":
+                # Première disparition → phase tampon
+                cup["state"]       = "PEUT_ETRE_SOULEVEE"
+                cup["lift_frames"] = 1
+
+            elif cup["state"] == "PEUT_ETRE_SOULEVEE":
+                cup["lift_frames"] += 1
+                if cup["lift_frames"] >= N_LIFT_CONFIRM:
+                    # Confirmé soulevé après N_LIFT_CONFIRM frames
                     cup["state"] = "SOULEVEE"
+
+            # SOULEVEE : on ne fait rien ici — la position est gérée
+            # par associate_hands_to_cups à chaque frame.
 
     def associate_hands_to_cups(self, hands):
         """
-        Associe chaque tasse SOULEVEE à une main proche
-        hands = [{"id":..., "x":..., "y":...}]
+        Associe chaque tasse SOULEVEE (ou PEUT_ETRE_SOULEVEE) à une main proche
+        et met à jour sa position en temps réel.
+
+        hands = [{"id": int, "x": float, "y": float}]
+
+        Améliorations :
+        - Seuil d'association élargi en phase PEUT_ETRE_SOULEVEE pour capter
+          l'association dès le début du geste.
+        - Une fois associée, la position de la tasse suit la main à chaque frame
+          (plus de position figée).
+        - Si aucune main n'est trouvée dans le seuil, on conserve la dernière
+          position connue (pas de saut brutal).
         """
+        DIST_CONFIRM = getattr(self, "DIST_HAND_CONFIRM", 180)
+        DIST_NORMAL  = getattr(self, "DIST_HAND_THRESHOLD", 120)
 
         for marker_id, cup in self.cups.items():
-
-            if cup["state"] != "SOULEVEE":
+            if cup["state"] not in ("SOULEVEE", "PEUT_ETRE_SOULEVEE"):
                 continue
+
+            # Seuil adaptatif : plus large pendant la phase de confirmation
+            threshold = DIST_CONFIRM if cup["state"] == "PEUT_ETRE_SOULEVEE" else DIST_NORMAL
 
             best_hand = None
             best_dist = float("inf")
 
             for hand in hands:
                 hand_pos = np.array([hand["x"], hand["y"]], dtype=np.float32)
-                dist = np.linalg.norm(hand_pos - cup["last_pos"])
+                dist     = np.linalg.norm(hand_pos - cup["last_pos"])
 
                 if dist < best_dist:
                     best_dist = dist
                     best_hand = hand
 
-            # seuil de sécurité
-            if best_hand is not None and best_dist < self.DIST_HAND_THRESHOLD:
+            if best_hand is not None and best_dist < threshold:
                 cup["carrier_hand_id"] = best_hand["id"]
-                cup["last_pos"] = np.array([best_hand["x"], best_hand["y"]], dtype=np.float32)
+                # NOUVEAU : mise à jour continue de la position
+                cup["last_pos"] = np.array(
+                    [best_hand["x"], best_hand["y"]], dtype=np.float32
+                )
+            else:
+                # Aucune main trouvée → on garde la dernière position connue
+                # (pas de remise à zéro, pas de saut)
+                cup["carrier_hand_id"] = None
     # ======================================================================
     # Dessin overlays
     # ======================================================================
