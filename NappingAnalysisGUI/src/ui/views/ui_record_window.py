@@ -390,7 +390,7 @@ class RecordWindow(QtWidgets.QWidget):
         self.algorithm_analysis.finished_signal.connect(self.algorithm_thread.quit)
         self.algorithm_analysis.finished_signal.connect(self.algorithm_analysis.deleteLater)
         self.algorithm_thread.finished.connect(self.algorithm_thread.deleteLater)
-
+        self.algorithm_thread.finished.connect(self.on_thread_finished)
         # Reset UI counters
         self.frame_count = 0
         self.update_frame_label()
@@ -409,34 +409,39 @@ class RecordWindow(QtWidgets.QWidget):
         if not self.timer_started:
             self.timer_started = True
             self.timer.start(1000)
+            
+    def on_thread_finished(self):
+        print("[UI] thread réellement terminé")
+        self.algorithm_thread = None
+        self.algorithm_analysis = None
 
     def stop_recording(self):
 
         print("[UI] STOP demandé")
 
-        # 1. STOP algo
+        # 1. stop logique
         if self.algorithm_analysis:
             self.algorithm_analysis.stop()
 
-        # 2. STOP thread proprement avec timeout
-        if self.algorithm_thread and self.algorithm_thread.isRunning():
-            self.algorithm_thread.quit()
-            
-            # Attendre 1.5 sec max
-            if not self.algorithm_thread.wait(1500):
-                print("[WARNING] Thread ne s'arrête pas, on force terminate")
-                self.algorithm_thread.terminate()
-                self.algorithm_thread.wait(500)
-
-        # 3. fermer caméra
+        # 2. fermer caméra (important)
         if self.camera_manager:
             self.camera_manager.close_camera()
 
-        # 4. Timer
+        # 3. NE PAS WAIT → laisser Qt gérer
+        # optionnel: juste debug
+        if self.algorithm_thread is not None:
+            try:
+                if self.algorithm_thread.isRunning():
+                    print("[UI] thread en cours d'arrêt...")
+            except RuntimeError:
+                print("[UI] thread déjà supprimé")
+                self.algorithm_thread = None
+
+        # 4. timer
         self.timer.stop()
         self.timer_started = False
 
-        # 5. Session cleanup
+        # 5. session cleanup
         if self.session_id:
             try:
                 self.event_store.log(self.session_id, "session_ended", {})
@@ -451,12 +456,7 @@ class RecordWindow(QtWidgets.QWidget):
         self.pushButton_Start.setEnabled(True)
         self.pushButton_Stop.setEnabled(False)
 
-        # 6. cleanup APRÈS arrêt réel
-        self.algorithm_thread = None
-        self.algorithm_analysis = None
-
-
-
+        # ⚠️ NE PAS delete ici → Qt le fera via finished_signal
     # ------------------------------------------------------------------
     # UI update from algo
     # ------------------------------------------------------------------
