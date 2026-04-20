@@ -3,7 +3,7 @@ import cv2
 import numpy as np
 import json
 from pathlib import Path
-
+import time as pytime
 from PyQt6.QtCore import QThread, pyqtSignal
 
 import mediapipe as mp
@@ -199,5 +199,6 @@ class HandTrackingThread(QThread):
 
             # EMIT FRAME (optionnel debug)
             self.frame_signal.emit(frame)
+            pytime.sleep(0.01)
         cap.release()
         print("[HAND THREAD] stopped")

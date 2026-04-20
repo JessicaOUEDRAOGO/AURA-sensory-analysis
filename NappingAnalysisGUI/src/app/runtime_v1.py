@@ -190,6 +190,7 @@ class Algorithm_Analysis(QObject):
     def stop(self):
         print("[ALGO] STOP demandé")
         self.running = False
+        pytime.sleep(0.01)  
         self.waiting_for_consigne_key = False
 
     # ======================================================================
@@ -429,6 +430,32 @@ class Algorithm_Analysis(QObject):
                 else:
                     cup["state"] = "SOULEVEE"
 
+    def associate_hands_to_cups(self, hands):
+        """
+        Associe chaque tasse SOULEVEE à une main proche
+        hands = [{"id":..., "x":..., "y":...}]
+        """
+
+        for marker_id, cup in self.cups.items():
+
+            if cup["state"] != "SOULEVEE":
+                continue
+
+            best_hand = None
+            best_dist = float("inf")
+
+            for hand in hands:
+                hand_pos = np.array([hand["x"], hand["y"]], dtype=np.float32)
+                dist = np.linalg.norm(hand_pos - cup["last_pos"])
+
+                if dist < best_dist:
+                    best_dist = dist
+                    best_hand = hand
+
+            # seuil de sécurité
+            if best_hand is not None and best_dist < self.DIST_HAND_THRESHOLD:
+                cup["carrier_hand_id"] = best_hand["id"]
+                cup["last_pos"] = np.array([best_hand["x"], best_hand["y"]], dtype=np.float32)
     # ======================================================================
     # Dessin overlays
     # ======================================================================
@@ -706,7 +733,7 @@ class Algorithm_Analysis(QObject):
         self._show_timeline_assets()
         print("Consignes affichées, on continue avec la détection des marqueurs.")
 
-        while True:
+        while self.running:
             # STOP propre immédiat
             if not self.running:
                 break
@@ -714,9 +741,7 @@ class Algorithm_Analysis(QObject):
             proj_h = int(self.mapper.projector_height)
 
             current_image_background = self._build_projector_background(proj_w, proj_h)
-
             
-
             # STOP AVANT toute lecture caméra
             if not self.running:
                 break
@@ -836,11 +861,23 @@ class Algorithm_Analysis(QObject):
             hands = []
             if self.get_hands:
                 hands = self.get_hands()
-
-            print("[HANDS]", hands)
-            # Debug
+            self.associate_hands_to_cups(hands)
             for marker_id, cup in self.cups.items():
-                print(f"[CUP] ID={marker_id} | state={cup['state']} | lost={cup['lost_frames']}")
+
+                x = int(cup["last_pos"][0])
+                y = int(cup["last_pos"][1])
+
+                proj = self.mapper.graph_to_projector(np.array([x, y], dtype=np.float32))
+
+                px = int(proj[0])
+                py = int(proj[1])
+
+                if cup["state"] == "SOULEVEE":
+                    cv2.circle(current_image_background, (px, py), 20, (255, 0, 0), -1)
+            # print("[HANDS]", hands)
+            # Debug
+            # for marker_id, cup in self.cups.items():
+            #     print(f"[CUP] ID={marker_id} | state={cup['state']} | lost={cup['lost_frames']}")
 
             if self.show_grid and self.record_window is not None:
                 x_min, x_max, y_min, y_max, x_legend, y_legend = self.record_window.get_bounds_from_inputs()
@@ -863,7 +900,11 @@ class Algorithm_Analysis(QObject):
                     (proj_w, proj_h)
                 )
 
-                current_image_background = warped_grid
+                current_image_background = cv2.addWeighted(
+                    warped_grid, 1.0,
+                    current_image_background, 1.0,
+                    0
+                )
 
             if self.status_popUpCamera:
                 self.show_camera_window(frame, corners=corners if ids is not None else None)
@@ -873,11 +914,30 @@ class Algorithm_Analysis(QObject):
                     cv2.destroyWindow("Camera")
                     self._camera_was_active = False
 
+            # =========================
+            # FUSION 
+            # ========================
+            graph_coords_fusion = []
+
+            for marker_id, cup in self.cups.items():
+                graph_coords_fusion.append([marker_id, cup["last_pos"]])
+
+            # =========================
+            # AFFICHAGE
+            # =========================
             self.display_manager.display_image_on_projector_monitor(current_image_background)
-            self.data_signal.emit({"data": graph_coords_ArUco})
-            self.save_to_buffer(graph_coords_ArUco)
-        
-            pytime.sleep(0.005)
+
+            # =========================
+            # SIGNAL UI
+            # =========================
+            self.data_signal.emit({"data": graph_coords_fusion})
+
+            # =========================
+            # EXPORT CSV
+            # =========================
+            self.save_to_buffer(graph_coords_fusion)
+
+            pytime.sleep(0.01)
         self.save_to_csv()
         print("detect_and_process terminé")
         self.finished_signal.emit()
