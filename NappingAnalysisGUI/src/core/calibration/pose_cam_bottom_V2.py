@@ -17,8 +17,17 @@ TAG_IDS = {
     "BL": 41,
 }
 
-# Taille réelle de la table (bord extérieur des tags ou centre-à-centre selon votre setup)
+# Taille réelle de la table mesurée bord extérieur à bord extérieur (en mm)
 TABLE_SIZE_MM = 580.0
+
+# Taille physique d'un marker ArUco (côté du carré imprimé, en mm)
+# IMPORTANT : H mappe les CENTRES des tags.
+# Les centres sont décalés de ½ TAG_SIZE_MM par rapport aux bords extérieurs.
+# Mesure TAG_SIZE_MM avec un pied à coulisse pour une précision maximale.
+TAG_SIZE_MM = 40.0   # ← ajuste selon tes markers imprimés
+
+# Distance réelle centre-à-centre entre les tags opposés
+_CENTER_TO_CENTER = TABLE_SIZE_MM - TAG_SIZE_MM
 
 # Nombre de frames à accumuler pour stabiliser la détection avant capture
 N_FRAMES_AVERAGE = 30
@@ -113,10 +122,17 @@ def build_homography(centers: dict):
     """
     Calcule H : pixel → mm à partir des 4 centres de tags.
 
-    Disposition attendue :
-        TL (0,0)          TR (TABLE_SIZE_MM, 0)
-        BL (0,TABLE_SIZE_MM)  BR (TABLE_SIZE_MM, TABLE_SIZE_MM)
+    Le référentiel mm est ancré sur les BORDS EXTÉRIEURS de la table :
+        (0, 0)              = coin ext. TL
+        (TABLE_SIZE_MM, 0)  = coin ext. TR
+        etc.
+
+    Les centres des tags sont décalés de ½ TAG_SIZE_MM vers l'intérieur
+    par rapport aux coins extérieurs.
     """
+    half = TAG_SIZE_MM / 2.0
+    S    = TABLE_SIZE_MM
+
     pts_img = np.array([
         centers[TAG_IDS["TL"]],
         centers[TAG_IDS["TR"]],
@@ -125,10 +141,10 @@ def build_homography(centers: dict):
     ], dtype=np.float64)
 
     pts_mm = np.array([
-        [0.0,            0.0           ],
-        [TABLE_SIZE_MM,  0.0           ],
-        [TABLE_SIZE_MM,  TABLE_SIZE_MM ],
-        [0.0,            TABLE_SIZE_MM ],
+        [half,       half      ],   # TL : décalé de ½ tag vers l'intérieur
+        [S - half,   half      ],   # TR
+        [S - half,   S - half  ],   # BR
+        [half,       S - half  ],   # BL
     ], dtype=np.float64)
 
     # Avec exactement 4 points, RANSAC n'apporte rien → méthode exacte (0)
@@ -157,13 +173,15 @@ def validate_homography(H: np.ndarray, centers: dict, verbose: bool = True):
     Affiche les erreurs et retourne l'erreur RMS sur les 4 coins.
     """
     print("\n=== VALIDATION COINS ===")
-    errors = []
+    half = TAG_SIZE_MM / 2.0
+    S    = TABLE_SIZE_MM
     expected = {
-        TAG_IDS["TL"]: (0.0,           0.0          ),
-        TAG_IDS["TR"]: (TABLE_SIZE_MM,  0.0          ),
-        TAG_IDS["BR"]: (TABLE_SIZE_MM,  TABLE_SIZE_MM),
-        TAG_IDS["BL"]: (0.0,           TABLE_SIZE_MM ),
+        TAG_IDS["TL"]: (half,     half    ),
+        TAG_IDS["TR"]: (S - half, half    ),
+        TAG_IDS["BR"]: (S - half, S - half),
+        TAG_IDS["BL"]: (half,     S - half),
     }
+    errors = []
     for name, tag_id in TAG_IDS.items():
         cx, cy = centers[tag_id]
         x_mm, y_mm = pixel_to_mm((cx, cy), H)
