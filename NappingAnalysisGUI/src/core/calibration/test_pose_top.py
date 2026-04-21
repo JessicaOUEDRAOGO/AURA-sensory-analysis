@@ -7,7 +7,7 @@ from pathlib import Path
 # =========================================================
 # PARAMS
 # =========================================================
-CAMERA_ID = 0
+CAMERA_ID = 1
 TEST_TAG_ID = 7
 
 BASE_DIR = Path(__file__).resolve().parent
