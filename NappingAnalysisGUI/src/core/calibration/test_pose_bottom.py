@@ -11,8 +11,8 @@ BASE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = BASE_DIR.parents[2]
 CONFIG_DIR = PROJECT_ROOT / "config"
 
-CAMERA_CALIB_PATH = CONFIG_DIR / "camera_calibration.json"
-HOMOGRAPHY_PATH = CONFIG_DIR / "homography_cam_bottom_to_table.json"
+POSE_PATH = CONFIG_DIR / "cambottom_table_pose.json"
+CALIB_PATH = CONFIG_DIR / "camera_calibration.json"
 
 # =========================================================
 # PARAMÈTRES
@@ -29,39 +29,65 @@ TAG_IDS = {
 }
 
 # =========================================================
-# CHARGEMENT
+# LOAD
 # =========================================================
-def load_json(path: Path):
-    if not path.exists():
-        raise FileNotFoundError(f"Fichier introuvable : {path}")
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+def load_pose(path):
+    with open(path, "r") as f:
+        data = json.load(f)
 
-def load_camera_calibration(path):
-    data = load_json(path)
+    rvec = np.array(data["rvec"], dtype=np.float64)
+    tvec = np.array(data["tvec"], dtype=np.float64)
+    new_K = np.array(data["camera_matrix"], dtype=np.float64)
+
+    return rvec, tvec, new_K
+
+def load_calibration(path):
+    with open(path, "r") as f:
+        data = json.load(f)
+
     K = np.array(data["camera_matrix"], dtype=np.float64)
     dist = np.array(data["dist_coeffs"], dtype=np.float64)
+
     return K, dist
 
-def load_homography(path):
-    data = load_json(path)
-    H = np.array(data["H_pixel_to_mm"], dtype=np.float64)
-    return H
+# =========================================================
+# GEOMETRIE (IDENTIQUE TOP)
+# =========================================================
+def pixel_to_ray(u, v, K):
+    ray = np.linalg.inv(K) @ np.array([u, v, 1.0])
+    return ray / np.linalg.norm(ray)
+
+def intersect_ray_plane(ray, rvec, tvec):
+    R, _ = cv2.Rodrigues(rvec)
+    normal = R[:, 2]
+    plane_origin = tvec.reshape(3)
+
+    denom = np.dot(normal, ray)
+    if abs(denom) < 1e-9:
+        return None
+
+    t = np.dot(normal, plane_origin) / denom
+    if t < 0:
+        return None
+
+    return t * ray
+
+def camera_to_table(pt_cam, rvec, tvec):
+    R, _ = cv2.Rodrigues(rvec)
+    pt = R.T @ (pt_cam - tvec.reshape(3))
+    return float(pt[0]), float(pt[1])
+
+def pixel_to_table(u, v, rvec, tvec, K):
+    ray = pixel_to_ray(u, v, K)
+    pt_cam = intersect_ray_plane(ray, rvec, tvec)
+    if pt_cam is None:
+        return None
+    return camera_to_table(pt_cam, rvec, tvec)
 
 # =========================================================
 # OUTILS
 # =========================================================
-def pixel_to_mm(pt, H):
-    p = np.array([pt[0], pt[1], 1.0], dtype=np.float64)
-    p_mm = H @ p
-    p_mm /= p_mm[2]
-    return float(p_mm[0]), float(p_mm[1])
-
 def get_marker_centers(corners, ids):
-    """
-    EXACTEMENT la même logique que le script de pose :
-    centre = moyenne des 4 coins
-    """
     centers = {}
     for i, marker_id in enumerate(ids.flatten()):
         pts = corners[i][0]
@@ -73,13 +99,14 @@ def get_marker_centers(corners, ids):
 # =========================================================
 # TEST
 # =========================================================
-def run_test(centers, H):
-    print("\n=== TEST COINS (H chargée) ===")
+def run_test(centers, rvec, tvec, K):
+
+    print("\n=== TEST COINS ===")
 
     for name, tag_id in TAG_IDS.items():
         if tag_id in centers:
             cx, cy = centers[tag_id]
-            x_mm, y_mm = pixel_to_mm((cx, cy), H)
+            x_mm, y_mm = pixel_to_table(cx, cy, rvec, tvec, K)
             print(f"{name} -> ({x_mm:.2f}, {y_mm:.2f}) mm")
         else:
             print(f"{name} -> non détecté")
@@ -88,7 +115,7 @@ def run_test(centers, H):
 
     if TEST_TAG_ID in centers:
         cx, cy = centers[TEST_TAG_ID]
-        x_mm, y_mm = pixel_to_mm((cx, cy), H)
+        x_mm, y_mm = pixel_to_table(cx, cy, rvec, tvec, K)
 
         error_x = x_mm - EXPECTED_MM[0]
         error_y = y_mm - EXPECTED_MM[1]
@@ -107,45 +134,32 @@ def run_test(centers, H):
 # MAIN
 # =========================================================
 def main():
+
     print("=== CHARGEMENT ===")
-    print("Calibration :", CAMERA_CALIB_PATH)
-    print("Homographie :", HOMOGRAPHY_PATH)
+    print("Pose :", POSE_PATH)
 
-    K, dist = load_camera_calibration(CAMERA_CALIB_PATH)
-    H = load_homography(HOMOGRAPHY_PATH)
-
-    print("\nH utilisée =\n", np.round(H, 6))
+    rvec, tvec, new_K = load_pose(POSE_PATH)
+    K, dist = load_calibration(CALIB_PATH)
 
     cap = cv2.VideoCapture(CAMERA_ID)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
 
-    ret, frame = cap.read()
-    if not ret:
-        print("[ERREUR] caméra")
-        return
-
-    h, w = frame.shape[:2]
-    print("frame size =", w, h)
-
-    # EXACTEMENT même paramètre que pose
-    new_K, _ = cv2.getOptimalNewCameraMatrix(K, dist, (w, h), 1, (w, h))
-
-    aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
-    detector = cv2.aruco.ArucoDetector(aruco_dict)
-
     print("\n[INFO] Test automatique - appuie sur 'q' pour quitter")
 
     tested = False
+
+    aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
+    detector = cv2.aruco.ArucoDetector(aruco_dict)
 
     while True:
         ret, frame = cap.read()
         if not ret:
             break
 
-        # -------------------------------------------------
-        # IMPORTANT : même pipeline que pose
-        # -------------------------------------------------
+        # =================================================
+        # UNDISTORT (OBLIGATOIRE)
+        # =================================================
         frame_undist = cv2.undistort(frame, K, dist, None, new_K)
         gray = cv2.cvtColor(frame_undist, cv2.COLOR_BGR2GRAY)
 
@@ -158,7 +172,6 @@ def main():
             cv2.aruco.drawDetectedMarkers(display, corners, ids)
             centers = get_marker_centers(corners, ids)
 
-            # affichage
             for marker_id, (cx, cy) in centers.items():
                 cv2.circle(display, (int(cx), int(cy)), 5, (0, 0, 255), -1)
                 cv2.putText(display, str(marker_id),
@@ -166,18 +179,16 @@ def main():
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5,
                             (0, 0, 255), 1)
 
-        # test automatique si 4 tags visibles
         if all(tag_id in centers for tag_id in TAG_IDS.values()):
             if not tested:
-                run_test(centers, H)
+                run_test(centers, rvec, tvec, new_K)
                 tested = True
         else:
             tested = False
 
-        cv2.imshow("TEST HOMOGRAPHIE (UNDIST)", display)
+        cv2.imshow("TEST CAM BOTTOM (PnP)", display)
 
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord('q'):
+        if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
     cap.release()
