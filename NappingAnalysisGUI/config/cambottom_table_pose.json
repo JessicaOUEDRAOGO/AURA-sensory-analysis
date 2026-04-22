@@ -1,24 +1,24 @@
 {
     "rvec": [
         [
-            0.4501787029390682
+            0.4508064774719333
         ],
         [
-            0.025698744431990515
+            0.021776489979556585
         ],
         [
-            -0.013561026004840007
+            -0.01323881742604869
         ]
     ],
     "tvec": [
         [
-            -337.69830216902545
+            -343.6361582845163
         ],
         [
-            -183.73020842362666
+            -192.72944839764742
         ],
         [
-            736.7039090986947
+            723.1749611107956
         ]
     ],
     "camera_matrix": [
@@ -55,12 +55,13 @@
             0.0
         ]
     ],
-    "table_size_mm": 580.0,
+    "table_size_mm": 597.0,
+    "tag_offset_mm": 10.0,
     "tag_ids": {
         "TL": 42,
         "TR": 43,
         "BR": 40,
         "BL": 41
     },
-    "note": "camera_matrix = new_K (apr\u00e8s getOptimalNewCameraMatrix). dist_coeffs = 0 car l'image est pr\u00e9alablement undistordue."
+    "note": "camera_matrix = new_K (apr\u00e8s getOptimalNewCameraMatrix). dist_coeffs = 0 car l'image est pr\u00e9alablement undistordue. Le rep\u00e8re table a son origine au coin TL de la table (pas au centre du tag TL). Les centres des tags sont \u00e0 TAG_OFFSET_MM=10.0 mm des bords."
 }

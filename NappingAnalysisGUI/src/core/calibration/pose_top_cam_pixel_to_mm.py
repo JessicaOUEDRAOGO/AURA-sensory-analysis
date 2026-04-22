@@ -7,7 +7,7 @@ from pathlib import Path
 # =========================================================
 # PARAMÈTRES
 # =========================================================
-CAMERA_ID = 0
+CAMERA_ID = 1
 
 TAG_IDS = {
     "TL": 41,
@@ -16,7 +16,11 @@ TAG_IDS = {
     "BL": 42
 }
 
-TABLE_SIZE_MM = 580.0
+TABLE_SIZE_MM = 597.0
+
+# Distance entre le bord extérieur de la table et le centre du tag (mm).
+# Tags de 20×20 mm posés à ras du coin → centre à 10 mm du bord.
+TAG_OFFSET_MM = 10.0
 
 # =========================================================
 # CHEMINS PROJET
@@ -47,21 +51,45 @@ def load_camera_calibration(path: Path):
 
 
 # =========================================================
-# GEOMETRIE 3D TABLE
+# GÉOMÉTRIE 3D TABLE
 # =========================================================
+
+def get_tag_object_points():
+    """
+    Retourne les coordonnées 3D RÉELLES des centres des 4 tags dans le
+    repère table (Z = 0, origine = coin TL de la table).
+
+    Les tags (20×20 mm) sont posés à ras des coins → leur centre est à
+    TAG_OFFSET_MM du bord, donc :
+
+        TL : (TAG_OFFSET_MM,                TAG_OFFSET_MM,               0)
+        TR : (TABLE_SIZE_MM - TAG_OFFSET_MM, TAG_OFFSET_MM,               0)
+        BR : (TABLE_SIZE_MM - TAG_OFFSET_MM, TABLE_SIZE_MM - TAG_OFFSET_MM, 0)
+        BL : (TAG_OFFSET_MM,                TABLE_SIZE_MM - TAG_OFFSET_MM, 0)
+
+    L'ordre doit correspondre exactement à l'ordre des image_points.
+    """
+    o = TAG_OFFSET_MM
+    s = TABLE_SIZE_MM
+    return np.array([
+        [o,     o,     0],   # TL
+        [s - o, o,     0],   # TR
+        [s - o, s - o, 0],   # BR
+        [o,     s - o, 0],   # BL
+    ], dtype=np.float64)
+
 
 def estimate_table_pose(centers, K):
     """
     Estime la pose de la table via solvePnP.
+
     On passe dist=zeros car l'image est déjà undistordue (new_K utilisé).
+    Les object_points correspondent aux centres réels des tags dans le
+    repère table (pas aux coins de la table).
+
     Retourne (rvec, tvec) ou (None, None) si échec.
     """
-    object_points = np.array([
-        [0,              0,              0],
-        [TABLE_SIZE_MM,  0,              0],
-        [TABLE_SIZE_MM,  TABLE_SIZE_MM,  0],
-        [0,              TABLE_SIZE_MM,  0],
-    ], dtype=np.float64)
+    object_points = get_tag_object_points()
 
     image_points = np.array([
         centers[TAG_IDS["TL"]],
@@ -107,59 +135,53 @@ def pixel_to_ray(u, v, K):
 
 def intersect_ray_with_table_plane(ray, rvec, tvec):
     """
-    Intersecte le rayon (depuis l'origine caméra) avec le plan de la table (Z=0 en repère table).
-    Le plan est défini par sa normale (axe Z de la table dans le repère caméra)
-    et un point appartenant au plan (tvec = origine de la table dans le repère caméra).
+    Intersecte le rayon (depuis l'origine caméra) avec le plan de la table
+    (Z = 0 dans le repère table).
+
+    Le plan est défini par :
+      - sa normale : axe Z de la table exprimé dans le repère caméra (3e colonne de R)
+      - un point appartenant au plan : tvec (origine de la table dans le repère caméra)
+
+    Retourne le point d'intersection dans le repère caméra, ou None.
     """
     R, _ = cv2.Rodrigues(rvec)
-
-    # Normale au plan table = 3ème colonne de R (axe Z table exprimé en repère caméra)
-    normal = R[:, 2]
-
-    # Un point du plan : l'origine de la table dans le repère caméra
+    normal      = R[:, 2]
     plane_origin = tvec.reshape(3)
-
-    # Origine du rayon = centre optique de la caméra = (0, 0, 0) dans le repère caméra
-    ray_origin = np.zeros(3, dtype=np.float64)
+    ray_origin   = np.zeros(3, dtype=np.float64)
 
     denom = np.dot(normal, ray)
     if abs(denom) < 1e-9:
         return None  # Rayon parallèle au plan
 
     t = np.dot(normal, plane_origin - ray_origin) / denom
-
     if t < 0:
         return None  # Intersection derrière la caméra
 
-    intersection_cam = ray_origin + t * ray
-    return intersection_cam
+    return ray_origin + t * ray
 
 
 def camera_to_table(point_cam, rvec, tvec):
     """
     Transforme un point du repère caméra vers le repère table.
-    Retourne (x_mm, y_mm) dans le plan de la table.
+    Retourne (x_mm, y_mm) dans le plan de la table (Z ignoré, proche de 0).
     """
     R, _ = cv2.Rodrigues(rvec)
-    # Transformation inverse : point_table = R^T * (point_cam - tvec)
     point_table = R.T @ (point_cam - tvec.reshape(3))
     return float(point_table[0]), float(point_table[1])
 
 
 def pixel_to_table_mm(u, v, rvec, tvec, K):
     """
-    Convertit un pixel (u, v) en coordonnées millimètriques dans le repère table.
+    Convertit un pixel (u, v) en coordonnées millimètriques dans le repère
+    table (origine = coin TL de la table, X vers la droite, Y vers le bas).
+
     Retourne (x_mm, y_mm) ou None si impossible.
     """
-    ray = pixel_to_ray(u, v, K)
+    ray      = pixel_to_ray(u, v, K)
     point_cam = intersect_ray_with_table_plane(ray, rvec, tvec)
-
     if point_cam is None:
         return None
-
-    x_mm, y_mm = camera_to_table(point_cam, rvec, tvec)
-    return x_mm, y_mm
-
+    return camera_to_table(point_cam, rvec, tvec)
 
 
 # =========================================================
@@ -206,22 +228,26 @@ def get_marker_centers(corners, ids):
 def save_pose(rvec, tvec, new_K):
     """
     Sauvegarde la pose de la table.
-    On sauvegarde new_K (matrice après getOptimalNewCameraMatrix) car c'est
-    celle utilisée lors du calcul : l'image est undistordue avec new_K et dist=0.
+
+    new_K est la matrice après getOptimalNewCameraMatrix ; c'est elle qui
+    doit être utilisée lors des appels ultérieurs à pixel_to_table_mm
+    (avec dist = zeros, image préalablement undistordue).
     """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
     data = {
         "rvec": rvec.tolist(),
         "tvec": tvec.tolist(),
-        # new_K est la matrice à utiliser pour pixel_to_table_mm (dist = zeros)
         "camera_matrix": new_K.tolist(),
         "dist_coeffs": np.zeros((5, 1)).tolist(),
         "table_size_mm": TABLE_SIZE_MM,
+        "tag_offset_mm": TAG_OFFSET_MM,
         "tag_ids": TAG_IDS,
         "note": (
             "camera_matrix = new_K (après getOptimalNewCameraMatrix). "
-            "dist_coeffs = 0 car l'image est préalablement undistordue."
+            "dist_coeffs = 0 car l'image est préalablement undistordue. "
+            "Le repère table a son origine au coin TL de la table (pas au centre du tag TL). "
+            f"Les centres des tags sont à TAG_OFFSET_MM={TAG_OFFSET_MM} mm des bords."
         )
     }
 
@@ -232,16 +258,26 @@ def save_pose(rvec, tvec, new_K):
 
 
 def run_validation_tests(centers, rvec, tvec, new_K, frame_undist):
-    """Affiche les résultats de validation après capture."""
+    """
+    Tests de validation après capture.
 
-    print("\n=== TEST COINS (doivent être proches de 0 ou 580) ===")
-    errors = []
-    expected = {
-        "TL": (0.0,           0.0),
-        "TR": (TABLE_SIZE_MM, 0.0),
-        "BR": (TABLE_SIZE_MM, TABLE_SIZE_MM),
-        "BL": (0.0,           TABLE_SIZE_MM),
+    On vérifie que les centres des tags sont bien projetés aux positions
+    attendues (TAG_OFFSET_MM des bords), et que les coins de la table
+    (0,0), (580,0), (580,580), (0,580) sont cohérents par projection inverse.
+    """
+    o = TAG_OFFSET_MM
+    s = TABLE_SIZE_MM
+    dist_zero = np.zeros((5, 1), dtype=np.float64)
+
+    # ------------------------------------------------------------------
+    print("\n=== TEST CENTRES DES TAGS (doivent être proches de ±TAG_OFFSET_MM) ===")
+    expected_tag_mm = {
+        "TL": (o,     o    ),
+        "TR": (s - o, o    ),
+        "BR": (s - o, s - o),
+        "BL": (o,     s - o),
     }
+    errors = []
     for name, tag_id in TAG_IDS.items():
         cx, cy = centers[tag_id]
         result = pixel_to_table_mm(cx, cy, rvec, tvec, new_K)
@@ -249,14 +285,31 @@ def run_validation_tests(centers, rvec, tvec, new_K, frame_undist):
             print(f"  {name} -> ERREUR intersection")
             continue
         x_mm, y_mm = result
-        ex, ey = expected[name]
-        err = np.sqrt((x_mm - ex)**2 + (y_mm - ey)**2)
+        ex, ey = expected_tag_mm[name]
+        err = np.sqrt((x_mm - ex) ** 2 + (y_mm - ey) ** 2)
         errors.append(err)
-        print(f"  {name} -> ({x_mm:7.2f}, {y_mm:7.2f}) mm  |  erreur = {err:.2f} mm")
+        print(f"  {name} : pixel ({cx:.1f}, {cy:.1f}) "
+              f"-> ({x_mm:7.2f}, {y_mm:7.2f}) mm  "
+              f"[attendu ({ex:.1f}, {ey:.1f})]  erreur = {err:.2f} mm")
 
     if errors:
         print(f"  Erreur moyenne : {np.mean(errors):.2f} mm | max : {np.max(errors):.2f} mm")
 
+    # ------------------------------------------------------------------
+    print("\n=== TEST COINS DE LA TABLE (projection inverse) ===")
+    corner_pts_3d = {
+        "TL": [0, 0,     0],
+        "TR": [s, 0,     0],
+        "BR": [s, s,     0],
+        "BL": [0, s,     0],
+    }
+    for name, pt in corner_pts_3d.items():
+        pt_3d = np.array([pt], dtype=np.float64)
+        projected, _ = cv2.projectPoints(pt_3d, rvec, tvec, new_K, dist_zero)
+        px, py = projected[0][0]
+        print(f"  Coin {name} ({pt[0]:.0f}, {pt[1]:.0f}) mm -> pixel ({px:.1f}, {py:.1f})")
+
+    # ------------------------------------------------------------------
     print("\n=== TEST CENTRE IMAGE ===")
     h, w = frame_undist.shape[:2]
     cx_img, cy_img = w / 2.0, h / 2.0
@@ -264,19 +317,18 @@ def run_validation_tests(centers, rvec, tvec, new_K, frame_undist):
     if result is not None:
         x_mm, y_mm = result
         print(f"  Pixel ({cx_img:.0f}, {cy_img:.0f}) -> ({x_mm:.1f}, {y_mm:.1f}) mm")
-        print(f"  (Centre géométrique table = {TABLE_SIZE_MM/2:.1f}, {TABLE_SIZE_MM/2:.1f} mm)")
-        print(f"  Décalage caméra/centre table : Δx={x_mm - TABLE_SIZE_MM/2:.1f} mm, "
-              f"Δy={y_mm - TABLE_SIZE_MM/2:.1f} mm")
+        print(f"  (Centre géométrique table = {s/2:.1f}, {s/2:.1f} mm)")
+        print(f"  Décalage caméra/centre table : "
+              f"Δx={x_mm - s/2:.1f} mm, Δy={y_mm - s/2:.1f} mm")
     else:
         print("  Impossible de calculer l'intersection")
 
-    print("\n=== TEST CENTRE TABLE (290, 290) vers pixel ===")
-    # Projection inverse : point table -> pixel (pour vérification croisée)
-    dist_zero = np.zeros((5, 1), dtype=np.float64)
-    pt_3d = np.array([[TABLE_SIZE_MM / 2, TABLE_SIZE_MM / 2, 0.0]], dtype=np.float64)
+    # ------------------------------------------------------------------
+    print("\n=== TEST CENTRE TABLE (290, 290) → pixel (projection inverse) ===")
+    pt_3d = np.array([[s / 2, s / 2, 0.0]], dtype=np.float64)
     projected, _ = cv2.projectPoints(pt_3d, rvec, tvec, new_K, dist_zero)
     px, py = projected[0][0]
-    print(f"  Centre table (290, 290) mm -> pixel ({px:.1f}, {py:.1f})")
+    print(f"  Centre table ({s/2:.0f}, {s/2:.0f}) mm -> pixel ({px:.1f}, {py:.1f})")
 
 
 # =========================================================
@@ -310,7 +362,7 @@ def main():
 
     # ArUco
     aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
-    detector = cv2.aruco.ArucoDetector(aruco_dict)
+    detector   = cv2.aruco.ArucoDetector(aruco_dict)
 
     print("[INFO] Appuie sur 'c' pour capturer et calculer la pose | 'q' pour quitter")
 
@@ -325,20 +377,17 @@ def main():
         corners, ids, _ = detector.detectMarkers(gray)
 
         display = frame_undist.copy()
-        all_tags_found = False
 
         if ids is not None:
             cv2.aruco.drawDetectedMarkers(display, corners, ids)
             centers = get_marker_centers(corners, ids)
 
             if all(tag_id in centers for tag_id in TAG_IDS.values()):
-                all_tags_found = True
                 for name, tag_id in TAG_IDS.items():
                     cx, cy = centers[tag_id]
                     cv2.circle(display, (int(cx), int(cy)), 6, (0, 0, 255), -1)
                     cv2.putText(display, name, (int(cx) + 5, int(cy) - 5),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
-
                 cv2.putText(display, "4 TAGS OK - appuie sur 'c'",
                             (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
             else:
@@ -374,10 +423,7 @@ def main():
             print(f"  rvec : {rvec.flatten()}")
             print(f"  tvec : {tvec.flatten()} mm")
 
-            # Validation
             run_validation_tests(centers, rvec, tvec, new_K, frame_undist)
-
-            # Sauvegarde avec new_K (cohérent avec dist=zeros)
             save_pose(rvec, tvec, new_K)
 
     cap.release()
