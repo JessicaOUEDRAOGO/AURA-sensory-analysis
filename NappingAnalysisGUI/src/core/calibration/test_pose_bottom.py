@@ -19,17 +19,9 @@ CALIB_PATH = CONFIG_DIR / "camera_calibration.json"
 # =========================================================
 CAMERA_ID = 0
 TEST_TAG_ID = 7
-EXPECTED_MM = (200.0, 400.0)
-
-TAG_IDS = {
-    "TL": 42,
-    "TR": 43,
-    "BR": 40,
-    "BL": 41
-}
 
 # =========================================================
-# LOAD
+# LOAD POSE
 # =========================================================
 def load_pose(path):
     with open(path, "r") as f:
@@ -37,21 +29,12 @@ def load_pose(path):
 
     rvec = np.array(data["rvec"], dtype=np.float64)
     tvec = np.array(data["tvec"], dtype=np.float64)
-    new_K = np.array(data["camera_matrix"], dtype=np.float64)
+    K    = np.array(data["camera_matrix"], dtype=np.float64)
 
-    return rvec, tvec, new_K
-
-def load_calibration(path):
-    with open(path, "r") as f:
-        data = json.load(f)
-
-    K = np.array(data["camera_matrix"], dtype=np.float64)
-    dist = np.array(data["dist_coeffs"], dtype=np.float64)
-
-    return K, dist
+    return rvec, tvec, K
 
 # =========================================================
-# GEOMETRIE (IDENTIQUE TOP)
+# GEOMETRY
 # =========================================================
 def pixel_to_ray(u, v, K):
     ray = np.linalg.inv(K) @ np.array([u, v, 1.0])
@@ -85,108 +68,72 @@ def pixel_to_table(u, v, rvec, tvec, K):
     return camera_to_table(pt_cam, rvec, tvec)
 
 # =========================================================
-# OUTILS
+# CENTER
 # =========================================================
-def get_marker_centers(corners, ids):
-    centers = {}
-    for i, marker_id in enumerate(ids.flatten()):
-        pts = corners[i][0]
-        cx = float(np.mean(pts[:, 0]))
-        cy = float(np.mean(pts[:, 1]))
-        centers[int(marker_id)] = (cx, cy)
-    return centers
-
-# =========================================================
-# TEST
-# =========================================================
-def run_test(centers, rvec, tvec, K):
-
-    print("\n=== TEST COINS ===")
-
-    for name, tag_id in TAG_IDS.items():
-        if tag_id in centers:
-            cx, cy = centers[tag_id]
-            x_mm, y_mm = pixel_to_table(cx, cy, rvec, tvec, K)
-            print(f"{name} -> ({x_mm:.2f}, {y_mm:.2f}) mm")
-        else:
-            print(f"{name} -> non détecté")
-
-    print("\n=== TEST TAG ===")
-
-    if TEST_TAG_ID in centers:
-        cx, cy = centers[TEST_TAG_ID]
-        x_mm, y_mm = pixel_to_table(cx, cy, rvec, tvec, K)
-
-        error_x = x_mm - EXPECTED_MM[0]
-        error_y = y_mm - EXPECTED_MM[1]
-        error_total = np.sqrt(error_x**2 + error_y**2)
-
-        print(f"ID = {TEST_TAG_ID}")
-        print(f"Mesuré (mm) : ({x_mm:.2f}, {y_mm:.2f})")
-        print(f"Attendu (mm) : {EXPECTED_MM}")
-        print(f"Erreur X : {error_x:.2f} mm")
-        print(f"Erreur Y : {error_y:.2f} mm")
-        print(f"Erreur totale : {error_total:.2f} mm")
-    else:
-        print(f"Tag {TEST_TAG_ID} non détecté")
+def get_center(pts):
+    return np.mean(pts, axis=0)
 
 # =========================================================
 # MAIN
 # =========================================================
 def main():
 
-    print("=== CHARGEMENT ===")
-    print("Pose :", POSE_PATH)
-
-    rvec, tvec, new_K = load_pose(POSE_PATH)
-    K, dist = load_calibration(CALIB_PATH)
+    rvec, tvec, K = load_pose(POSE_PATH)
 
     cap = cv2.VideoCapture(CAMERA_ID)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
 
-    print("\n[INFO] Test automatique - appuie sur 'q' pour quitter")
-
-    tested = False
-
     aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
     detector = cv2.aruco.ArucoDetector(aruco_dict)
+
+    print("\n[TEST] Bouge le tag 7 (pose vs levé)\n")
+
+    last_xy = None
 
     while True:
         ret, frame = cap.read()
         if not ret:
             break
 
-        # =================================================
-        # UNDISTORT (OBLIGATOIRE)
-        # =================================================
-        frame_undist = cv2.undistort(frame, K, dist, None, new_K)
-        gray = cv2.cvtColor(frame_undist, cv2.COLOR_BGR2GRAY)
-
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         corners, ids, _ = detector.detectMarkers(gray)
-        display = frame_undist.copy()
 
-        centers = {}
+        display = frame.copy()
 
         if ids is not None:
-            cv2.aruco.drawDetectedMarkers(display, corners, ids)
-            centers = get_marker_centers(corners, ids)
+            for i, marker_id in enumerate(ids.flatten()):
 
-            for marker_id, (cx, cy) in centers.items():
-                cv2.circle(display, (int(cx), int(cy)), 5, (0, 0, 255), -1)
-                cv2.putText(display, str(marker_id),
-                            (int(cx)+5, int(cy)-5),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                            (0, 0, 255), 1)
+                if marker_id == TEST_TAG_ID:
 
-        if all(tag_id in centers for tag_id in TAG_IDS.values()):
-            if not tested:
-                run_test(centers, rvec, tvec, new_K)
-                tested = True
-        else:
-            tested = False
+                    pts = corners[i][0]
+                    cx, cy = get_center(pts)
 
-        cv2.imshow("TEST CAM BOTTOM (PnP)", display)
+                    res = pixel_to_table(cx, cy, rvec, tvec, K)
+
+                    if res is not None:
+                        x_mm, y_mm = res
+
+                        cv2.circle(display, (int(cx), int(cy)), 6, (0,0,255), -1)
+
+                        text = f"X={x_mm:.1f} mm  Y={y_mm:.1f} mm"
+                        cv2.putText(display, text, (50, 50),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,0), 2)
+
+                        # stabilité
+                        if last_xy is not None:
+                            dx = x_mm - last_xy[0]
+                            dy = y_mm - last_xy[1]
+                            drift = np.sqrt(dx*dx + dy*dy)
+
+                            cv2.putText(display,
+                                f"Drift={drift:.2f} mm",
+                                (50, 100),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1, (255,0,0), 2)
+
+                        last_xy = (x_mm, y_mm)
+
+        cv2.imshow("TEST Z != 0", display)
 
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
@@ -194,6 +141,5 @@ def main():
     cap.release()
     cv2.destroyAllWindows()
 
-# =========================================================
 if __name__ == "__main__":
     main()
