@@ -25,7 +25,7 @@ BASE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = BASE_DIR.parents[2]
 CONFIG_DIR = PROJECT_ROOT / "config"
 
-CAMERA_CALIB_PATH = CONFIG_DIR / "camera_calibration.json"
+CAMERA_CALIB_PATH = CONFIG_DIR / "camera_calibration_fisheye.json"
 OUTPUT_JSON = CONFIG_DIR / "cambottom_table_pose.json"
 
 
@@ -98,7 +98,7 @@ def estimate_table_pose(centers, K):
         centers[TAG_IDS["BL"]],
     ], dtype=np.float64)
 
-    dist_zero = np.zeros((5, 1), dtype=np.float64)
+    dist_zero = np.zeros((4, 1), dtype=np.float64)
 
     success, rvec, tvec = cv2.solvePnP(
         object_points,
@@ -239,13 +239,13 @@ def save_pose(rvec, tvec, new_K):
         "rvec": rvec.tolist(),
         "tvec": tvec.tolist(),
         "camera_matrix": new_K.tolist(),
-        "dist_coeffs": np.zeros((5, 1)).tolist(),
+        "dist_coeffs": np.zeros((4, 1)).tolist(),
         "table_size_mm": TABLE_SIZE_MM,
         "tag_offset_mm": TAG_OFFSET_MM,
         "tag_ids": TAG_IDS,
         "note": (
-            "camera_matrix = new_K (après getOptimalNewCameraMatrix). "
-            "dist_coeffs = 0 car l'image est préalablement undistordue. "
+            "camera_matrix = new_K (fisheye rectified). "
+            "dist_coeffs = 0 car image rectifiée via cv2.remap (fisheye). "
             "Le repère table a son origine au coin TL de la table (pas au centre du tag TL). "
             f"Les centres des tags sont à TAG_OFFSET_MM={TAG_OFFSET_MM} mm des bords."
         )
@@ -260,16 +260,11 @@ def save_pose(rvec, tvec, new_K):
 def run_validation_tests(centers, rvec, tvec, new_K, frame_undist):
     """
     Tests de validation après capture.
-
-    On vérifie que les centres des tags sont bien projetés aux positions
-    attendues (TAG_OFFSET_MM des bords), et que les coins de la table
-    (0,0), (580,0), (580,580), (0,580) sont cohérents par projection inverse.
     """
     o = TAG_OFFSET_MM
     s = TABLE_SIZE_MM
-    dist_zero = np.zeros((5, 1), dtype=np.float64)
+    dist_zero = np.zeros((4, 1), dtype=np.float64)
 
-    # ------------------------------------------------------------------
     print("\n=== TEST CENTRES DES TAGS (doivent être proches de ±TAG_OFFSET_MM) ===")
     expected_tag_mm = {
         "TL": (o,     o    ),
@@ -277,6 +272,7 @@ def run_validation_tests(centers, rvec, tvec, new_K, frame_undist):
         "BR": (s - o, s - o),
         "BL": (o,     s - o),
     }
+
     errors = []
     for name, tag_id in TAG_IDS.items():
         cx, cy = centers[tag_id]
@@ -284,10 +280,12 @@ def run_validation_tests(centers, rvec, tvec, new_K, frame_undist):
         if result is None:
             print(f"  {name} -> ERREUR intersection")
             continue
+
         x_mm, y_mm = result
         ex, ey = expected_tag_mm[name]
         err = np.sqrt((x_mm - ex) ** 2 + (y_mm - ey) ** 2)
         errors.append(err)
+
         print(f"  {name} : pixel ({cx:.1f}, {cy:.1f}) "
               f"-> ({x_mm:7.2f}, {y_mm:7.2f}) mm  "
               f"[attendu ({ex:.1f}, {ey:.1f})]  erreur = {err:.2f} mm")
@@ -295,21 +293,20 @@ def run_validation_tests(centers, rvec, tvec, new_K, frame_undist):
     if errors:
         print(f"  Erreur moyenne : {np.mean(errors):.2f} mm | max : {np.max(errors):.2f} mm")
 
-    # ------------------------------------------------------------------
     print("\n=== TEST COINS DE LA TABLE (projection inverse) ===")
     corner_pts_3d = {
-        "TL": [0, 0,     0],
-        "TR": [s, 0,     0],
-        "BR": [s, s,     0],
-        "BL": [0, s,     0],
+        "TL": [0, 0, 0],
+        "TR": [s, 0, 0],
+        "BR": [s, s, 0],
+        "BL": [0, s, 0],
     }
+
     for name, pt in corner_pts_3d.items():
-        pt_3d = np.array([pt], dtype=np.float64)
-        projected, _ = cv2.projectPoints(pt_3d, rvec, tvec, new_K, dist_zero)
-        px, py = projected[0][0]
+        pt_3d = np.array(pt, dtype=np.float64).reshape(1, 1, 3)
+        projected, _ = cv2.fisheye.projectPoints(pt_3d, rvec, tvec, new_K, dist_zero)
+        px, py = projected[0, 0]
         print(f"  Coin {name} ({pt[0]:.0f}, {pt[1]:.0f}) mm -> pixel ({px:.1f}, {py:.1f})")
 
-    # ------------------------------------------------------------------
     print("\n=== TEST CENTRE IMAGE ===")
     h, w = frame_undist.shape[:2]
     cx_img, cy_img = w / 2.0, h / 2.0
@@ -318,18 +315,15 @@ def run_validation_tests(centers, rvec, tvec, new_K, frame_undist):
         x_mm, y_mm = result
         print(f"  Pixel ({cx_img:.0f}, {cy_img:.0f}) -> ({x_mm:.1f}, {y_mm:.1f}) mm")
         print(f"  (Centre géométrique table = {s/2:.1f}, {s/2:.1f} mm)")
-        print(f"  Décalage caméra/centre table : "
-              f"Δx={x_mm - s/2:.1f} mm, Δy={y_mm - s/2:.1f} mm")
+        print(f"  Décalage caméra/centre table : Δx={x_mm - s/2:.1f} mm, Δy={y_mm - s/2:.1f} mm")
     else:
         print("  Impossible de calculer l'intersection")
 
-    # ------------------------------------------------------------------
     print("\n=== TEST CENTRE TABLE (290, 290) → pixel (projection inverse) ===")
-    pt_3d = np.array([[s / 2, s / 2, 0.0]], dtype=np.float64)
-    projected, _ = cv2.projectPoints(pt_3d, rvec, tvec, new_K, dist_zero)
-    px, py = projected[0][0]
+    pt_3d = np.array([s / 2, s / 2, 0.0], dtype=np.float64).reshape(1, 1, 3)
+    projected, _ = cv2.fisheye.projectPoints(pt_3d, rvec, tvec, new_K, dist_zero)
+    px, py = projected[0, 0]
     print(f"  Centre table ({s/2:.0f}, {s/2:.0f}) mm -> pixel ({px:.1f}, {py:.1f})")
-
 
 # =========================================================
 # MAIN
@@ -356,7 +350,13 @@ def main():
     h, w = frame.shape[:2]
     print(f"[INFO] Résolution : {w}x{h}")
 
-    new_K, roi = cv2.getOptimalNewCameraMatrix(K, dist, (w, h), 1, (w, h))
+    new_K = cv2.fisheye.estimateNewCameraMatrixForUndistortRectify(
+    K, dist, (w, h), np.eye(3), balance=0.3
+    )
+
+    map1, map2 = cv2.fisheye.initUndistortRectifyMap(
+        K, dist, np.eye(3), new_K, (w, h), cv2.CV_16SC2
+    )
     print(f"[INFO] new_K diagonal : fx={new_K[0,0]:.1f}, fy={new_K[1,1]:.1f}, "
           f"cx={new_K[0,2]:.1f}, cy={new_K[1,2]:.1f}")
 
@@ -372,7 +372,7 @@ def main():
             break
 
         # Undistortion avec new_K
-        frame_undist = cv2.undistort(frame, K, dist, None, new_K)
+        frame_undist = cv2.remap(frame, map1, map2, cv2.INTER_LINEAR)
         gray = cv2.cvtColor(frame_undist, cv2.COLOR_BGR2GRAY)
         corners, ids, _ = detector.detectMarkers(gray)
 
@@ -395,7 +395,7 @@ def main():
                 cv2.putText(display, f"Tags detectes: {detected}",
                             (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 165, 255), 2)
 
-        cv2.imshow("Detection camera top", display)
+        cv2.imshow("Detection camera bottom", display)
         key = cv2.waitKey(1) & 0xFF
 
         if key == ord('q'):

@@ -1,36 +1,36 @@
 {
     "rvec": [
         [
-            0.45518585544414475
+            0.5155787542646715
         ],
         [
-            0.03399592934562978
+            0.0049736975974541495
         ],
         [
-            -0.006911476472764118
+            0.0013471933414659406
         ]
     ],
     "tvec": [
         [
-            -317.50532386468547
+            -330.3297112302938
         ],
         [
-            -195.8019434410947
+            -207.7300283591944
         ],
         [
-            721.4152449614027
+            464.30735404792665
         ]
     ],
     "camera_matrix": [
         [
-            1506.8957023313749,
+            991.1388893619702,
             0.0,
-            939.6390846747661
+            959.4235474151814
         ],
         [
             0.0,
-            1318.0517034265504,
-            458.17073224902526
+            992.8435673685584,
+            539.4871944013759
         ],
         [
             0.0,
@@ -39,9 +39,6 @@
         ]
     ],
     "dist_coeffs": [
-        [
-            0.0
-        ],
         [
             0.0
         ],
@@ -63,5 +60,5 @@
         "BR": 40,
         "BL": 41
     },
-    "note": "camera_matrix = new_K (apr\u00e8s getOptimalNewCameraMatrix). dist_coeffs = 0 car l'image est pr\u00e9alablement undistordue. Le rep\u00e8re table a son origine au coin TL de la table (pas au centre du tag TL). Les centres des tags sont \u00e0 TAG_OFFSET_MM=10.0 mm des bords."
+    "note": "camera_matrix = new_K (fisheye rectified). dist_coeffs = 0 car image rectifi\u00e9e via cv2.remap (fisheye). Le rep\u00e8re table a son origine au coin TL de la table (pas au centre du tag TL). Les centres des tags sont \u00e0 TAG_OFFSET_MM=10.0 mm des bords."
 }
