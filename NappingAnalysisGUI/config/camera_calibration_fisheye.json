@@ -1,0 +1,53 @@
+{
+    "model": "fisheye",
+    "pattern_size": [
+        9,
+        6
+    ],
+    "square_size_m": 0.024,
+    "image_size_px": [
+        1920,
+        1080
+    ],
+    "num_input_images": 36,
+    "num_valid_images": 36,
+    "rms_error": 0.7938161980542776,
+    "mean_reprojection_error_px": 0.10083901063601888,
+    "intrinsics_valid": true,
+    "camera_matrix": [
+        [
+            1021.3837839784119,
+            0.0,
+            959.5
+        ],
+        [
+            0.0,
+            1030.457461039112,
+            539.5
+        ],
+        [
+            0.0,
+            0.0,
+            1.0
+        ]
+    ],
+    "dist_coeffs": [
+        [
+            0.31935908321659506
+        ],
+        [
+            0.8944471551187874
+        ],
+        [
+            -4.397858442573222
+        ],
+        [
+            6.69913901200941
+        ]
+    ],
+    "flags_used": [
+        "CALIB_RECOMPUTE_EXTRINSIC",
+        "CALIB_FIX_SKEW",
+        "CALIB_FIX_PRINCIPAL_POINT"
+    ]
+}
