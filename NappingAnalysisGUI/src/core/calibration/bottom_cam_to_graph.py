@@ -151,7 +151,7 @@ def main():
                     continue
 
                 x_mm, y_mm = result
-                x_mm, y_mm = x_mm, y_mm + 17
+                x_mm, y_mm = x_mm, y_mm
 
                 # --- Vérification : le tag est bien dans les limites de la table ---
                 in_table = (0.0 <= x_mm <= table_size_mm) and \
