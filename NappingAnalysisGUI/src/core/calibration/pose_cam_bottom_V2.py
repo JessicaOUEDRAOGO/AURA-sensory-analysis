@@ -242,6 +242,7 @@ def save_pose(rvec, tvec, new_K):
         "dist_coeffs": np.zeros((4, 1)).tolist(),
         "table_size_mm": TABLE_SIZE_MM,
         "tag_offset_mm": TAG_OFFSET_MM,
+        "fisheye_balance": 0.3,
         "tag_ids": TAG_IDS,
         "note": (
             "camera_matrix = new_K (fisheye rectified). "

@@ -148,54 +148,7 @@ class Calibration:
             label_status.setPixmap(QPixmap(validate_icon))
 
         return self.H_proj, self.H_inv_proj, self.H_graph, self.H_inv_graph
-    # def start_calib(self, label_status):
-    #     quadrilateral_detector = QuadrilateralDetector()
-    #     homography = HomographyTransformer()
-    #     proj_point = ProjectorPoint()
-    #     drawer = DrawUtils()
-
-    #     if self.frame is None:
-    #         # force une capture au moins une fois
-    #         self.update_frame()
-    #         if self.frame is None:
-    #             raise Exception("Aucune frame caméra disponible pour calibrer.")
-
-    #     proj_points = quadrilateral_detector.detect_quadrilateral_from_aruco(self.frame)
-    #     if proj_points is None or len(proj_points) != 4:
-    #         raise Exception("Impossible de détecter les 4 marqueurs ArUco de calibration.")
-
-    #     image = drawer.draw_points_linked(proj_points, self.frame, "Quadrilatère détecté")
-    #     self.proj_points = proj_points
-    #     self.update_frame(last_frame=image)
-
-    #     # Domain projecteur (carré basé sur image_height)
-    #     cam_points = proj_point.setUp_Projector_Point(proj_points, self.image_height, self.image_height)
-    #     S = self.image_height
-    #     cam_points = np.array(cam_points, dtype=np.float32)
-
-    #     # Rotation 180° : (x', y') = (S-1-x, S-1-y)
-    #     cam_points = np.stack([(S - 1) - cam_points[:, 0], (S - 1) - cam_points[:, 1]], axis=1).astype(np.float32)
-
-    #     # Domain graph (grid)
-    #     graph_points = proj_point.setUp_Projector_Point(proj_points, self.grid_size, self.grid_size)
-    #     Sg = self.grid_size
-    #     graph_points = np.array(graph_points, dtype=np.float32)
-
-    #     # Rotation 180°
-    #     graph_points = np.stack([(Sg - 1) - graph_points[:, 0], (Sg - 1) - graph_points[:, 1]], axis=1).astype(np.float32)
-
-    #     self.H_proj, self.H_inv_proj = homography.find_Invers_Homography(proj_points, cam_points)
-    #     self.H_graph, self.H_inv_graph = homography.find_Invers_Homography(proj_points, graph_points)
-
-    #     # Icon validate (chemin robuste)
-    #     validate_icon = asset_path("icons", "Validate.png")
-    #     if os.path.exists(validate_icon):
-    #         label_status.setPixmap(QPixmap(validate_icon))
-    #     else:
-    #         print(f"[WARNING] Icône Validate introuvable : {validate_icon}")
-
-    #     self.save_calib()
-    #     return self.H_proj, self.H_inv_proj, self.H_graph, self.H_inv_graph
+    
     def build_v2_reference(self, label_status):
         import os
         import cv2
