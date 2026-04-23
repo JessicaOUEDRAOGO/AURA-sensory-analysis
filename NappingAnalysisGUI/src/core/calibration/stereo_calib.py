@@ -28,7 +28,7 @@ PROJECT_ROOT = BASE_DIR.parents[2]   # si script dans src/core/calibration/
 CONFIG_DIR = PROJECT_ROOT / "config"
 DATA_ROOT = BASE_DIR / "projector_calibration_data"
 
-CAMERA_CALIB_PATH = CONFIG_DIR / "camera_calibration.json"
+CAMERA_CALIB_PATH = CONFIG_DIR / "camera_calibration_fisheye.json"
 PROJECTOR_CALIB_PATH = CONFIG_DIR / "projector_calibration_moreno_refined.json"
 
 STEREO_JSON_PATH = CONFIG_DIR / "stereo_camera_projector_calibration.json"
@@ -361,8 +361,24 @@ def main():
 
     K_cam, dist_cam = load_camera_calibration(CAMERA_CALIB_PATH)
     K_proj, dist_proj = load_projector_calibration(PROJECTOR_CALIB_PATH)
+    dist_proj = np.array(dist_proj, dtype=np.float64).reshape(-1, 1)
     graycode = load_graycode_pattern(PROJECTOR_WIDTH, PROJECTOR_HEIGHT)
+    # --- construction rectification fisheye ---
+    sample_img = cv2.imread(str(DATA_ROOT / VALID_POSES[0] / "camera_captures" / "white.png"))
+    h, w = sample_img.shape[:2]
 
+    new_K = cv2.fisheye.estimateNewCameraMatrixForUndistortRectify(
+        K_cam, dist_cam, (w, h), np.eye(3), balance=0.3
+    )
+
+    map1, map2 = cv2.fisheye.initUndistortRectifyMap(
+        K_cam, dist_cam, np.eye(3), new_K, (w, h), cv2.CV_16SC2
+    )
+
+    # IMPORTANT : on travaille désormais dans l'espace rectifié
+    K_cam = new_K
+    dist_cam = np.zeros((4, 1))
+    dist_cam = np.array(dist_cam, dtype=np.float64).reshape(-1, 1)
     objp = build_object_points(PATTERN_SIZE, SQUARE_SIZE_M)
 
     object_points = []
@@ -385,9 +401,9 @@ def main():
             "num_projector_corners": 0,
             "mean_inliers": None
         }
-
         try:
             white_bgr = cv2.imread(str(pose_dir / "camera_captures" / "white.png"))
+            white_bgr = cv2.remap(white_bgr, map1, map2, cv2.INTER_LINEAR)
             if white_bgr is None:
                 pose_debug["reason"] = "white.png introuvable ou illisible"
                 print("  white.png introuvable")
@@ -448,7 +464,7 @@ def main():
 
             corners_proj = np.array(projector_corners, dtype=np.float32).reshape(-1, 1, 2)
 
-            object_points.append(objp.copy())
+            object_points.append(objp.reshape(-1, 1, 3))
             cam_imgpoints.append(corners_cam.astype(np.float32))
             proj_imgpoints.append(corners_proj.astype(np.float32))
             accepted_poses.append(pose_name)
@@ -488,7 +504,7 @@ def main():
         distCoeffs1=dist_cam.copy(),
         cameraMatrix2=K_proj.copy(),
         distCoeffs2=dist_proj.copy(),
-        imageSize=(PROJECTOR_WIDTH, PROJECTOR_HEIGHT),
+        imageSize=(w, h),
         criteria=STEREO_TERM_CRIT,
         flags=STEREO_FLAGS
     )
