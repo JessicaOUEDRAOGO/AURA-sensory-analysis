@@ -6,7 +6,7 @@ import numpy as np
 
 from PyQt6.QtCore import QTimer
 from PyQt6.QtGui import QPixmap
-
+from src.core.utils.paths import asset_path
 from src.core.utils.paths import config_path, asset_path
 from src.core.utils.utils import QuadrilateralDetector, HomographyTransformer, ProjectorPoint
 from src.core.projection.draw_utils import DrawUtils
@@ -112,11 +112,6 @@ class Calibration:
             return None
 
     def start_calib(self, label_status):
-        import os
-        import cv2
-        from PyQt6.QtGui import QPixmap
-        from src.core.utils.paths import asset_path
-
         if self.frame is None:
             self.update_frame()
             if self.frame is None:
@@ -149,36 +144,6 @@ class Calibration:
 
         return self.H_proj, self.H_inv_proj, self.H_graph, self.H_inv_graph
     
-    def build_v2_reference(self, label_status):
-        import os
-        import cv2
-        from PyQt6.QtGui import QPixmap
-
-        from src.core.calibration.v2_recalibration_core import V2RecalibrationCore
-        from src.core.utils.paths import asset_path
-
-        if self.frame is None:
-            self.update_frame()
-            if self.frame is None:
-                raise Exception("Aucune frame caméra disponible pour créer la référence V2.")
-
-        core = V2RecalibrationCore(grid_size=self.grid_size)
-        ref_data, ref_path = core.save_reference_bundle(self.frame)
-
-        preview = self.frame.copy()
-
-        for pt in ref_data["reference_camera_points_raw"].values():
-            x, y = int(pt[0]), int(pt[1])
-            cv2.circle(preview, (x, y), 12, (255, 0, 0), -1)
-
-        self.update_frame(last_frame=preview)
-
-        validate_icon = asset_path("icons", "Validate.png")
-        if os.path.exists(validate_icon):
-            label_status.setPixmap(QPixmap(validate_icon))
-
-        print(f"Référence V2 sauvegardée : {ref_path}")
-        return ref_path
 
     def get_homography(self):
         if self.homography_transformer:
