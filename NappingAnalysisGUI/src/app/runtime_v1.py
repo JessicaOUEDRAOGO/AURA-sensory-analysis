@@ -11,7 +11,6 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from src.core.utils.paths import config_path, data_path
 from src.core.projection.display_manager import DisplayManager
 from src.core.projection.draw_utils import DrawUtils
-from src.core.mapping.coordinate_mapper import CoordinateMapper
 
 
 class Algorithm_Analysis(QObject):
@@ -48,6 +47,21 @@ class Algorithm_Analysis(QObject):
         self.protocol = protocol
         self.record_window = record_window
 
+        # -----------------------------
+        # NOUVEAU PIPELINE PROPRE
+        # -----------------------------
+        pose = json.load(open(config_path("cambottom_table_pose.json")))
+
+        self.rvec = np.array(pose["rvec"], dtype=np.float64)
+        self.tvec = np.array(pose["tvec"], dtype=np.float64)
+        # priorité à la caméra corrigée
+        if hasattr(parent, "runtime_K") and parent.runtime_K is not None:
+            self.K = parent.runtime_K
+        else:
+            self.K = np.array(pose["camera_matrix"], dtype=np.float64)
+
+        H_data = json.load(open(config_path("H_table_to_proj.json")))
+        self.H_table_to_proj = np.array(H_data["H_table_to_proj"], dtype=np.float32)
         # ------------------------------------------------------------------
         # Image de fond / média
         # ------------------------------------------------------------------
@@ -70,15 +84,6 @@ class Algorithm_Analysis(QObject):
         # Mapper géométrique
         # ------------------------------------------------------------------
         self.mapper = None
-
-        try:
-            self.mapper = CoordinateMapper()
-            self.mapper.load()
-            print("[RUNTIME] CoordinateMapper chargé avec succès.")
-            print("[RUNTIME] H_graph_to_proj chargée depuis calibration_data.json.")
-        except Exception as e:
-            print(f"[WARNING] Impossible de charger CoordinateMapper : {e}")
-
         # ------------------------------------------------------------------
         # ArUco
         # ------------------------------------------------------------------
@@ -113,8 +118,7 @@ class Algorithm_Analysis(QObject):
         self.H_inv_projector = H_inv_projector
         self.H_graph = H_graph
         self.H_inv_graph = H_inv_graph
-        self.projector_offset_x = 30
-        self.projector_offset_y = -40
+        
 
         self.data_buffer = []
         self.running = False
@@ -134,6 +138,34 @@ class Algorithm_Analysis(QObject):
     def set_hands_provider(self, func):
         self.get_hands = func
 
+    def table_to_projector(self, x_mm, y_mm):
+        pt = np.array([[[x_mm, y_mm]]], dtype=np.float32)
+        proj = cv2.perspectiveTransform(pt, self.H_table_to_proj)
+        return proj[0, 0]
+    
+    def pixel_to_table(self, u, v):
+        
+
+        K_inv = np.linalg.inv(self.K)
+        ray = K_inv @ np.array([u, v, 1.0])
+        ray = ray / np.linalg.norm(ray)
+
+        R, _ = cv2.Rodrigues(self.rvec)
+        normal = R[:, 2]
+        plane_origin = self.tvec.reshape(3)
+
+        denom = np.dot(normal, ray)
+        if abs(denom) < 1e-9:
+            return None
+
+        t = np.dot(normal, plane_origin) / denom
+        if t < 0:
+            return None
+
+        pt_cam = ray * t
+        pt_table = R.T @ (pt_cam - self.tvec.reshape(3))
+
+        return float(pt_table[0]), float(pt_table[1])
     # ======================================================================
     # Validation / helpers
     # ======================================================================
@@ -329,7 +361,7 @@ class Algorithm_Analysis(QObject):
         """
         graph_background = self.build_graph_useful_background()
 
-        H_graph_to_proj = self.mapper.get_graph_to_projector_homography()
+        H_graph_to_proj = self.H_table_to_proj
 
         warped_background = cv2.warpPerspective(
             graph_background,
@@ -380,12 +412,9 @@ class Algorithm_Analysis(QObject):
         """
         # anchor_raw = self._get_marker_anchor_raw(corner)
         anchor_raw = self._get_marker_anchor_raw_center(corner)
-
-        graph_anchor = self.mapper.camera_raw_to_graph(anchor_raw)
         projector_anchor = self.mapper.camera_raw_to_projector_nominal(anchor_raw)
 
-        # offset global manuel conservé
-        projector_anchor = self._apply_projector_offset(projector_anchor)
+        
 
         return {
             "graph_center": graph_anchor,
@@ -753,10 +782,7 @@ class Algorithm_Analysis(QObject):
             )
         print("=====================")
 
-        if self.mapper is None:
-            print("[ERREUR] Mapper ou homographie graph->projecteur indisponible. Arrêt.")
-            self.finished_signal.emit()
-            return
+        
 
         ra_config = {}
         if overlay_on:
@@ -771,10 +797,10 @@ class Algorithm_Analysis(QObject):
             # STOP propre immédiat
             if not self.running:
                 break
-            proj_w = int(self.mapper.projector_width)
-            proj_h = int(self.mapper.projector_height)
+            proj_w = 3840
+            proj_h = 2160
 
-            current_image_background = self._build_projector_background(proj_w, proj_h)
+            current_image_background = np.ones((proj_h, proj_w, 3), dtype=np.uint8) * 255
             
             # STOP AVANT toute lecture caméra
             if not self.running:
@@ -817,20 +843,29 @@ class Algorithm_Analysis(QObject):
                     camera_point = self._get_marker_anchor_raw_center(corner)
                     state = self._update_marker_state(marker_id_int, camera_point)
 
-                    geom = self._compute_marker_projector_geometry(corner)
+                    # centre du tag (pixel caméra)
+                    pts = corner[0]
+                    cx = float(np.mean(pts[:, 0]))
+                    cy = float(np.mean(pts[:, 1]))
 
-                    graph_center = geom["graph_center"]
-                    projector_center = geom["projector_center"]
-                    marker_size = geom["marker_size"]
+                    # pixel -> table mm
+                    mm = self.pixel_to_table(cx, cy)
+                    if mm is None:
+                        continue
 
-                    graph_coords_ArUco.append([marker_id_int, graph_center])
-                    detected_markers[marker_id_int] = graph_center
+                    x_mm, y_mm = mm
 
-                    projector_x = int(round(projector_center[0]))
-                    projector_y = int(round(projector_center[1]))
-                    marker_id = str(marker_id_int)
+                    # table -> projecteur
+                    proj = self.table_to_projector(x_mm, y_mm)
 
-                        
+                    projector_x = int(proj[0])
+                    projector_y = int(proj[1])
+
+                    marker_size = 40
+
+                    # stockage temporaire (on garde graph = mm pour compat)
+                    graph_coords_ArUco.append([marker_id_int, [x_mm, y_mm]])
+                    detected_markers[marker_id_int] = np.array([x_mm, y_mm], dtype=np.float32)
                     # point rouge au centre
                     cv2.circle(
                         current_image_background,
@@ -841,7 +876,7 @@ class Algorithm_Analysis(QObject):
                     )
 
                     # anneau autour de la tasse
-                    ring_radius = int(marker_size * 2.0)   # ajuste 1.2 / 1.5 / 2.0 si besoin
+                    ring_radius = int(marker_size * 2.5)   # ajuste 1.2 / 1.5 / 2.0 si besoin
                     ring_thickness = max(3, int(marker_size * 0.12))
 
                     cv2.circle(
@@ -863,10 +898,10 @@ class Algorithm_Analysis(QObject):
                     )
 
                     if state["is_static"] and overlay_on:
-                        if f"marker_{marker_id}" in ra_config:
+                        if f"marker_{marker_id_int}" in ra_config:
                             self.draw_from_config(
                                 current_image_background,
-                                ra_config[f"marker_{marker_id}"],
+                                ra_config[f"marker_{marker_id_int}"],
                                 projector_x,
                                 projector_y,
                                 marker_size,
@@ -898,10 +933,9 @@ class Algorithm_Analysis(QObject):
             self.associate_hands_to_cups(hands)
             for marker_id, cup in self.cups.items():
 
-                x = int(cup["last_pos"][0])
-                y = int(cup["last_pos"][1])
+                x_mm, y_mm = cup["last_pos"]
 
-                proj = self.mapper.graph_to_projector(np.array([x, y], dtype=np.float32))
+                proj = self.table_to_projector(x_mm, y_mm)
 
                 px = int(proj[0])
                 py = int(proj[1])

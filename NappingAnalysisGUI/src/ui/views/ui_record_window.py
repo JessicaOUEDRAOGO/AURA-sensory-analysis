@@ -5,10 +5,11 @@ import json
 from src.core.session.session_service import SessionService
 from src.core.session.event_store import EventStore
 from src.core.session.export_service import ExportService
-
+import numpy as np
 from src.core.protocol.asset_repository import InstructionAssetRepository
 from src.core.protocol.timeline_repository import TimelineRepository
-
+from pathlib import Path
+from src.core.utils.paths import config_path
 
 from PyQt6 import QtWidgets, uic
 from PyQt6.QtCore import Qt, QTimer, QThread
@@ -24,6 +25,7 @@ from src.ui.widgets.graphics_scene import GraphicsScene
 from src.core.vision.camera_manager import CameraManager
 from src.core.calibration.calibration_service import Calibration
 from src.app.runtime_v1 import Algorithm_Analysis
+
 
 
 class RecordWindow(QtWidgets.QWidget):
@@ -375,8 +377,23 @@ class RecordWindow(QtWidgets.QWidget):
         self.connect_checkbox_to_algorithm()
 
         # Open cam
+        # Open cam
         self.camera_manager.open_camera()
 
+        try:
+            with open(config_path("camera_calibration_bottom.json"), "r") as f:
+                calib = json.load(f)
+
+            K = np.array(calib["camera_matrix"], dtype=np.float64)
+            dist = np.array(calib["dist_coeffs"], dtype=np.float64)
+
+            self.camera_manager.set_undistort(K, dist)
+            self.runtime_K = self.camera_manager.K
+
+            print("✅ Undistortion activé")
+
+        except Exception as e:
+            print("❌ Erreur calibration:", e)
         # Thread
         self.algorithm_thread = QThread()
         self.algorithm_analysis.moveToThread(self.algorithm_thread)

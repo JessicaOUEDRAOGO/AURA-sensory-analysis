@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import cv2
+import numpy as np
 
 
 class CameraManager:
@@ -9,6 +10,7 @@ class CameraManager:
         CAMERA_HEIGHT,
         CAMERA_FPS,
     )
+
     def __init__(self, camera_index=CAMERA_ID, width=CAMERA_WIDTH, height=CAMERA_HEIGHT, fps=CAMERA_FPS):
         self.camera_index = camera_index
         self.width = width
@@ -16,22 +18,22 @@ class CameraManager:
         self.fps = fps
         self.cap = None
 
+        # UNDISTORT
+        self.map1 = None
+        self.map2 = None
+        self.K = None
+        self.dist = None
+
     # --------------------------------------------------
     # OUVERTURE CAMERA
     # --------------------------------------------------
     def open_camera(self):
-        """
-        Ouvre la caméra en forçant une résolution unique.
-        Vérifie la résolution réelle obtenue.
-        """
         if self.cap is not None and self.cap.isOpened():
             print("Caméra déjà ouverte.")
             return True
 
-        # Tentative Windows
         cap = cv2.VideoCapture(self.camera_index, cv2.CAP_DSHOW)
 
-        # Fallback si échec
         if not cap.isOpened():
             print("CAP_DSHOW échoué, tentative fallback...")
             cap = cv2.VideoCapture(self.camera_index)
@@ -39,7 +41,6 @@ class CameraManager:
         if not cap.isOpened():
             raise RuntimeError(f"Impossible d'ouvrir la caméra (index={self.camera_index})")
 
-        # Forcer la résolution AVANT lecture
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
         cap.set(cv2.CAP_PROP_FPS, self.fps)
@@ -48,7 +49,7 @@ class CameraManager:
 
         for _ in range(8):
             cap.read()
-        # Première lecture de validation
+
         ret, frame = cap.read()
         if not ret or frame is None:
             cap.release()
@@ -57,7 +58,6 @@ class CameraManager:
         real_h, real_w = frame.shape[:2]
         print(f"Caméra {self.camera_index} ouverte ({real_w}x{real_h})")
 
-        # Vérification stricte
         if (real_w, real_h) != (self.width, self.height):
             cap.release()
             raise RuntimeError(
@@ -69,31 +69,49 @@ class CameraManager:
         return True
 
     # --------------------------------------------------
+    # UNDISTORT CONFIG
+    # --------------------------------------------------
+    def set_undistort(self, K, dist):
+        """
+        Initialise la correction de distorsion fisheye.
+        DOIT être appelée après calibration.
+        """
+
+        h = self.height
+        w = self.width
+
+        new_K = cv2.fisheye.estimateNewCameraMatrixForUndistortRectify(
+            K, dist, (w, h), np.eye(3), balance=0.3
+        )
+
+        self.map1, self.map2 = cv2.fisheye.initUndistortRectifyMap(
+            K, dist, np.eye(3), new_K, (w, h), cv2.CV_16SC2
+        )
+
+        self.K = new_K
+        self.dist = dist
+
+        print("[CameraManager] Undistortion activé")
+
+    # --------------------------------------------------
     # CAPTURE FRAME
     # --------------------------------------------------
     def get_frame(self):
-        """
-        Retourne une frame BGR (robuste, non bloquante, safe stop).
-        """
 
-        # 1. caméra non dispo
         if self.cap is None:
             return None
 
         if not self.cap.isOpened():
             return None
 
-        # 2. lecture sécurisée (évite crash si cap release en parallèle)
         try:
             ret, frame = self.cap.read()
         except Exception:
             return None
 
-        # 3. lecture invalide
         if not ret or frame is None:
             return None
 
-        # 4. sécurité dimension (évite corruption pipeline)
         try:
             h, w = frame.shape[:2]
         except Exception:
@@ -102,14 +120,15 @@ class CameraManager:
         if (w, h) != (self.width, self.height):
             return None
 
+        if self.map1 is not None and self.map2 is not None:
+            frame = cv2.remap(frame, self.map1, self.map2, interpolation=cv2.INTER_LINEAR)
+
         return frame
+
     # --------------------------------------------------
     # FERMETURE CAMERA
     # --------------------------------------------------
     def close_camera(self):
-        """
-        Ferme proprement la caméra.
-        """
         if self.cap is not None:
             self.cap.release()
             self.cap = None
