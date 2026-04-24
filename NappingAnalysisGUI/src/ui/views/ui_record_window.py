@@ -23,16 +23,20 @@ from src.core.utils.paths import gui_path, asset_path
 from src.ui.controllers.key_handler import KeyHandler
 from src.ui.widgets.graphics_scene import GraphicsScene
 from src.core.vision.camera_manager import CameraManager
-from src.core.calibration.calibration_service import Calibration
 from src.app.runtime_v1 import Algorithm_Analysis
-
 
 
 class RecordWindow(QtWidgets.QWidget):
     """
-    IMPORTANT:
-    - Doit hériter de QWidget si Record_Menu.ui a un top-level QWidget (Form).
-    - Sinon tu auras: TypeError Wrong base class of toplevel widget.
+    Fenêtre d'enregistrement.
+
+    Nouveau pipeline de calibration :
+      Les matrices de projection sont chargées automatiquement par
+      Algorithm_Analysis depuis les fichiers JSON :
+        - cambottom_table_pose.json
+        - H_table_to_proj.json
+        - camera_calibration_bottom.json
+      Il n'y a plus de bouton "Load Calibration" ni de calib_data dict.
     """
     def __init__(
         self,
@@ -49,32 +53,18 @@ class RecordWindow(QtWidgets.QWidget):
 
         self.parent = parent
         self.nbr_Tag = nbr_Tag
-        self.cam_width = cam_width
+        self.cam_width  = cam_width
         self.cam_height = cam_height
-        self.grid_size = grid_size
+        self.grid_size  = grid_size
 
-        self.display_manager = display_manager
-        self.image_background = image_background
-        self.image_background_clean = image_background.copy()
+        self.display_manager         = display_manager
+        self.image_background        = image_background
+        self.image_background_clean  = image_background.copy()
         self.image_background_with_grid = image_background.copy()
 
-        # #Les ID des particpants 
-        # self.active_participant_id = "P001"
-        # self.active_protocol_id = None
-        # # petit champ en haut (ou où tu veux)
-        # self._participant_label = QLabel("Participant ID:", self)
-        # self._participant_input = QLineEdit(self)
-        # self._participant_input.setText(self.active_participant_id)
-        # self._participant_input.editingFinished.connect(self._sync_participant_id)
-
-        # # si tu as un layout existant dans ton UI (ex: verticalLayout)
-        # # adapte le nom du layout à celui dans Record_Menu.ui
-        # if hasattr(self, "verticalLayout"):
-        #     self.verticalLayout.insertWidget(0, self._participant_label)
-        #     self.verticalLayout.insertWidget(1, self._participant_input)
         # Participant (combo)
         self.active_participant_id = None
-        self.active_protocol_id = None
+        self.active_protocol_id    = None
 
         self._participant_label = QLabel("Participant ID:", self)
         self._participant_combo = QComboBox(self)
@@ -84,12 +74,12 @@ class RecordWindow(QtWidgets.QWidget):
             self.verticalLayout.insertWidget(0, self._participant_label)
             self.verticalLayout.insertWidget(1, self._participant_combo)
 
-        # Session V2 (hybride)
-        self.session_id = None
+        # Session
+        self.session_id         = None
         self.session_output_dir = None
-        self.session_service = SessionService()
-        self.event_store = EventStore()
-        self.export_service = ExportService()
+        self.session_service    = SessionService()
+        self.event_store        = EventStore()
+        self.export_service     = ExportService()
 
         # Camera
         self.camera_manager = CameraManager(
@@ -99,17 +89,8 @@ class RecordWindow(QtWidgets.QWidget):
         )
 
         # Algo thread
-        self.algorithm_thread: QThread | None = None
+        self.algorithm_thread:   QThread | None = None
         self.algorithm_analysis: Algorithm_Analysis | None = None
-
-        # Calibration matrices
-        self.calib_data = {
-            "H": None,
-            "H_inv": None,
-            "H_graph": None,
-            "H_inv_graph": None,
-            "grid_size": grid_size
-        }
 
         # Key handler
         self.key_handler = KeyHandler(self)
@@ -117,23 +98,23 @@ class RecordWindow(QtWidgets.QWidget):
         # UI state
         self.checkboxes = []
         self.pushButton_Stop.setEnabled(False)
-        self.pushButton_Start.setEnabled(False)
+        self.pushButton_Start.setEnabled(True)   # plus besoin d'attendre un "load"
 
         # Timer
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_timer_label)
-        self.elapsed_time = 0
+        self.elapsed_time  = 0
         self.timer_started = False
 
         # Frame counter
         self.frame_count = 0
 
         # Graphics scene
-        self.scene = None
+        self.scene       = None
         self.default_xmin = -10
-        self.default_xmax = 10
+        self.default_xmax =  10
         self.default_ymin = -10
-        self.default_ymax = 10
+        self.default_ymax =  10
         self.default_xleg = "x"
         self.default_yleg = "y"
 
@@ -155,43 +136,45 @@ class RecordWindow(QtWidgets.QWidget):
         self.pushButton_Start.clicked.connect(self.start_recording)
         self.pushButton_Stop.clicked.connect(self.stop_recording)
 
-        self.pushButton_loadCalibration.clicked.connect(self.loadCalib)
-
         self.checkBox_DisplayGrid.stateChanged.connect(self.on_display_grid_checkbox_changed)
 
         # Build tags UI
         self._init_scrollarea_container()
         self.create_tags()
-        
 
-    def _sync_participant_id(self):
-        pid = (self._participant_input.text() or "").strip()
-        if pid:
-            self.active_participant_id = pid
-
+    # ------------------------------------------------------------------
+    # Qt events
+    # ------------------------------------------------------------------
     def showEvent(self, event):
-            p = getattr(self.parent, "current_protocol", None)
-            if p and hasattr(self, "label_protocol"):
-                self.label_protocol.setText(f"Protocole : {p.name} (v{p.version})")
+        p = getattr(self.parent, "current_protocol", None)
+        if p and hasattr(self, "label_protocol"):
+            self.label_protocol.setText(f"Protocole : {p.name} (v{p.version})")
+        if p and hasattr(self, "_participant_combo"):
+            self._load_participants_for_protocol(p.id)
+        super().showEvent(event)
 
-            #  remplir la combo avec les participants du protocole courant
-            if p and hasattr(self, "_participant_combo"):
-                self._load_participants_for_protocol(p.id)
+    def keyPressEvent(self, event):
+        if not self.timer_started:
+            self.key_handler.handle_key(event)
+        else:
+            self.key_handler.handle_key_for_program_started(event)
+        super().keyPressEvent(event)
 
-            super().showEvent(event)
-
+    # ------------------------------------------------------------------
+    # Participants
+    # ------------------------------------------------------------------
     def _on_participant_changed(self, text: str):
         pid = (text or "").strip()
         if pid:
             self.active_participant_id = pid
 
     def _load_participants_for_protocol(self, protocol_id: str):
-        # récupère tous les participants du protocole
         from src.core.storage.db import connect
         conn = connect()
         try:
             rows = conn.execute(
-                "SELECT participant_id FROM protocol_participants WHERE protocol_id=? ORDER BY participant_id ASC",
+                "SELECT participant_id FROM protocol_participants "
+                "WHERE protocol_id=? ORDER BY participant_id ASC",
                 (protocol_id,)
             ).fetchall()
             ids = [r["participant_id"] for r in rows]
@@ -203,11 +186,9 @@ class RecordWindow(QtWidgets.QWidget):
 
         if ids:
             self._participant_combo.addItems(ids)
-            # par défaut: premier participant de la liste
             self.active_participant_id = ids[0]
             self._participant_combo.setCurrentText(ids[0])
         else:
-            # fallback si aucun participant n'a été défini
             self._participant_combo.addItem("P001")
             self.active_participant_id = "P001"
             self._participant_combo.setCurrentText("P001")
@@ -215,22 +196,11 @@ class RecordWindow(QtWidgets.QWidget):
         self._participant_combo.blockSignals(False)
 
     # ------------------------------------------------------------------
-    # Qt events
-    # ------------------------------------------------------------------
-    def keyPressEvent(self, event):
-        if not self.timer_started:
-            self.key_handler.handle_key(event)
-        else:
-            self.key_handler.handle_key_for_program_started(event)
-        super().keyPressEvent(event)
-
-    # ------------------------------------------------------------------
     # Background / grid projection
     # ------------------------------------------------------------------
     def refresh_projector_background(self):
         if self.display_manager is None:
             return
-
         bounds = self.get_bounds_from_inputs()
         if bounds is None:
             return
@@ -258,7 +228,6 @@ class RecordWindow(QtWidgets.QWidget):
         return max(files, key=os.path.getctime)
 
     def _sanitize_filename(self, s: str) -> str:
-        # évite caractères interdits Windows: \ / : * ? " < > |
         bad = '\\/:*?"<>|'
         for c in bad:
             s = s.replace(c, "_")
@@ -266,41 +235,28 @@ class RecordWindow(QtWidgets.QWidget):
 
     def get_export_basename(self) -> str:
         p = getattr(self.parent, "current_protocol", None)
-        proto_name = p.name if p else "UNKNOWN_PROTOCOL"
+        proto_name     = p.name if p else "UNKNOWN_PROTOCOL"
         participant_id = getattr(self, "active_participant_id", "P001")
-
-        proto_name = self._sanitize_filename(proto_name)
-        participant_id = self._sanitize_filename(participant_id)
-
-        return f"{proto_name}_{participant_id}"
+        return f"{self._sanitize_filename(proto_name)}_{self._sanitize_filename(participant_id)}"
 
     # ------------------------------------------------------------------
     # Recording
     # ------------------------------------------------------------------
     def start_recording(self):
-       
-        
-        repo = ProtocolRepository()
-
+        repo     = ProtocolRepository()
         proto_id = None
-        p_mem = getattr(self.parent, "current_protocol", None)
+        p_mem    = getattr(self.parent, "current_protocol", None)
         if p_mem:
             proto_id = p_mem.id
-
-        # si tu veux être encore plus sûr : proto_id = self.active_protocol_id or proto_id
 
         p_db = repo.get_by_id(proto_id) if proto_id else None
         if not p_db:
             QtWidgets.QMessageBox.warning(self, "Protocole", "Protocole introuvable en base.")
             return
-        
-        # Sécurité: calibration pas chargée
-        if self.calib_data["H"] is None or self.calib_data["H_graph"] is None:
-            QtWidgets.QMessageBox.warning(self, "Calibration", "Charge la calibration (Load) ou fais une calibration avant Start.")
-            return
 
         if self.display_manager is None:
-            QtWidgets.QMessageBox.warning(self, "DisplayManager", "display_manager est None (non injecté depuis MainApp).")
+            QtWidgets.QMessageBox.warning(self, "DisplayManager",
+                                          "display_manager est None (non injecté depuis MainApp).")
             return
 
         participant_id = None
@@ -308,19 +264,17 @@ class RecordWindow(QtWidgets.QWidget):
             participant_id = (self._participant_combo.currentText() or "").strip()
         participant_id = participant_id or getattr(self, "active_participant_id", None) or "P001"
 
-        self.active_protocol_id = p_db.id
+        self.active_protocol_id    = p_db.id
         self.active_participant_id = participant_id
 
-        # maintenant seulement on crée la session
         try:
             self.session_id, self.session_output_dir = self.session_service.start_session(
-            protocol_id=self.active_protocol_id,
-            participant_id=self.active_participant_id,
-            protocol_name=p_db.name
+                protocol_id=self.active_protocol_id,
+                participant_id=self.active_participant_id,
+                protocol_name=p_db.name
             )
-
             self.event_store.log(self.session_id, "session_started", {
-                "protocol_id": self.active_protocol_id,
+                "protocol_id":    self.active_protocol_id,
                 "participant_id": self.active_participant_id
             })
         except Exception as e:
@@ -331,36 +285,23 @@ class RecordWindow(QtWidgets.QWidget):
         if not p:
             QtWidgets.QMessageBox.warning(self, "Protocole", "Sélectionne d'abord un protocole.")
             return
-        
-        
-        asset_repo = InstructionAssetRepository()
-        timeline_repo = TimelineRepository()
 
-        assets = asset_repo.list_by_protocol(p_db.id)
-        steps = timeline_repo.list(p_db.id)
+        asset_repo    = InstructionAssetRepository()
+        timeline_repo = TimelineRepository()
+        assets  = asset_repo.list_by_protocol(p_db.id)
+        steps   = timeline_repo.list(p_db.id)
+
         print("=== START_RECORDING DEBUG ===")
         print("Protocol:", p_db.name, p_db.id)
         print("modules_enabled:", p_db.modules_enabled)
-        print("assets:", len(assets))
-        print("steps:", len(steps))
-        if steps:
-            s0 = steps[0]
-            print("step0:", s0.order_index, s0.label, "asset_ref=", s0.asset_ref, "pause=", s0.pause, "duration=", s0.duration_s)
-        if assets:
-            a0 = assets[0]
-            print("asset0:", a0.id, a0.asset_type, a0.path, "exists=", os.path.exists(a0.path))
+        print("assets:", len(assets), "steps:", len(steps))
         print("=============================")
 
-
-        # Init algo
+        # Init algo — les JSON de calibration sont chargés dans __init__
         self.algorithm_analysis = Algorithm_Analysis(
             parent=self,
             display_manager=self.display_manager,
             image_background=self.image_background,
-            H_projector=self.calib_data["H"],
-            H_inv_projector=self.calib_data["H_inv"],
-            H_graph=self.calib_data["H_graph"],
-            H_inv_graph=self.calib_data["H_inv_graph"],
             record_window=self,
             output_dir=self.session_output_dir,
             output_name=self.get_export_basename(),
@@ -372,28 +313,24 @@ class RecordWindow(QtWidgets.QWidget):
         self.algorithm_analysis.set_hands_provider(lambda: self.parent.current_hands)
         self.algorithm_analysis.set_show_grid(self.checkBox_DisplayGrid.isChecked())
 
-        # Key handler -> algo
         self.key_handler.algorithm_analysis = self.algorithm_analysis
         self.connect_checkbox_to_algorithm()
 
-        # Open cam
-        # Open cam
+        # Open cam + undistort
         self.camera_manager.open_camera()
-
         try:
-            with open(config_path("camera_calibration_bottom.json"), "r") as f:
+            with open(config_path("camera_calibration_fisheye.json"), "r") as f:
                 calib = json.load(f)
-
-            K = np.array(calib["camera_matrix"], dtype=np.float64)
-            dist = np.array(calib["dist_coeffs"], dtype=np.float64)
-
+            K    = np.array(calib["camera_matrix"], dtype=np.float64)
+            # dist fisheye : shape (4,1) attendue par cv2.fisheye
+            dist = np.array(calib["dist_coeffs"], dtype=np.float64).reshape(4, 1)
             self.camera_manager.set_undistort(K, dist)
             self.runtime_K = self.camera_manager.K
-
-            print("✅ Undistortion activé")
-
+            print("✅ Undistortion fisheye activé")
         except Exception as e:
-            print("❌ Erreur calibration:", e)
+            print("❌ Erreur calibration undistort:", e)
+            self.runtime_K = None
+
         # Thread
         self.algorithm_thread = QThread()
         self.algorithm_analysis.moveToThread(self.algorithm_thread)
@@ -402,23 +339,19 @@ class RecordWindow(QtWidgets.QWidget):
         self.algorithm_thread.started.connect(self.algorithm_analysis.detect_and_process)
         self.algorithm_analysis.data_signal.connect(self.update_ui)
         self.algorithm_analysis.data_signal.connect(self.start_timer_on_first_frame)
-       
 
         self.algorithm_analysis.finished_signal.connect(self.algorithm_thread.quit)
         self.algorithm_analysis.finished_signal.connect(self.algorithm_analysis.deleteLater)
         self.algorithm_thread.finished.connect(self.algorithm_thread.deleteLater)
         self.algorithm_thread.finished.connect(self.on_thread_finished)
-        # Reset UI counters
-        self.frame_count = 0
-        self.update_frame_label()
 
-        self.elapsed_time = 0
+        self.frame_count   = 0
+        self.elapsed_time  = 0
         self.timer_started = False
         self.label_timer.setText("Timer : 0 sec")
+        self.update_frame_label()
 
-        # Start
         self.algorithm_thread.start()
-
         self.pushButton_Start.setEnabled(False)
         self.pushButton_Stop.setEnabled(True)
 
@@ -426,26 +359,21 @@ class RecordWindow(QtWidgets.QWidget):
         if not self.timer_started:
             self.timer_started = True
             self.timer.start(1000)
-            
+
     def on_thread_finished(self):
         print("[UI] thread réellement terminé")
-        self.algorithm_thread = None
+        self.algorithm_thread   = None
         self.algorithm_analysis = None
 
     def stop_recording(self):
-
         print("[UI] STOP demandé")
 
-        # 1. stop logique
         if self.algorithm_analysis:
             self.algorithm_analysis.stop()
 
-        # 2. fermer caméra (important)
         if self.camera_manager:
             self.camera_manager.close_camera()
 
-        # 3. NE PAS WAIT → laisser Qt gérer
-        # optionnel: juste debug
         if self.algorithm_thread is not None:
             try:
                 if self.algorithm_thread.isRunning():
@@ -454,11 +382,9 @@ class RecordWindow(QtWidgets.QWidget):
                 print("[UI] thread déjà supprimé")
                 self.algorithm_thread = None
 
-        # 4. timer
         self.timer.stop()
         self.timer_started = False
 
-        # 5. session cleanup
         if self.session_id:
             try:
                 self.event_store.log(self.session_id, "session_ended", {})
@@ -467,39 +393,32 @@ class RecordWindow(QtWidgets.QWidget):
             except Exception as e:
                 print(f"[WARNING] Fin session V2 échouée: {e}")
 
-        self.session_id = None
+        self.session_id         = None
         self.session_output_dir = None
 
         self.pushButton_Start.setEnabled(True)
         self.pushButton_Stop.setEnabled(False)
 
-        # ⚠️ NE PAS delete ici → Qt le fera via finished_signal
     # ------------------------------------------------------------------
     # UI update from algo
     # ------------------------------------------------------------------
     def update_ui(self, data):
         graph_coords = data["data"]
-
         self.frame_count += 1
         self.update_frame_label()
-
         self.scene.clear_markers()
         detected_ids = set()
 
         for marker_id, (x, y) in graph_coords:
             detected_ids.add(marker_id)
-
-            # Checkbox filter
             if 0 <= marker_id < len(self.checkboxes) and self.checkboxes[marker_id].isChecked():
                 self.scene.add_marker(x, y, marker_id)
-
             label_posx_nbr = self.findChild(QLabel, f"label_posx_nbr_{marker_id}")
             label_posy_nbr = self.findChild(QLabel, f"label_posy_nbr_{marker_id}")
             if label_posx_nbr and label_posy_nbr:
                 label_posx_nbr.setText(f"{self.scene.pixel_to_index_x(x):.2f}")
                 label_posy_nbr.setText(f"{self.scene.pixel_to_index_y(y):.2f}")
 
-        # reset non-detected
         for marker_id in range(len(self.checkboxes)):
             if marker_id not in detected_ids:
                 label_posx_nbr = self.findChild(QLabel, f"label_posx_nbr_{marker_id}")
@@ -523,22 +442,6 @@ class RecordWindow(QtWidgets.QWidget):
     def start_calibration(self):
         self.parent.stacked_widget.setCurrentWidget(self.parent.calibration_window)
 
-    def loadCalib(self):
-        calib = Calibration(self, self.cam_width, self.cam_height, self.grid_size, self.image_background)
-        res = calib.load_calib()
-        if not res:
-            QtWidgets.QMessageBox.warning(self, "Calibration", "Impossible de charger calibration_data.json")
-            return
-
-        H_proj, H_inv_proj, H_graph, H_inv_graph = res
-
-        self.calib_data["H"] = H_proj
-        self.calib_data["H_inv"] = H_inv_proj
-        self.calib_data["H_graph"] = H_graph
-        self.calib_data["H_inv_graph"] = H_inv_graph
-
-        self.pushButton_Start.setEnabled(True)
-
     def go_to_main(self):
         self.stop_recording()
         self.parent.stacked_widget.setCurrentWidget(self.parent.main_menu)
@@ -548,15 +451,16 @@ class RecordWindow(QtWidgets.QWidget):
     # ------------------------------------------------------------------
     def get_bounds_from_inputs(self):
         try:
-            x_min = float(self.lineEdit_xmin.text())
-            x_max = float(self.lineEdit_xmax.text())
-            y_min = float(self.lineEdit_ymin.text())
-            y_max = float(self.lineEdit_ymax.text())
+            x_min    = float(self.lineEdit_xmin.text())
+            x_max    = float(self.lineEdit_xmax.text())
+            y_min    = float(self.lineEdit_ymin.text())
+            y_max    = float(self.lineEdit_ymax.text())
             x_legend = self.lineEdit_legx.text()
             y_legend = self.lineEdit_legy.text()
             return x_min, x_max, y_min, y_max, x_legend, y_legend
         except ValueError:
-            QtWidgets.QMessageBox.warning(self, "Erreur", "Veuillez entrer des valeurs numériques valides.")
+            QtWidgets.QMessageBox.warning(self, "Erreur",
+                                          "Veuillez entrer des valeurs numériques valides.")
             return None
 
     def set_bounds_to_inputs(self):
@@ -586,36 +490,32 @@ class RecordWindow(QtWidgets.QWidget):
         self.scene.setSceneRect(0, 0, size.width(), size.height())
         self.graphicsView.setScene(self.scene)
         self.graphicsView.setRenderHint(QPainter.RenderHint.Antialiasing)
-        self.graphicsView.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.BoundingRectViewportUpdate)
+        self.graphicsView.setViewportUpdateMode(
+            QGraphicsView.ViewportUpdateMode.BoundingRectViewportUpdate
+        )
 
     # ------------------------------------------------------------------
-    # Tags in scrollArea (fix layout warning)
+    # Tags in scrollArea
     # ------------------------------------------------------------------
     def _init_scrollarea_container(self):
-        """
-        Prépare un unique container + layout pour scrollArea.
-        Évite: 'Attempting to add QLayout ... already has a layout'
-        """
         if getattr(self, "_tags_container", None) is None:
             self._tags_container = QWidget()
-            self._tags_layout = QVBoxLayout(self._tags_container)
+            self._tags_layout    = QVBoxLayout(self._tags_container)
             self._tags_layout.setContentsMargins(6, 6, 6, 6)
             self._tags_layout.setSpacing(4)
             self.scrollArea.setWidget(self._tags_container)
             self.scrollArea.setWidgetResizable(True)
 
     def create_tags(self):
-        # Clear layout if already filled
         while self._tags_layout.count():
             item = self._tags_layout.takeAt(0)
             w = item.widget()
             if w:
                 w.deleteLater()
-
         self.checkboxes.clear()
 
         for i in range(50):
-            row = QWidget(self._tags_container)
+            row        = QWidget(self._tags_container)
             row_layout = QHBoxLayout(row)
             row_layout.setContentsMargins(0, 0, 0, 0)
 
@@ -625,31 +525,19 @@ class RecordWindow(QtWidgets.QWidget):
             row_layout.addWidget(checkBox)
             self.checkboxes.append(checkBox)
 
-            label_posx = QLabel("pos x :", row)
-            label_posx.setObjectName(f"label_posx_{i}")
-            label_posx.setMinimumSize(50, 30)
-            label_posx.setMaximumSize(70, 30)
-            label_posx.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            row_layout.addWidget(label_posx)
+            for axis in ("x", "y"):
+                lbl = QLabel(f"pos {axis} :", row)
+                lbl.setObjectName(f"label_pos{axis}_{i}")
+                lbl.setMinimumSize(50, 30)
+                lbl.setMaximumSize(70, 30)
+                lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                row_layout.addWidget(lbl)
 
-            label_posx_nbr = QLabel("?", row)
-            label_posx_nbr.setObjectName(f"label_posx_nbr_{i}")
-            label_posx_nbr.setMinimumSize(50, 30)
-            label_posx_nbr.setMaximumSize(70, 30)
-            row_layout.addWidget(label_posx_nbr)
-
-            label_posy = QLabel("pos y :", row)
-            label_posy.setObjectName(f"label_posy_{i}")
-            label_posy.setMinimumSize(50, 30)
-            label_posy.setMaximumSize(70, 30)
-            label_posy.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            row_layout.addWidget(label_posy)
-
-            label_posy_nbr = QLabel("?", row)
-            label_posy_nbr.setObjectName(f"label_posy_nbr_{i}")
-            label_posy_nbr.setMinimumSize(50, 30)
-            label_posy_nbr.setMaximumSize(70, 30)
-            row_layout.addWidget(label_posy_nbr)
+                val = QLabel("?", row)
+                val.setObjectName(f"label_pos{axis}_nbr_{i}")
+                val.setMinimumSize(50, 30)
+                val.setMaximumSize(70, 30)
+                row_layout.addWidget(val)
 
             self._tags_layout.addWidget(row)
 
@@ -671,51 +559,50 @@ class RecordWindow(QtWidgets.QWidget):
 
     def connect_checkbox_to_algorithm(self):
         if self.algorithm_analysis:
-            self.checkBox_Visu_Cam.stateChanged.connect(self.algorithm_analysis.state_popUpCamera_changed)
-    
-    def export_session_summary(self, session_id: str):
-        # 1) récupérer infos courantes
-        protocol_id = getattr(self, "active_protocol_id", None)
-        participant_id = getattr(self, "active_participant_id", "P001")
+            self.checkBox_Visu_Cam.stateChanged.connect(
+                self.algorithm_analysis.state_popUpCamera_changed
+            )
 
-        protocol_name = "UNKNOWN_PROTOCOL"
+    # ------------------------------------------------------------------
+    # Export session
+    # ------------------------------------------------------------------
+    def export_session_summary(self, session_id: str):
+        protocol_id    = getattr(self, "active_protocol_id", None)
+        participant_id = getattr(self, "active_participant_id", "P001")
+        protocol_name  = "UNKNOWN_PROTOCOL"
+
         if protocol_id:
-            repo = ProtocolRepository()
-            # tu n’as pas get_by_id -> soit tu ajoutes get_by_id, soit tu fais une requête rapide:
             from src.core.storage.db import connect
             conn = connect()
             try:
-                row = conn.execute("SELECT name FROM protocols WHERE id = ?", (protocol_id,)).fetchone()
+                row = conn.execute(
+                    "SELECT name FROM protocols WHERE id = ?", (protocol_id,)
+                ).fetchone()
                 if row:
                     protocol_name = row["name"]
             finally:
                 conn.close()
 
-        # 2) proposer un nom de fichier par défaut
         safe_proto = protocol_name.replace(" ", "_")
-        safe_pid = participant_id.replace(" ", "_")
+        safe_pid   = participant_id.replace(" ", "_")
         default_name = f"{safe_proto}_{safe_pid}.json"
 
-        # 3) ouvrir boîte de dialogue pour choisir le nom
         path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Exporter la session",
+            self, "Exporter la session",
             os.path.join(os.getcwd(), default_name),
             "JSON (*.json)"
         )
         if not path:
-            return  # user cancel
+            return
 
-        # 4) contenu export
         payload = {
-            "session_id": session_id,
-            "protocol_id": protocol_id,
-            "protocol_name": protocol_name,
+            "session_id":     session_id,
+            "protocol_id":    protocol_id,
+            "protocol_name":  protocol_name,
             "participant_id": participant_id,
-            "exported_at": __import__("datetime").datetime.now().isoformat(timespec="seconds")
+            "exported_at":    __import__("datetime").datetime.now().isoformat(timespec="seconds")
         }
 
-        # 5) écrire le fichier
         with open(path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, ensure_ascii=False)
 

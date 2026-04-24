@@ -22,10 +22,10 @@ class Algorithm_Analysis(QObject):
         parent,
         display_manager: DisplayManager,
         image_background,
-        H_projector=None,       # compat legacy
-        H_inv_projector=None,   # compat legacy
-        H_graph=None,           # compat legacy
-        H_inv_graph=None,       # compat legacy
+        H_projector=None,       # conservé pour compatibilité signature appelant
+        H_inv_projector=None,   # conservé pour compatibilité signature appelant
+        H_graph=None,           # conservé pour compatibilité signature appelant
+        H_inv_graph=None,       # conservé pour compatibilité signature appelant
         grid_size=700,
         output_name="data",
         record_window=None,
@@ -47,23 +47,27 @@ class Algorithm_Analysis(QObject):
         self.protocol = protocol
         self.record_window = record_window
 
-        # -----------------------------
-        # NOUVEAU PIPELINE PROPRE
-        # -----------------------------
+        # ------------------------------------------------------------------
+        # Pose caméra → table (pixel_to_table)
+        # ------------------------------------------------------------------
         pose = json.load(open(config_path("cambottom_table_pose.json")))
-
         self.rvec = np.array(pose["rvec"], dtype=np.float64)
         self.tvec = np.array(pose["tvec"], dtype=np.float64)
-        # priorité à la caméra corrigée
+
+        # Priorité à la caméra corrigée (undistort) injectée depuis RecordWindow
         if hasattr(parent, "runtime_K") and parent.runtime_K is not None:
             self.K = parent.runtime_K
         else:
             self.K = np.array(pose["camera_matrix"], dtype=np.float64)
 
+        # ------------------------------------------------------------------
+        # Homographie table → projecteur
+        # ------------------------------------------------------------------
         H_data = json.load(open(config_path("H_table_to_proj.json")))
         self.H_table_to_proj = np.array(H_data["H_table_to_proj"], dtype=np.float32)
+
         # ------------------------------------------------------------------
-        # Image de fond / média
+        # Image de fond
         # ------------------------------------------------------------------
         self.image_background = self._validate_background_image(image_background)
         self.image_height, self.image_width = self.image_background.shape[:2]
@@ -80,10 +84,6 @@ class Algorithm_Analysis(QObject):
 
         self.output_csv = os.path.join(output_dir, f"{output_name}_{timestamp}.csv")
 
-        # ------------------------------------------------------------------
-        # Mapper géométrique
-        # ------------------------------------------------------------------
-        self.mapper = None
         # ------------------------------------------------------------------
         # ArUco
         # ------------------------------------------------------------------
@@ -111,41 +111,30 @@ class Algorithm_Analysis(QObject):
         self.mode_multidim = True
         self.colormap = cv2.COLORMAP_COOL
 
-        # ------------------------------------------------------------------
-        # Compatibilité legacy
-        # ------------------------------------------------------------------
-        self.H_projector = H_projector
-        self.H_inv_projector = H_inv_projector
-        self.H_graph = H_graph
-        self.H_inv_graph = H_inv_graph
-        
-
-        self.data_buffer = []
-        self.running = False
-
-        # =========================
-        # Multi-cam tracking V2
-        # =========================
+        # Multi-cam tracking
         self.cups = {}
-    # ======================================================================
-        self.N_LIFT                = 5     # frames avant de passer SOULEVEE
-        self.N_LIFT_CONFIRM        = 3     # frames PEUT_ETRE_SOULEVEE avant SOULEVEE
-        self.DIST_HAND_THRESHOLD   = 120   # seuil association main↔tasse (agrandi)
-        self.DIST_HAND_CONFIRM     = 180   # seuil lors de la phase PEUT_ETRE (plus large)
-        self.DIST_RECOVERY         = 60    # seuil retour au sol
+        self.N_LIFT                = 5
+        self.N_LIFT_CONFIRM        = 3
+        self.DIST_HAND_THRESHOLD   = 120
+        self.DIST_HAND_CONFIRM     = 180
+        self.DIST_RECOVERY         = 60
         self.get_hands = None
-    
+
+    # ======================================================================
+    # Providers externes
+    # ======================================================================
     def set_hands_provider(self, func):
         self.get_hands = func
 
+    # ======================================================================
+    # Géométrie : caméra → table → projecteur
+    # ======================================================================
     def table_to_projector(self, x_mm, y_mm):
         pt = np.array([[[x_mm, y_mm]]], dtype=np.float32)
         proj = cv2.perspectiveTransform(pt, self.H_table_to_proj)
         return proj[0, 0]
-    
-    def pixel_to_table(self, u, v):
-        
 
+    def pixel_to_table(self, u, v):
         K_inv = np.linalg.inv(self.K)
         ray = K_inv @ np.array([u, v, 1.0])
         ray = ray / np.linalg.norm(ray)
@@ -164,38 +153,52 @@ class Algorithm_Analysis(QObject):
 
         pt_cam = ray * t
         pt_table = R.T @ (pt_cam - self.tvec.reshape(3))
-
         return float(pt_table[0]), float(pt_table[1])
+
+    # ======================================================================
+    # Grille 700×700 → projecteur (remplace l'ancienne voie mapper)
+    # ======================================================================
+    def _build_warped_grid(self, proj_w, proj_h):
+        """
+        Construit la grille mathématique dans l'espace graph (700×700),
+        puis la warp directement dans l'espace projecteur via H_table_to_proj.
+        """
+        x_min, x_max, y_min, y_max, x_legend, y_legend = \
+            self.record_window.get_bounds_from_inputs()
+
+        graph_grid = np.full((self.grid_size, self.grid_size, 3), 255, dtype=np.uint8)
+        graph_grid = DrawUtils.draw_math_grid_on_image(
+            graph_grid,
+            x_min, x_max,
+            y_min, y_max,
+            x_legend, y_legend,
+            self.grid_size
+        )
+
+        warped = cv2.warpPerspective(
+            graph_grid,
+            self.H_table_to_proj,
+            (proj_w, proj_h)
+        )
+        return warped
+
     # ======================================================================
     # Validation / helpers
     # ======================================================================
-    def _apply_projector_offset(self, pt):
-        """
-        Applique un décalage global manuel dans le repère projecteur.
-        """
-        pt = np.array(pt, dtype=np.float32).copy()
-        pt[0] += float(self.projector_offset_x)
-        pt[1] += float(self.projector_offset_y)
-        return pt
-
     def _validate_background_image(self, image):
         if not isinstance(image, np.ndarray):
             raise TypeError(f"image_background invalide : type={type(image)}")
-
         if image.ndim != 3 or image.shape[2] != 3:
             raise ValueError(
                 f"image_background invalide : shape={image.shape}. "
                 "Attendu une image couleur (H, W, 3)."
             )
-
         if image.dtype != np.uint8:
             image = np.clip(image, 0, 255).astype(np.uint8)
-
         return image
 
     def is_enabled(self, key: str, default: bool = False) -> bool:
         v = self.modules_enabled.get(key, default)
-
         if v is None:
             return False
         if isinstance(v, bool):
@@ -223,7 +226,7 @@ class Algorithm_Analysis(QObject):
     def stop(self):
         print("[ALGO] STOP demandé")
         self.running = False
-        pytime.sleep(0.01)  
+        pytime.sleep(0.01)
         self.waiting_for_consigne_key = False
 
     # ======================================================================
@@ -241,37 +244,22 @@ class Algorithm_Analysis(QObject):
             return {}
 
     def prepare_instruction_image(self, img, margin_ratio=0.04):
-        """
-        Place l'image dans un canvas noir avec marge de sécurité,
-        sans déformation et sans tronquage.
-        """
         target_h = self.image_height
         target_w = self.image_width
-
         canvas = np.zeros((target_h, target_w, 3), dtype=np.uint8)
-
         src_h, src_w = img.shape[:2]
-
         usable_w = int(target_w * (1.0 - 2 * margin_ratio))
         usable_h = int(target_h * (1.0 - 2 * margin_ratio))
-
         scale = min(usable_w / src_w, usable_h / src_h)
-
         new_w = max(1, int(src_w * scale))
         new_h = max(1, int(src_h * scale))
-
         resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
-
         x0 = (target_w - new_w) // 2
         y0 = (target_h - new_h) // 2
-
         canvas[y0:y0 + new_h, x0:x0 + new_w] = resized
         return canvas
 
     def _show_timeline_assets(self):
-        """
-        Affiche les éventuelles consignes / médias de timeline.
-        """
         projection_on = self.is_enabled("projection_media", False)
         adv_logs = self.is_enabled("advanced_logs", False)
 
@@ -307,9 +295,7 @@ class Algorithm_Analysis(QObject):
                 img = cv2.imread(asset.path)
                 if img is None:
                     continue
-
                 img = self.prepare_instruction_image(img, margin_ratio=0.04)
-
                 self.waiting_for_consigne_key = True
                 while self.running and self.waiting_for_consigne_key:
                     self.display_manager.display_image_on_projector_monitor(img)
@@ -329,9 +315,7 @@ class Algorithm_Analysis(QObject):
             marker_id_int,
             {"last_pos": camera_point.copy(), "stable_count": 0, "is_static": False}
         )
-
         dist = float(np.linalg.norm(camera_point - state["last_pos"]))
-
         if dist < self.move_threshold:
             state["stable_count"] += 1
             if state["stable_count"] >= self.stable_count_required:
@@ -340,185 +324,10 @@ class Algorithm_Analysis(QObject):
             state["stable_count"] = 0
             state["is_static"] = False
             self.current_marker_id = marker_id_int
-
         state["last_pos"] = camera_point.copy()
         self.marker_states[marker_id_int] = state
         return state
 
-    # ======================================================================
-    # Fond de projection
-    # ======================================================================
-    def build_graph_useful_background(self):
-        """
-        Fond logique dans le repère graph.
-        """
-        return np.full((self.grid_size, self.grid_size, 3), 255, dtype=np.uint8)
-
-    def _build_projector_background(self, proj_w, proj_h):
-        """
-        Construit le fond final dans le repère projecteur.
-        Fond nominal uniquement.
-        """
-        graph_background = self.build_graph_useful_background()
-
-        H_graph_to_proj = self.H_table_to_proj
-
-        warped_background = cv2.warpPerspective(
-            graph_background,
-            H_graph_to_proj,
-            (proj_w, proj_h)
-        )
-
-        return warped_background
-
-    # ======================================================================
-    # Logique pose_aruco : sélection du point du tag
-    # ======================================================================
-    def _select_physical_corner_runtime(self, pts: np.ndarray, position: str) -> np.ndarray:
-        """
-        Sélectionne un coin physique du tag selon la position souhaitée.
-        Même logique que dans pose_aruco.
-        pts: array (4,2)
-        """
-        if position == "TL":
-            return pts[np.argmin(pts[:, 0] + pts[:, 1])].astype(np.float32)
-        elif position == "TR":
-            return pts[np.argmin(-pts[:, 0] + pts[:, 1])].astype(np.float32)
-        elif position == "BR":
-            return pts[np.argmax(pts[:, 0] + pts[:, 1])].astype(np.float32)
-        elif position == "BL":
-            return pts[np.argmax(-pts[:, 0] + pts[:, 1])].astype(np.float32)
-        else:
-            raise ValueError(f"Position inconnue: {position}")
-
-    def _get_marker_anchor_raw(self, corner):
-        """
-        Point de référence unique du tag pour le tracking/runtime.
-        Ici on utilise le coin physique TL du tag.
-        """
-        pts = corner[0].astype(np.float32)
-        return self._select_physical_corner_runtime(pts, "TL")
-    
-    def _get_marker_anchor_raw_center(self, corner):
-        pts = corner[0].astype(np.float32)
-        return np.mean(pts, axis=0).astype(np.float32)  
-    # ======================================================================
-    # Calcul des coordonnées de tags
-    # ======================================================================
-    def _compute_marker_projector_geometry(self, corner):
-        """
-        Version test minimal :
-        on projette uniquement un point d'ancrage rouge, comme dans pose_aruco.
-        """
-        # anchor_raw = self._get_marker_anchor_raw(corner)
-        anchor_raw = self._get_marker_anchor_raw_center(corner)
-        projector_anchor = self.mapper.camera_raw_to_projector_nominal(anchor_raw)
-
-        
-
-        return {
-            "graph_center": graph_anchor,
-            "projector_center": projector_anchor,
-            "marker_size": 40,
-        }
-    
-    def update_cups_bottom(self, detected_markers):
-        """
-        detected_markers = dict {id: np.array([x, y])} en coordonnées graph.
-
-        Améliorations :
-        - Transition PEUT_ETRE_SOULEVEE → SOULEVEE uniquement après
-          N_LIFT_CONFIRM frames consécutives sans réapparition (hystérésis).
-        - La position de la tasse n'est plus figée au moment de la disparition :
-          elle sera mise à jour par associate_hands_to_cups à chaque frame.
-        - Réapparition du marqueur → retour immédiat à POSEE avec remise à zéro.
-        """
-        N_LIFT_CONFIRM = getattr(self, "N_LIFT_CONFIRM", 3)
-
-        for marker_id, pos in detected_markers.items():
-            if marker_id not in self.cups:
-                self.cups[marker_id] = {
-                    "state":           "POSEE",
-                    "last_pos":        pos.copy(),
-                    "lost_frames":     0,
-                    "carrier_hand_id": None,
-                    "lift_frames":     0,  # NOUVEAU : compteur de confirmation levée
-                }
-
-            cup = self.cups[marker_id]
-            # Marqueur vu → réinitialisation complète
-            cup["last_pos"]        = pos.copy()
-            cup["lost_frames"]     = 0
-            cup["lift_frames"]     = 0
-            cup["carrier_hand_id"] = None
-            cup["state"]           = "POSEE"
-
-        for marker_id, cup in self.cups.items():
-            if marker_id in detected_markers:
-                continue  # déjà traité ci-dessus
-
-            cup["lost_frames"] += 1
-
-            if cup["state"] == "POSEE":
-                # Première disparition → phase tampon
-                cup["state"]       = "PEUT_ETRE_SOULEVEE"
-                cup["lift_frames"] = 1
-
-            elif cup["state"] == "PEUT_ETRE_SOULEVEE":
-                cup["lift_frames"] += 1
-                if cup["lift_frames"] >= N_LIFT_CONFIRM:
-                    # Confirmé soulevé après N_LIFT_CONFIRM frames
-                    cup["state"] = "SOULEVEE"
-
-            # SOULEVEE : on ne fait rien ici — la position est gérée
-            # par associate_hands_to_cups à chaque frame.
-
-    def associate_hands_to_cups(self, hands):
-        """
-        Associe chaque tasse SOULEVEE (ou PEUT_ETRE_SOULEVEE) à une main proche
-        et met à jour sa position en temps réel.
-
-        hands = [{"id": int, "x": float, "y": float}]
-
-        Améliorations :
-        - Seuil d'association élargi en phase PEUT_ETRE_SOULEVEE pour capter
-          l'association dès le début du geste.
-        - Une fois associée, la position de la tasse suit la main à chaque frame
-          (plus de position figée).
-        - Si aucune main n'est trouvée dans le seuil, on conserve la dernière
-          position connue (pas de saut brutal).
-        """
-        DIST_CONFIRM = getattr(self, "DIST_HAND_CONFIRM", 180)
-        DIST_NORMAL  = getattr(self, "DIST_HAND_THRESHOLD", 120)
-
-        for marker_id, cup in self.cups.items():
-            if cup["state"] not in ("SOULEVEE", "PEUT_ETRE_SOULEVEE"):
-                continue
-
-            # Seuil adaptatif : plus large pendant la phase de confirmation
-            threshold = DIST_CONFIRM if cup["state"] == "PEUT_ETRE_SOULEVEE" else DIST_NORMAL
-
-            best_hand = None
-            best_dist = float("inf")
-
-            for hand in hands:
-                hand_pos = np.array([hand["x"], hand["y"]], dtype=np.float32)
-                dist     = np.linalg.norm(hand_pos - cup["last_pos"])
-
-                if dist < best_dist:
-                    best_dist = dist
-                    best_hand = hand
-
-            if best_hand is not None and best_dist < threshold:
-                cup["carrier_hand_id"] = best_hand["id"]
-                # NOUVEAU : mise à jour continue de la position
-                cup["last_pos"] = np.array(
-                    [best_hand["x"], best_hand["y"]], dtype=np.float32
-                )
-            else:
-                # Aucune main trouvée → on garde la dernière position connue
-                # (pas de remise à zéro, pas de saut)
-                cup["carrier_hand_id"] = None
     # ======================================================================
     # Dessin overlays
     # ======================================================================
@@ -535,12 +344,10 @@ class Algorithm_Analysis(QObject):
         abs_radius = int(element["relative_size"]["radius"] * marker_size)
         abs_x = int(projector_x + element["relative_position"]["x"] * marker_size)
         abs_y = int(projector_y - element["relative_position"]["y"] * marker_size)
-
         if self.mode_multidim and marker_id is not None:
             color = self.get_marker_color(marker_id)
         else:
             color = self.parse_color(element.get("color", "#FFFFFF"))
-
         fill = element.get("fill", False)
         thickness = -1 if fill else max(1, int(element["relative_size"]["thickness"] * marker_size))
         cv2.circle(img, (abs_x, abs_y), max(1, abs_radius), color, thickness)
@@ -550,12 +357,10 @@ class Algorithm_Analysis(QObject):
         abs_y1 = int(projector_y - element["relative_position"]["y1"] * marker_size)
         abs_x2 = int(projector_x + element["relative_position"]["x2"] * marker_size)
         abs_y2 = int(projector_y - element["relative_position"]["y2"] * marker_size)
-
         if self.mode_multidim and marker_id is not None:
             color = self.get_marker_color(marker_id)
         else:
             color = self.parse_color(element.get("color", "#FFFFFF"))
-
         thickness = max(1, int(element["thickness"] * marker_size))
         cv2.line(img, (abs_x1, abs_y1), (abs_x2, abs_y2), color, thickness)
 
@@ -566,26 +371,15 @@ class Algorithm_Analysis(QObject):
         rotation = -element.get("rotation", 0)
         color = self.parse_color(element.get("color", "#FFFFFF"))
         text = element["text"]
-
         text_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_size / 30, 2)[0]
         text_width, text_height = text_size
         centered_x = abs_x - text_width // 2
         centered_y = abs_y + text_height // 2
-
         if rotation != 0:
             rotation_matrix = cv2.getRotationMatrix2D((abs_x, abs_y), rotation, 1.0)
             temp_image = np.zeros_like(img, dtype=np.uint8)
-
-            cv2.putText(
-                temp_image,
-                text,
-                (centered_x, centered_y),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                font_size / 30,
-                color,
-                2
-            )
-
+            cv2.putText(temp_image, text, (centered_x, centered_y),
+                        cv2.FONT_HERSHEY_SIMPLEX, font_size / 30, color, 2)
             rotated_text = cv2.warpAffine(temp_image, rotation_matrix, (img.shape[1], img.shape[0]))
             mask = cv2.cvtColor(rotated_text, cv2.COLOR_BGR2GRAY)
             _, mask = cv2.threshold(mask, 1, 255, cv2.THRESH_BINARY)
@@ -593,32 +387,18 @@ class Algorithm_Analysis(QObject):
             background = cv2.bitwise_and(img, img, mask=mask_inv)
             img[:] = cv2.add(background, rotated_text)
         else:
-            cv2.putText(
-                img,
-                text,
-                (centered_x, centered_y),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                font_size / 30,
-                color,
-                2
-            )
+            cv2.putText(img, text, (centered_x, centered_y),
+                        cv2.FONT_HERSHEY_SIMPLEX, font_size / 30, color, 2)
 
     def draw_default_marker(self, img, projector_x, projector_y, marker_size, marker_id):
         radius = max(20, int(marker_size * 0.6))
         alpha = 0.5
         overlay = img.copy()
         color = self.get_marker_color(marker_id)
-
         cv2.circle(overlay, (projector_x, projector_y), radius, color, 8)
-        cv2.putText(
-            overlay,
-            f"ID: {marker_id}",
-            (projector_x - 50, projector_y + radius + 40),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.8,
-            (0, 255, 0),
-            2
-        )
+        cv2.putText(overlay, f"ID: {marker_id}",
+                    (projector_x - 50, projector_y + radius + 40),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
         cv2.addWeighted(overlay, alpha, img, 1 - alpha, 0, img)
 
     def parse_color(self, color_str):
@@ -636,18 +416,13 @@ class Algorithm_Analysis(QObject):
     # ======================================================================
     def show_camera_window(self, frame, corners=None):
         preview = frame.copy()
-
         if corners is not None:
             for marker_corners in corners:
                 pts = marker_corners[0].astype(int)
                 for i in range(4):
-                    pt1 = tuple(pts[i])
-                    pt2 = tuple(pts[(i + 1) % 4])
-                    cv2.line(preview, pt1, pt2, (0, 255, 0), thickness=4)
-
+                    cv2.line(preview, tuple(pts[i]), tuple(pts[(i + 1) % 4]), (0, 255, 0), thickness=4)
                 center = tuple(np.mean(pts, axis=0).astype(int))
                 cv2.circle(preview, center, 10, (0, 0, 255), thickness=-1)
-
         resized_frame = cv2.resize(preview, (1080, 720), interpolation=cv2.INTER_AREA)
         cv2.imshow("Camera", resized_frame)
         cv2.waitKey(1)
@@ -660,15 +435,12 @@ class Algorithm_Analysis(QObject):
             "frame": len(self.data_buffer) + 1,
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
-
         for marker_id, coords in graph_coords_ArUco:
             frame_data[f"ID_{marker_id}_x"] = float(coords[0])
             frame_data[f"ID_{marker_id}_y"] = float(coords[1])
-
             extra = self.extra_dimensions.get(marker_id, [0.0])
             for d, val in enumerate(extra):
                 frame_data[f"ID_{marker_id}_dim{d + 1}"] = float(val)
-
         self.data_buffer.append(frame_data)
 
     def save_to_csv(self):
@@ -682,7 +454,6 @@ class Algorithm_Analysis(QObject):
     def select_next_marker(self, direction):
         if not self.marker_states:
             return
-
         ids = sorted(self.marker_states.keys())
         if self.current_marker_id not in ids:
             self.current_marker_id = ids[0]
@@ -690,18 +461,15 @@ class Algorithm_Analysis(QObject):
             idx = ids.index(self.current_marker_id)
             idx = (idx + direction) % len(ids)
             self.current_marker_id = ids[idx]
-
         print(f"[MultiDim] Tag courant sélectionné : {self.current_marker_id}")
 
     def modify_current_marker_dimension(self, delta):
         if self.current_marker_id is None:
             return
-
         dims = self.extra_dimensions.get(self.current_marker_id, [0.0])
         dims[0] += delta
         dims[0] = max(-10, min(10, dims[0]))
         self.extra_dimensions[self.current_marker_id] = dims
-
         print(f"[MultiDim] Dim du tag {self.current_marker_id} = {dims[0]}")
 
     def custom_colormap_3(self, norm_value, col1=None, col2=None, col3=None):
@@ -711,7 +479,6 @@ class Algorithm_Analysis(QObject):
             fin = (255, 235, 255)
         else:
             depart, milieu, fin = col1, col2, col3
-
         if norm_value < 0.5:
             t = norm_value / 0.5
             b = int(depart[0] * (1 - t) + milieu[0] * t)
@@ -722,13 +489,11 @@ class Algorithm_Analysis(QObject):
             b = int(milieu[0] * (1 - t) + fin[0] * t)
             g = int(milieu[1] * (1 - t) + fin[1] * t)
             r = int(milieu[2] * (1 - t) + fin[2] * t)
-
         return (b, g, r)
 
     def get_marker_color(self, marker_id):
         if not self.mode_multidim:
             return (0, 0, 255)
-
         value = self.extra_dimensions.get(marker_id, [0.0])[0]
         norm_value = np.clip((value + 10) / 20, 0, 1)
         return self.custom_colormap_3(
@@ -740,15 +505,67 @@ class Algorithm_Analysis(QObject):
 
     def draw_dim_value(self, img, x, y, marker_id, color):
         value = self.extra_dimensions.get(marker_id, [0.0])[0]
-        cv2.putText(
-            img,
-            f"Dim: {value:.1f}",
-            (int(x) - 50, int(y) - 150),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.8,
-            color,
-            2
-        )
+        cv2.putText(img, f"Dim: {value:.1f}",
+                    (int(x) - 50, int(y) - 150),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+
+    # ======================================================================
+    # Cup tracking
+    # ======================================================================
+    def update_cups_bottom(self, detected_markers):
+        N_LIFT_CONFIRM = getattr(self, "N_LIFT_CONFIRM", 3)
+
+        for marker_id, pos in detected_markers.items():
+            if marker_id not in self.cups:
+                self.cups[marker_id] = {
+                    "state":           "POSEE",
+                    "last_pos":        pos.copy(),
+                    "lost_frames":     0,
+                    "carrier_hand_id": None,
+                    "lift_frames":     0,
+                }
+            cup = self.cups[marker_id]
+            cup["last_pos"]        = pos.copy()
+            cup["lost_frames"]     = 0
+            cup["lift_frames"]     = 0
+            cup["carrier_hand_id"] = None
+            cup["state"]           = "POSEE"
+
+        for marker_id, cup in self.cups.items():
+            if marker_id in detected_markers:
+                continue
+            cup["lost_frames"] += 1
+            if cup["state"] == "POSEE":
+                cup["state"]       = "PEUT_ETRE_SOULEVEE"
+                cup["lift_frames"] = 1
+            elif cup["state"] == "PEUT_ETRE_SOULEVEE":
+                cup["lift_frames"] += 1
+                if cup["lift_frames"] >= N_LIFT_CONFIRM:
+                    cup["state"] = "SOULEVEE"
+
+    def associate_hands_to_cups(self, hands):
+        DIST_CONFIRM = getattr(self, "DIST_HAND_CONFIRM", 180)
+        DIST_NORMAL  = getattr(self, "DIST_HAND_THRESHOLD", 120)
+
+        for marker_id, cup in self.cups.items():
+            if cup["state"] not in ("SOULEVEE", "PEUT_ETRE_SOULEVEE"):
+                continue
+            threshold = DIST_CONFIRM if cup["state"] == "PEUT_ETRE_SOULEVEE" else DIST_NORMAL
+            best_hand = None
+            best_dist = float("inf")
+            for hand in hands:
+                hand_pos = np.array([hand["x"], hand["y"]], dtype=np.float32)
+                dist     = np.linalg.norm(hand_pos - cup["last_pos"])
+                if dist < best_dist:
+                    best_dist = dist
+                    best_hand = hand
+            if best_hand is not None and best_dist < threshold:
+                cup["carrier_hand_id"] = best_hand["id"]
+                cup["last_pos"] = np.array(
+                    [best_hand["x"], best_hand["y"]], dtype=np.float32
+                )
+            else:
+                cup["carrier_hand_id"] = None
 
     # ======================================================================
     # Boucle principale
@@ -759,9 +576,9 @@ class Algorithm_Analysis(QObject):
         self.running = True
         print("detect_and_process started")
 
-        overlay_on = self.is_enabled("overlay_ra", False)
+        overlay_on    = self.is_enabled("overlay_ra", False)
         projection_on = self.is_enabled("projection_media", False)
-        adv_logs = self.is_enabled("advanced_logs", False)
+        adv_logs      = self.is_enabled("advanced_logs", False)
 
         print("=== RUNTIME DEBUG ===")
         print("projection_on:", projection_on, "overlay_on:", overlay_on, "adv_logs:", adv_logs)
@@ -769,20 +586,9 @@ class Algorithm_Analysis(QObject):
         print("assets:", len(self.assets))
         if self.timeline_steps:
             s0 = self.timeline_steps[0]
-            print(
-                "step0:",
-                s0.order_index,
-                s0.label,
-                "asset_ref=",
-                s0.asset_ref,
-                "pause=",
-                s0.pause,
-                "duration=",
-                s0.duration_s,
-            )
+            print("step0:", s0.order_index, s0.label,
+                  "asset_ref=", s0.asset_ref, "pause=", s0.pause, "duration=", s0.duration_s)
         print("=====================")
-
-        
 
         ra_config = {}
         if overlay_on:
@@ -794,34 +600,29 @@ class Algorithm_Analysis(QObject):
         print("Consignes affichées, on continue avec la détection des marqueurs.")
 
         while self.running:
-            # STOP propre immédiat
             if not self.running:
                 break
+
             proj_w = 3840
             proj_h = 2160
 
             current_image_background = np.ones((proj_h, proj_w, 3), dtype=np.uint8) * 255
-            
-            # STOP AVANT toute lecture caméra
+
             if not self.running:
                 break
 
             frame = self.parent.camera_manager.get_frame()
 
-            # RECHECK après lecture
             if not self.running:
                 break
 
-            if frame is None:
-                continue
-
-            if frame.size == 0:
+            if frame is None or frame.size == 0:
                 continue
 
             corners, ids = self._detect_markers(frame)
 
             graph_coords_ArUco = []
-            detected_markers = {}
+            detected_markers   = {}
 
             if ids is not None and len(ids) > 0:
                 valid_indices = [
@@ -829,183 +630,131 @@ class Algorithm_Analysis(QObject):
                     if int(ids[i][0]) not in CALIBRATION_TAG_IDS
                 ]
 
-                if len(valid_indices) > 0:
-                    ids = ids[valid_indices]
+                if valid_indices:
+                    ids     = ids[valid_indices]
                     corners = [corners[i] for i in valid_indices]
                 else:
-                    ids = None
+                    ids     = None
                     corners = []
 
                 for i, corner in enumerate(corners):
                     marker_id_int = int(ids[i][0])
+                    camera_point  = self._get_marker_anchor_raw_center(corner)
+                    state         = self._update_marker_state(marker_id_int, camera_point)
 
-                    # camera_point = self._get_marker_anchor_raw(corner)
-                    camera_point = self._get_marker_anchor_raw_center(corner)
-                    state = self._update_marker_state(marker_id_int, camera_point)
-
-                    # centre du tag (pixel caméra)
                     pts = corner[0]
-                    cx = float(np.mean(pts[:, 0]))
-                    cy = float(np.mean(pts[:, 1]))
+                    cx  = float(np.mean(pts[:, 0]))
+                    cy  = float(np.mean(pts[:, 1]))
 
-                    # pixel -> table mm
                     mm = self.pixel_to_table(cx, cy)
                     if mm is None:
                         continue
 
                     x_mm, y_mm = mm
-
-                    # table -> projecteur
-                    proj = self.table_to_projector(x_mm, y_mm)
-
+                    proj       = self.table_to_projector(x_mm, y_mm)
                     projector_x = int(proj[0])
                     projector_y = int(proj[1])
-
                     marker_size = 40
 
-                    # stockage temporaire (on garde graph = mm pour compat)
                     graph_coords_ArUco.append([marker_id_int, [x_mm, y_mm]])
                     detected_markers[marker_id_int] = np.array([x_mm, y_mm], dtype=np.float32)
-                    # point rouge au centre
-                    cv2.circle(
-                        current_image_background,
-                        (projector_x, projector_y),
-                        10,
-                        (0, 0, 255),
-                        -1
-                    )
 
-                    # anneau autour de la tasse
-                    ring_radius = int(marker_size * 2.5)   # ajuste 1.2 / 1.5 / 2.0 si besoin
+                    # Point central
+                    cv2.circle(current_image_background, (projector_x, projector_y), 10, (0, 0, 255), -1)
+
+                    # Anneau
+                    ring_radius    = int(marker_size * 2.5)
                     ring_thickness = max(3, int(marker_size * 0.12))
+                    cv2.circle(current_image_background, (projector_x, projector_y),
+                               ring_radius, (0, 0, 255), ring_thickness)
 
-                    cv2.circle(
-                        current_image_background,
-                        (projector_x, projector_y),
-                        ring_radius,
-                        (0, 0, 255),
-                        ring_thickness
-                    )
-
-                    cv2.putText(
-                        current_image_background,
-                        f"ID {marker_id_int}",
-                        (projector_x + 12, projector_y - 12),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.6,
-                        (0, 0, 255),
-                        2
-                    )
+                    cv2.putText(current_image_background, f"ID {marker_id_int}",
+                                (projector_x + 12, projector_y - 12),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
                     if state["is_static"] and overlay_on:
                         if f"marker_{marker_id_int}" in ra_config:
-                            self.draw_from_config(
-                                current_image_background,
-                                ra_config[f"marker_{marker_id_int}"],
-                                projector_x,
-                                projector_y,
-                                marker_size,
-                                marker_id_int
-                            )
+                            self.draw_from_config(current_image_background,
+                                                  ra_config[f"marker_{marker_id_int}"],
+                                                  projector_x, projector_y,
+                                                  marker_size, marker_id_int)
                         else:
-                            self.draw_default_marker(
-                                current_image_background,
-                                projector_x,
-                                projector_y,
-                                marker_size,
-                                marker_id_int
-                            )
-
+                            self.draw_default_marker(current_image_background,
+                                                     projector_x, projector_y,
+                                                     marker_size, marker_id_int)
                         if self.mode_multidim:
                             color = self.get_marker_color(marker_id_int)
-                            self.draw_dim_value(
-                                current_image_background,
-                                projector_x,
-                                projector_y,
-                                marker_id_int,
-                                color
-                            )
-                            
+                            self.draw_dim_value(current_image_background,
+                                                projector_x, projector_y,
+                                                marker_id_int, color)
+
+            # Cup tracking
             self.update_cups_bottom(detected_markers)
-            hands = []
-            if self.get_hands:
-                hands = self.get_hands()
+            hands = self.get_hands() if self.get_hands else []
             self.associate_hands_to_cups(hands)
+
             for marker_id, cup in self.cups.items():
-
                 x_mm, y_mm = cup["last_pos"]
-
                 proj = self.table_to_projector(x_mm, y_mm)
-
-                px = int(proj[0])
-                py = int(proj[1])
-
+                px, py = int(proj[0]), int(proj[1])
                 if cup["state"] == "SOULEVEE":
                     cv2.circle(current_image_background, (px, py), 20, (255, 0, 0), -1)
-            # print("[HANDS]", hands)
-            # Debug
-            # for marker_id, cup in self.cups.items():
-            #     print(f"[CUP] ID={marker_id} | state={cup['state']} | lost={cup['lost_frames']}")
 
+            # ------------------------------------------------------------------
+            # Grille 700×700 (si activée) — via H_table_to_proj directement
+            # ------------------------------------------------------------------
             if self.show_grid and self.record_window is not None:
-                x_min, x_max, y_min, y_max, x_legend, y_legend = self.record_window.get_bounds_from_inputs()
-
-                graph_grid = self.build_graph_useful_background()
-
-                graph_grid = DrawUtils.draw_math_grid_on_image(
-                    graph_grid,
-                    x_min, x_max,
-                    y_min, y_max,
-                    x_legend, y_legend,
-                    self.grid_size
-                )
-
-                H_graph_to_proj = self.mapper.get_graph_to_projector_homography()
-
-                warped_grid = cv2.warpPerspective(
-                    graph_grid,
-                    H_graph_to_proj,
-                    (proj_w, proj_h)
-                )
-
+                warped_grid = self._build_warped_grid(proj_w, proj_h)
                 current_image_background = cv2.addWeighted(
                     warped_grid, 1.0,
                     current_image_background, 1.0,
                     0
                 )
 
+            # Popup caméra debug
             if self.status_popUpCamera:
                 self.show_camera_window(frame, corners=corners if ids is not None else None)
                 self._camera_was_active = True
             else:
-                if hasattr(self, "_camera_was_active") and self._camera_was_active:
+                if getattr(self, "_camera_was_active", False):
                     cv2.destroyWindow("Camera")
                     self._camera_was_active = False
 
-            # =========================
-            # FUSION 
-            # ========================
-            graph_coords_fusion = []
+            # Fusion cup positions → signal UI
+            graph_coords_fusion = [
+                [marker_id, cup["last_pos"]]
+                for marker_id, cup in self.cups.items()
+            ]
 
-            for marker_id, cup in self.cups.items():
-                graph_coords_fusion.append([marker_id, cup["last_pos"]])
-
-            # =========================
-            # AFFICHAGE
-            # =========================
             self.display_manager.display_image_on_projector_monitor(current_image_background)
-
-            # =========================
-            # SIGNAL UI
-            # =========================
             self.data_signal.emit({"data": graph_coords_fusion})
-
-            # =========================
-            # EXPORT CSV
-            # =========================
             self.save_to_buffer(graph_coords_fusion)
 
             pytime.sleep(0.01)
+
         self.save_to_csv()
         print("detect_and_process terminé")
         self.finished_signal.emit()
+
+    # ======================================================================
+    # Helpers anchor
+    # ======================================================================
+    def _select_physical_corner_runtime(self, pts: np.ndarray, position: str) -> np.ndarray:
+        if position == "TL":
+            return pts[np.argmin(pts[:, 0] + pts[:, 1])].astype(np.float32)
+        elif position == "TR":
+            return pts[np.argmin(-pts[:, 0] + pts[:, 1])].astype(np.float32)
+        elif position == "BR":
+            return pts[np.argmax(pts[:, 0] + pts[:, 1])].astype(np.float32)
+        elif position == "BL":
+            return pts[np.argmax(-pts[:, 0] + pts[:, 1])].astype(np.float32)
+        else:
+            raise ValueError(f"Position inconnue: {position}")
+
+    def _get_marker_anchor_raw(self, corner):
+        pts = corner[0].astype(np.float32)
+        return self._select_physical_corner_runtime(pts, "TL")
+
+    def _get_marker_anchor_raw_center(self, corner):
+        pts = corner[0].astype(np.float32)
+        return np.mean(pts, axis=0).astype(np.float32)

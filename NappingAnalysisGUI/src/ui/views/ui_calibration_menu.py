@@ -17,15 +17,14 @@ class CalibrationMenu(QtWidgets.QWidget):
         super().__init__()
         uic.loadUi(gui_path("Calibration_Menu.ui"), self)
 
-        self.parent = parent  # MainApp
-        self.cam_width = cam_width
+        self.parent     = parent  # MainApp
+        self.cam_width  = cam_width
         self.cam_height = cam_height
-        self.grid_size = grid_size
+        self.grid_size  = grid_size
 
-        # Key handler (évite crash)
         self.key_handler = KeyHandler(self)
 
-        # Cam + affichage preview dans le QLabel de la UI
+        # Caméra + preview dans le QLabel de la UI
         self.camera_manager = CameraManager(
             camera_index=self.parent.camera_bottom_id,
             width=self.cam_width,
@@ -33,7 +32,7 @@ class CalibrationMenu(QtWidgets.QWidget):
         )
         self.display_manager = DisplayManager(label=self.label_frame)
 
-        # Service calibration (utilise self.parent.camera_manager -> ici parent = CalibrationMenu donc OK)
+        # Service calibration (preview caméra uniquement dans le nouveau pipeline)
         self.calibration = Calibration(
             self,
             self.cam_width,
@@ -52,15 +51,14 @@ class CalibrationMenu(QtWidgets.QWidget):
         if self.image_cam_closed is None:
             self.image_cam_closed = np.zeros((480, 640, 3), dtype=np.uint8)
 
-        # Status icon init (optionnel)
-        invalidate_icon = asset_path("icons", "Invalidate.png")
+        # Icône status initiale
         if hasattr(self, "label_status"):
-            self.label_status.setPixmap(QPixmap(invalidate_icon))
+            self.label_status.setPixmap(QPixmap(asset_path("icons", "Invalidate.png")))
 
         # Signals
         self.pushButton_startCam.clicked.connect(self.start_cam)
         self.pushButton_closeCam.clicked.connect(self.close_camera)
-        self.pushButton_StartCali.clicked.connect(self.start_cali)
+        self.pushButton_StartCali.clicked.connect(self.check_pipeline_files)
         self.pushButton_retour.clicked.connect(self.go_to_record)
 
         # Afficher preview caméra éteinte au démarrage
@@ -70,9 +68,9 @@ class CalibrationMenu(QtWidgets.QWidget):
         self.key_handler.handle_key(event)
         super().keyPressEvent(event)
 
-    # ---------------------------------------------------------------------
-    # Camera
-    # ---------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Caméra
+    # ------------------------------------------------------------------
     def start_cam(self):
         self.pushButton_closeCam.setEnabled(True)
         self.pushButton_StartCali.setEnabled(True)
@@ -81,7 +79,6 @@ class CalibrationMenu(QtWidgets.QWidget):
         if hasattr(self, "label_status"):
             self.label_status.setPixmap(QPixmap(asset_path("icons", "Invalidate.png")))
 
-        # Ouvrir caméra puis lancer timer calibration (preview)
         self.camera_manager.open_camera()
         self.calibration.run()
 
@@ -90,62 +87,61 @@ class CalibrationMenu(QtWidgets.QWidget):
         self.pushButton_StartCali.setEnabled(False)
         self.pushButton_startCam.setEnabled(True)
 
-        # Stop timer calibration
         if self.calibration and self.calibration.timer:
             self.calibration.timer.stop()
 
-        # Fermer caméra
         if self.camera_manager:
             self.camera_manager.close_camera()
 
-        # Preview caméra éteinte
         self.display_manager.show_frame(self.image_cam_closed)
 
-    # ---------------------------------------------------------------------
-    # Calibration
-    # ---------------------------------------------------------------------
-    def start_cali(self):
+    # ------------------------------------------------------------------
+    # Vérification pipeline (remplace start_cali legacy)
+    # ------------------------------------------------------------------
+    def check_pipeline_files(self):
         """
-        Lance la calibration (détection 4 tags 40-43), calcule H/H_inv
-        et injecte les matrices dans record_window.
+        Vérifie que les 3 fichiers JSON du nouveau pipeline sont présents.
+        N'injecte plus aucune matrice dans record_window — Algorithm_Analysis
+        les charge lui-même au démarrage de l'enregistrement.
         """
         self.pushButton_closeCam.setEnabled(False)
         self.pushButton_StartCali.setEnabled(False)
         self.pushButton_startCam.setEnabled(True)
 
-        try:
-            H_proj, H_inv_proj, H_graph, H_inv_graph = self.calibration.start_calib(self.label_status)
+        # Stop preview + fermer caméra
+        if self.calibration and self.calibration.timer:
+            self.calibration.timer.stop()
+        if self.camera_manager:
+            self.camera_manager.close_camera()
 
-            # Stop preview
-            if self.calibration and self.calibration.timer:
-                self.calibration.timer.stop()
+        # Vérification
+        ok = self.calibration.check_new_pipeline_files(
+            label_status=self.label_status if hasattr(self, "label_status") else None
+        )
 
-            # Fermer caméra
-            if self.camera_manager:
-                self.camera_manager.close_camera()
-
-            # Injecter dans RecordWindow
-            rw = self.parent.record_window
-            rw.calib_data["H"] = H_proj
-            rw.calib_data["H_inv"] = H_inv_proj
-            rw.calib_data["H_graph"] = H_graph
-            rw.calib_data["H_inv_graph"] = H_inv_graph
-
-            # Autoriser Start
-            rw.pushButton_Start.setEnabled(True)
-
-            print("✅ Calibration OK")
-            print("H_proj:\n", H_proj)
-            print("H_inv_proj:\n", H_inv_proj)
-
-        except Exception as e:
-            QtWidgets.QMessageBox.warning(self, "Erreur calibration", str(e))
+        if ok:
+            print("✅ Fichiers pipeline OK — prêt à enregistrer")
+            QtWidgets.QMessageBox.information(
+                self,
+                "Pipeline OK",
+                "Tous les fichiers de calibration sont présents.\n"
+                "Tu peux lancer l'enregistrement."
+            )
+        else:
+            msg = (
+                "Fichiers manquants dans config/ :\n"
+                "  • cambottom_table_pose.json\n"
+                "  • H_table_to_proj.json\n"
+                "  • camera_calibration_bottom.json\n\n"
+                "Lance les scripts de calibration correspondants."
+            )
+            QtWidgets.QMessageBox.warning(self, "Fichiers manquants", msg)
             if hasattr(self, "label_status"):
                 self.label_status.setPixmap(QPixmap(asset_path("icons", "Invalidate.png")))
 
-    # ---------------------------------------------------------------------
+    # ------------------------------------------------------------------
     # Navigation
-    # ---------------------------------------------------------------------
+    # ------------------------------------------------------------------
     def go_to_record(self):
         self.close_camera()
         self.parent.stacked_widget.setCurrentWidget(self.parent.record_window)
