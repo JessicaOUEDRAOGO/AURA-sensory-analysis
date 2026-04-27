@@ -3,7 +3,7 @@ from PyQt6.QtGui import QPainter, QPen, QBrush, QPixmap
 from PyQt6.QtCore import Qt, QRectF
 import math
 import numpy as np
-
+from PyQt6.QtGui import QColor
 class GraphicsScene(QGraphicsScene):
     def __init__(self, grid_size=700, status_mathsElement = False, grid_xmin = -301, grid_xmax = 399, grid_ymin = -336, grid_ymax = 364,
                   x_min=-10, x_max=10, y_min=-10, y_max=10, x_legend = "x", y_legend = "y", *args, **kwargs):
@@ -53,27 +53,40 @@ class GraphicsScene(QGraphicsScene):
         self.y_legend = y_legend
         self.update()
     
-    def add_marker(self, x, y, marker_id):
+    
+    def add_marker(self, x, y, marker_id, state="POSEE"):
         """
         Ajoute un marqueur (point rouge) et son ID à la scène.
         :param x: Coordonnée X dans le domaine graphique.
         :param y: Coordonnée Y dans le domaine graphique.
         :param marker_id: ID du marqueur ArUco.
+        :param state: État du marqueur.
         """
+        STATE_COLORS = {
+            "POSEE":              Qt.GlobalColor.red,
+            "PEUT_ETRE_SOULEVEE": Qt.GlobalColor.yellow,   # orange approx Qt
+            "SOULEVEE":           Qt.GlobalColor.blue,
+        }
+        # Pour avoir un vrai orange (non dispo en GlobalColor), on utilise QColor
+        
+        STATE_QCOLORS = {
+            "POSEE":              QColor(255, 0, 0),
+            "PEUT_ETRE_SOULEVEE": QColor(255, 165, 0),
+            "SOULEVEE":           QColor(0, 100, 255),
+        }
+        color = STATE_QCOLORS.get(state, QColor(255, 0, 0))
 
         px = x + self.grid_xmin
         py = y + self.grid_ymin
 
-        # Afficher les coordonnées des pixels calculés
-        #print(f"Marker ID: {marker_id}, Graph Coordinates: ({x}, {y}), Pixel Coordinates: ({px}, {py})")
-
-        # Dessiner le point rouge
-        point_item = self.addEllipse(px, py, 15, 15, QPen(Qt.GlobalColor.red), QBrush(Qt.GlobalColor.red))
+        point_item = self.addEllipse(
+            px, py, 15, 15,
+            QPen(color), QBrush(color)
+        )
         self.marker_items.append(point_item)
 
-        # Ajouter le texte de l'ID en dessous du point
         text_item = self.addText(str(marker_id))
-        text_item.setDefaultTextColor(Qt.GlobalColor.red)
+        text_item.setDefaultTextColor(color)
         text_item.setPos(px + 13, py + 13)
         self.marker_items.append(text_item)
 

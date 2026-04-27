@@ -542,19 +542,20 @@ class Algorithm_Analysis(QObject):
     # ======================================================================
     # Export
     # ======================================================================
+    # APRÈS
     def save_to_buffer(self, graph_coords_ArUco):
         frame_data = {
             "frame":     len(self.data_buffer) + 1,
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         }
-        for marker_id, coords in graph_coords_ArUco:
+        for entry in graph_coords_ArUco:
+            marker_id, coords, *_ = entry      # ignore le 3ème élément (state)
             frame_data[f"ID_{marker_id}_x"] = float(coords[0])
             frame_data[f"ID_{marker_id}_y"] = float(coords[1])
             extra = self.extra_dimensions.get(marker_id, [0.0])
             for d, val in enumerate(extra):
                 frame_data[f"ID_{marker_id}_dim{d + 1}"] = float(val)
         self.data_buffer.append(frame_data)
-
     def save_to_csv(self):
         df = pd.DataFrame(self.data_buffer)
         df.to_csv(self.output_csv, index=False)
@@ -883,12 +884,11 @@ class Algorithm_Analysis(QObject):
                     cv2.destroyWindow("Camera")
                     self._camera_was_active = False
 
-            # Fusion cup positions → signal UI
+            # Fusion cup positions → signal UI + buffer
             graph_coords_fusion = [
-                [marker_id, cup["last_pos"]]
+                [marker_id, cup["last_pos"], cup.get("state", "POSEE")]
                 for marker_id, cup in self.cups.items()
             ]
-
             self.display_manager.display_image_on_projector_monitor(current_image_background)
             self.data_signal.emit({"data": graph_coords_fusion})
             self.save_to_buffer(graph_coords_fusion)

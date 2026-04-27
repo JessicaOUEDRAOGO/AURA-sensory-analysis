@@ -409,10 +409,14 @@ class RecordWindow(QtWidgets.QWidget):
         self.scene.clear_markers()
         detected_ids = set()
 
-        for marker_id, (x, y) in graph_coords:
+        # APRÈS
+        for entry in graph_coords:
+            marker_id, pos, *rest = entry          # rétrocompatible si state absent
+            state = rest[0] if rest else "POSEE"
+            x, y = pos
             detected_ids.add(marker_id)
             if 0 <= marker_id < len(self.checkboxes) and self.checkboxes[marker_id].isChecked():
-                self.scene.add_marker(x, y, marker_id)
+                self.scene.add_marker(x, y, marker_id, state=state)
             label_posx_nbr = self.findChild(QLabel, f"label_posx_nbr_{marker_id}")
             label_posy_nbr = self.findChild(QLabel, f"label_posy_nbr_{marker_id}")
             if label_posx_nbr and label_posy_nbr:
