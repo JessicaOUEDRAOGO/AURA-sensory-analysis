@@ -30,7 +30,7 @@ class HandTrackingThread(QThread):
         self.camera_id = camera_id
         self.running = True
 
-        self.TABLE_SIZE_MM = 580.0
+        self.TABLE_SIZE_MM = 597.0
         self.GRID_SIZE     = 700
 
         # ------------------------------------------------------------------

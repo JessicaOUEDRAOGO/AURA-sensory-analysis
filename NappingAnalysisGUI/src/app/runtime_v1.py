@@ -158,7 +158,7 @@ class Algorithm_Analysis(QObject):
     # ======================================================================
     # Grille 700×700 → projecteur (remplace l'ancienne voie mapper)
     # ======================================================================
-    def _build_warped_grid(self, proj_w, proj_h):
+    def _build_warped_grid(self, proj_w, proj_h, cups=None, hands=None):
         """
         Construit la grille mathématique dans l'espace graph (700×700),
         puis la warp directement dans l'espace projecteur via H_table_to_proj.
@@ -174,7 +174,32 @@ class Algorithm_Analysis(QObject):
             x_legend, y_legend,
             self.grid_size
         )
+        # =========================================================
+        # 🔴 CAM BOTTOM (tasses)
+        # =========================================================
+        if cups is not None:
+            for marker_id, cup in cups.items():
 
+                x_mm, y_mm = cup["last_pos"]
+
+                xg = int((x_mm / self.TABLE_SIZE_MM) * self.grid_size)
+                yg = int((y_mm / self.TABLE_SIZE_MM) * self.grid_size)
+
+                if 0 <= xg < self.grid_size and 0 <= yg < self.grid_size:
+                    cv2.circle(graph_grid, (xg, yg), 8, (0, 0, 255), -1)
+
+        # =========================================================
+        # 🔵 CAM TOP (mains)
+        # =========================================================
+        if hands is not None:
+            for hand in hands:
+
+                xg = int(hand["x"])
+                yg = int(hand["y"])
+
+                if 0 <= xg < self.grid_size and 0 <= yg < self.grid_size:
+                    cv2.circle(graph_grid, (xg, yg), 8, (255, 0, 0), -1)
+        
         warped = cv2.warpPerspective(
             graph_grid,
             self.H_table_to_proj,
@@ -659,19 +684,11 @@ class Algorithm_Analysis(QObject):
                     graph_coords_ArUco.append([marker_id_int, [x_mm, y_mm]])
                     detected_markers[marker_id_int] = np.array([x_mm, y_mm], dtype=np.float32)
 
-                    # Point central
-                    cv2.circle(current_image_background, (projector_x, projector_y), 10, (0, 0, 255), -1)
+                    
 
                     # Anneau
                     ring_radius    = int(marker_size * 2.5)
                     ring_thickness = max(3, int(marker_size * 0.12))
-                    cv2.circle(current_image_background, (projector_x, projector_y),
-                               ring_radius, (0, 0, 255), ring_thickness)
-
-                    cv2.putText(current_image_background, f"ID {marker_id_int}",
-                                (projector_x + 12, projector_y - 12),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-
                     if state["is_static"] and overlay_on:
                         if f"marker_{marker_id_int}" in ra_config:
                             self.draw_from_config(current_image_background,
@@ -697,14 +714,20 @@ class Algorithm_Analysis(QObject):
                 x_mm, y_mm = cup["last_pos"]
                 proj = self.table_to_projector(x_mm, y_mm)
                 px, py = int(proj[0]), int(proj[1])
-                if cup["state"] == "SOULEVEE":
-                    cv2.circle(current_image_background, (px, py), 20, (255, 0, 0), -1)
+                
 
             # ------------------------------------------------------------------
             # Grille 700×700 (si activée) — via H_table_to_proj directement
             # ------------------------------------------------------------------
             if self.show_grid and self.record_window is not None:
-                warped_grid = self._build_warped_grid(proj_w, proj_h)
+                hands = self.get_hands() if self.get_hands else []
+
+                warped_grid = self._build_warped_grid(
+                    proj_w,
+                    proj_h,
+                    cups=self.cups,
+                    hands=hands
+                )
                 current_image_background = cv2.addWeighted(
                     warped_grid, 1.0,
                     current_image_background, 1.0,

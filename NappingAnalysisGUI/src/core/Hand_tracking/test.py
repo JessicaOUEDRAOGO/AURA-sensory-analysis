@@ -41,7 +41,7 @@ def load_pose():
 
 rvec, tvec, K = load_pose()
 
-TABLE_SIZE_MM = 580.0
+TABLE_SIZE_MM = 597.0
 GRID_SIZE = 700
 
 def get_grip_point(hand, w, h):

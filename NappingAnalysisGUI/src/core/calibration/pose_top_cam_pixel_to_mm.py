@@ -263,7 +263,7 @@ def run_validation_tests(centers, rvec, tvec, new_K, frame_undist):
 
     On vérifie que les centres des tags sont bien projetés aux positions
     attendues (TAG_OFFSET_MM des bords), et que les coins de la table
-    (0,0), (580,0), (580,580), (0,580) sont cohérents par projection inverse.
+    (0,0), (597,0), (597,597), (0,597) sont cohérents par projection inverse.
     """
     o = TAG_OFFSET_MM
     s = TABLE_SIZE_MM
