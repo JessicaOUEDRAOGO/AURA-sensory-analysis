@@ -186,15 +186,18 @@ class Algorithm_Analysis(QObject):
           SOULEVEE + carrier_hand_id valide  → bleu   (cam_top actif)
           SOULEVEE sans main associée        → orange (transition)
         """
-        state    = cup.get("state", "POSEE")
-        has_hand = cup.get("has_active_hand", False)
+        state = cup.get("state", "POSEE")
 
         if state == "POSEE":
-            return COLOR_CUP_POSEE
-        elif state in ("SOULEVEE", "PEUT_ETRE_SOULEVEE") and has_hand:
-            return COLOR_CUP_SOULEVEE
-        else:
-            return COLOR_CUP_INCERT
+            return COLOR_CUP_POSEE          # rouge
+
+        elif state == "PEUT_ETRE_SOULEVEE":
+            return COLOR_CUP_INCERT         # orange
+
+        elif state == "SOULEVEE":
+            return COLOR_CUP_SOULEVEE       # bleu
+
+        return COLOR_CUP_POSEE
 
     # ======================================================================
     # Conversion mm → coordonnées graphe (0–grid_size)
