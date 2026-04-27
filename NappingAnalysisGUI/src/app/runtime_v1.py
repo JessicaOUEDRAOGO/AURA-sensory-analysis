@@ -187,11 +187,11 @@ class Algorithm_Analysis(QObject):
           SOULEVEE sans main associée        → orange (transition)
         """
         state    = cup.get("state", "POSEE")
-        has_hand = cup.get("carrier_hand_id") is not None
+        has_hand = cup.get("has_active_hand", False)
 
         if state == "POSEE":
             return COLOR_CUP_POSEE
-        elif state == "SOULEVEE" and has_hand:
+        elif state in ("SOULEVEE", "PEUT_ETRE_SOULEVEE") and has_hand:
             return COLOR_CUP_SOULEVEE
         else:
             return COLOR_CUP_INCERT
@@ -636,6 +636,7 @@ class Algorithm_Analysis(QObject):
                     "last_pos":           pos.copy(),
                     "lost_frames":        0,
                     "carrier_hand_id":    None,
+                    "has_active_hand":    False,
                     "lift_frames":        0,
                     "pos_is_graph_space": False,
                 }
@@ -677,6 +678,7 @@ class Algorithm_Analysis(QObject):
         for marker_id, cup in self.cups.items():
             if cup["state"] not in ("SOULEVEE", "PEUT_ETRE_SOULEVEE"):
                 cup["carrier_hand_id"] = None
+                cup["has_active_hand"] = False
                 continue
 
             threshold = (
@@ -705,14 +707,16 @@ class Algorithm_Analysis(QObject):
                     best_hand = hand
 
             if best_hand is not None and best_dist < threshold:
-                cup["carrier_hand_id"]    = best_hand["id"]
-                # cam_top prend le relais : stocker en espace graphe
-                cup["last_pos"]           = np.array(
+                cup["carrier_hand_id"] = best_hand["id"]
+                cup["has_active_hand"] = True  
+
+                cup["last_pos"] = np.array(
                     [best_hand["x"], best_hand["y"]], dtype=np.float32
                 )
                 cup["pos_is_graph_space"] = True
             else:
                 cup["carrier_hand_id"] = None
+                cup["has_active_hand"] = False  
                 # Pas de main : conserver l'espace courant sans modifier last_pos
 
     # ======================================================================
