@@ -117,12 +117,12 @@ class Algorithm_Analysis(QObject):
         # Seuils d'association adaptative
         # ------------------------------------------------------------------
         self.VELOCITY_FAST_THRESHOLD = 10    # px graphe/frame
-        self.DIST_HAND_FAST          = 280   # rayon élargi pour mains rapides
+        self.DIST_HAND_FAST          = 350   # rayon élargi pour mains rapides
 
         # ------------------------------------------------------------------
         # Carrier lock — nombre de frames de grâce après perte d'association
         # ------------------------------------------------------------------
-        self.CARRIER_LOCK_DURATION: int = 12
+        self.CARRIER_LOCK_DURATION: int = 15
         self._carrier_lock_frames: dict[int, int] = {}
 
         # ------------------------------------------------------------------
@@ -631,6 +631,8 @@ class Algorithm_Analysis(QObject):
                 cup["carrier_hand_id"]    = hid
                 cup["has_active_hand"]    = True
                 cup["last_pos"]           = predicted_pos
+                cup["last_vx"]            = vx
+                cup["last_vy"]            = vy
                 cup["pos_is_graph_space"] = True
                 # Recharger le lock à chaque association réussie
                 self._carrier_lock_frames[marker_id] = self.CARRIER_LOCK_DURATION
@@ -658,8 +660,11 @@ class Algorithm_Analysis(QObject):
                         cup["pos_is_graph_space"] = True
                         cup["has_active_hand"]    = True
                     else:
-                        # Main disparue → on prolonge sur la dernière position connue
-                        # (pas de mise à jour de last_pos, on reste sur place)
+                        # extrapolation si main perdue
+                        vx = cup.get("last_vx", 0.0)
+                        vy = cup.get("last_vy", 0.0)
+
+                        cup["last_pos"] = cup["last_pos"] + np.array([vx, vy], dtype=np.float32)
                         cup["has_active_hand"] = False
 
                     self._carrier_lock_frames[marker_id] = lock - 1
@@ -767,7 +772,7 @@ class Algorithm_Analysis(QObject):
 
             # Récupérer les mains et mettre à jour le timestamp de fraîcheur
             hands = self.get_hands() if self.get_hands else []
-            if hands:
+            if any(h.get("ts_ms", -1) != -1 for h in hands):
                 self._hands_last_frame = self._frame_counter
 
             self.associate_hands_to_cups(hands)

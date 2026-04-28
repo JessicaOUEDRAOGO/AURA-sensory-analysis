@@ -104,8 +104,8 @@ class HandTrackingThread(QThread):
     MAX_MISSING_FRAMES = 8
 
     def __init__(self, camera_id: int = 0,
-                 kalman_process_noise: float = 1e-2,
-                 kalman_measure_noise: float = 5.0):
+                 kalman_process_noise: float = 5e-2,
+                 kalman_measure_noise: float = 3.0):
         super().__init__()
 
         BASE_DIR = Path(__file__).resolve().parent
@@ -243,6 +243,8 @@ class HandTrackingThread(QThread):
                 kf   = self._kalman_filters[hid]
                 pred = kf.predict_only()
                 vel  = kf.velocity
+                # clamp vitesse pour éviter spikes
+                vel = np.clip(vel, -50, 50)
                 predicted_entries.append({
                     "id":        hid,
                     "x":         float(pred[0]),
@@ -296,7 +298,7 @@ class HandTrackingThread(QThread):
             detected_ids = set()
 
             if result and result.hand_landmarks:
-                for hand_idx, hand in enumerate(result.hand_landmarks):
+                for _, hand in enumerate(result.hand_landmarks):
                     grip = self._get_grip_point(hand, w, h)
                     res  = self._pixel_to_table(grip[0], grip[1])
                     if res is None:
@@ -304,16 +306,18 @@ class HandTrackingThread(QThread):
 
                     x_mm, y_mm = self._flip_y(*res)
                     xg, yg     = self._mm_to_graph(x_mm, y_mm)
+                    # ID stable basé sur la position (gauche / droite)
+                    hand_id = 0 if xg < (self.GRID_SIZE / 2) else 1
 
-                    kf       = self._get_or_create_kalman(hand_idx, xg, yg)
+                    kf = self._get_or_create_kalman(hand_id, xg, yg)
                     filtered = kf.update(xg, yg)
                     vel      = kf.velocity
 
-                    detected_ids.add(hand_idx)
-                    self._missing_frames[hand_idx] = 0
+                    detected_ids.add(hand_id)
+                    self._missing_frames[hand_id] = 0
 
                     hands_data.append({
-                        "id":    hand_idx,
+                        "id": hand_id,
                         "x":     float(filtered[0]),
                         "y":     float(filtered[1]),
                         "vx":    float(vel[0]),
