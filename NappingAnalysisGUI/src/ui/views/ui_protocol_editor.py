@@ -50,11 +50,13 @@ class ProtocolModulesPage(QtWidgets.QWidget):
         self.cb_projection_media = QtWidgets.QCheckBox("Projection média")
         self.cb_annotations = QtWidgets.QCheckBox("Annotations")
         self.cb_overlay_ra = QtWidgets.QCheckBox("Overlay RA")
+        self.cb_hand_tracking = QtWidgets.QCheckBox("Hand tracking")
         self.cb_advanced_logs = QtWidgets.QCheckBox("Logs avancés")
 
         for cb in [
             self.cb_drawing, self.cb_grouping, self.cb_projection_media,
-            self.cb_annotations, self.cb_overlay_ra, self.cb_advanced_logs
+            self.cb_annotations, self.cb_overlay_ra, self.cb_hand_tracking,
+            self.cb_advanced_logs
         ]:
             cb.setEnabled(not locked)
             lay_m.addWidget(cb)
@@ -97,6 +99,7 @@ class ProtocolModulesPage(QtWidgets.QWidget):
             "projection_media": self.cb_projection_media.isChecked(),
             "annotations": self.cb_annotations.isChecked(),
             "overlay_ra": self.cb_overlay_ra.isChecked(),
+            "hand_tracking": self.cb_hand_tracking.isChecked(),
             "advanced_logs": self.cb_advanced_logs.isChecked(),
         }
         data_to_export = {
@@ -117,6 +120,7 @@ class ProtocolModulesPage(QtWidgets.QWidget):
         self.cb_projection_media.setChecked(bool(modules_enabled.get("projection_media", False)))
         self.cb_annotations.setChecked(bool(modules_enabled.get("annotations", False)))
         self.cb_overlay_ra.setChecked(bool(modules_enabled.get("overlay_ra", False)))
+        self.cb_hand_tracking.setChecked(bool(modules_enabled.get("hand_tracking", False)))
         self.cb_advanced_logs.setChecked(bool(modules_enabled.get("advanced_logs", False)))
 
         # exports

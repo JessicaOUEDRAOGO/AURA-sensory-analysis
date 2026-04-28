@@ -56,6 +56,7 @@ class Algorithm_Analysis(QObject):
         self.grid_size       = int(grid_size)
 
         self.modules_enabled = modules_enabled or {}
+        self.hand_tracking_enabled = self.is_enabled("hand_tracking", False)
         self.assets          = assets or []
         self.timeline_steps  = timeline_steps or []
         self.protocol        = protocol
@@ -776,14 +777,33 @@ class Algorithm_Analysis(QObject):
             # ------------------------------------------------------------------
             # Cup tracking
             # ------------------------------------------------------------------
-            self.update_cups_bottom(detected_markers)
+            if self.hand_tracking_enabled:
+                self.update_cups_bottom(detected_markers)
 
-            # Récupérer les mains et mettre à jour le timestamp de fraîcheur
-            hands = self.get_hands() if self.get_hands else []
-            if any(h.get("ts_ms", -1) != -1 for h in hands):
-                self._hands_last_frame = self._frame_counter
+                hands = self.get_hands() if self.get_hands else []
+                if any(h.get("ts_ms", -1) != -1 for h in hands):
+                    self._hands_last_frame = self._frame_counter
 
-            self.associate_hands_to_cups(hands)
+                self.associate_hands_to_cups(hands)
+
+            else:
+                # Mode cam_bottom uniquement :
+                # - pas de tracking main
+                # - pas de transition orange
+                # - pas de bleu
+                # - uniquement les tags visibles en rouge
+                self.cups = {
+                    marker_id: {
+                        "state": "POSEE",
+                        "last_pos": pos.copy(),
+                        "lost_frames": 0,
+                        "carrier_hand_id": None,
+                        "has_active_hand": False,
+                        "lift_frames": 0,
+                        "pos_is_graph_space": False,
+                    }
+                    for marker_id, pos in detected_markers.items()
+                }
 
             # Dessin des anneaux
             for marker_id, cup in self.cups.items():

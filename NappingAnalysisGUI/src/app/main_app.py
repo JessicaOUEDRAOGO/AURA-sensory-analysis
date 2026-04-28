@@ -130,14 +130,43 @@ class MainApp(QtWidgets.QMainWindow):
 
         
 
-        self.hand_thread = HandTrackingThread(camera_id=0)  # TOP
-        self.hand_thread.hands_signal.connect(self.update_hands)
-        self.hand_thread.start()
-
+        self.hand_thread = None
         self.current_hands = []
     
     def update_hands(self, hands):
         self.current_hands = hands
+
+    def start_hand_tracking(self):
+        if self.hand_thread is not None and self.hand_thread.isRunning():
+            return
+
+        print("[MAIN] Démarrage HandTrackingThread")
+        self.current_hands = []
+
+        self.hand_thread = HandTrackingThread(camera_id=self.camera_top_id)
+        self.hand_thread.hands_signal.connect(self.update_hands)
+        self.hand_thread.finished.connect(self._on_hand_thread_finished)
+        self.hand_thread.start()
+
+
+    def stop_hand_tracking(self):
+        if self.hand_thread is None:
+            self.current_hands = []
+            return
+
+        print("[MAIN] Arrêt HandTrackingThread")
+        self.hand_thread.running = False
+        self.hand_thread.quit()
+        self.hand_thread.wait(1500)
+
+        self.hand_thread = None
+        self.current_hands = []
+
+
+    def _on_hand_thread_finished(self):
+        print("[MAIN] HandTrackingThread terminé")
+        self.hand_thread = None
+        self.current_hands = []
 
     def init_default_protocol(self):
         repo = ProtocolRepository()
@@ -158,7 +187,10 @@ class MainApp(QtWidgets.QMainWindow):
 
         except Exception as e:
             print("Erreur init protocole :", e)
-
+    
+    def closeEvent(self, event):
+        self.stop_hand_tracking()
+        super().closeEvent(event)
 
 def main():
     print("\n============================================================")

@@ -296,7 +296,12 @@ class RecordWindow(QtWidgets.QWidget):
         print("modules_enabled:", p_db.modules_enabled)
         print("assets:", len(assets), "steps:", len(steps))
         print("=============================")
+        hand_tracking_on = bool((p_db.modules_enabled or {}).get("hand_tracking", False))
 
+        if hand_tracking_on:
+            self.parent.start_hand_tracking()
+        else:
+            self.parent.stop_hand_tracking()
         # Init algo — les JSON de calibration sont chargés dans __init__
         self.algorithm_analysis = Algorithm_Analysis(
             parent=self,
@@ -310,7 +315,10 @@ class RecordWindow(QtWidgets.QWidget):
             timeline_steps=steps,
             protocol=p_db
         )
-        self.algorithm_analysis.set_hands_provider(lambda: self.parent.current_hands)
+        if hand_tracking_on:
+            self.algorithm_analysis.set_hands_provider(lambda: self.parent.current_hands)
+        else:
+            self.algorithm_analysis.set_hands_provider(None)
         self.algorithm_analysis.set_show_grid(self.checkBox_DisplayGrid.isChecked())
 
         self.key_handler.algorithm_analysis = self.algorithm_analysis
@@ -373,6 +381,7 @@ class RecordWindow(QtWidgets.QWidget):
 
         if self.camera_manager:
             self.camera_manager.close_camera()
+            self.parent.stop_hand_tracking()
 
         if self.algorithm_thread is not None:
             try:
