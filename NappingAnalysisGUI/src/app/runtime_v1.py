@@ -569,7 +569,10 @@ class Algorithm_Analysis(QObject):
         age = self._frame_counter - self._hands_last_frame
         hands_are_fresh = (age <= self.HANDS_MAX_AGE_FRAMES)
 
+
         for marker_id, cup in self.cups.items():
+            if not hasattr(self, "_last_hand_ts"):
+                self._last_hand_ts = {}
             if cup["state"] not in ("SOULEVEE", "PEUT_ETRE_SOULEVEE"):
                 cup["carrier_hand_id"] = None
                 cup["has_active_hand"] = False
@@ -607,7 +610,12 @@ class Algorithm_Analysis(QObject):
                     vy    = hand.get("vy", 0.0)
                     vel   = np.array([vx, vy], dtype=np.float32)
                     speed = float(np.linalg.norm(vel))
+                    ts = hand.get("ts_ms", -1)
+                    last_ts = self._last_hand_ts.get(marker_id, -1)
 
+                    # Ignore si déjà utilisée
+                    if ts != -1 and ts == last_ts:
+                        continue
                     # Position prédite à +1 frame
                     hand_predicted     = hand_pos + vel
                     dist               = float(np.linalg.norm(hand_predicted - cup_graph))
@@ -626,7 +634,7 @@ class Algorithm_Analysis(QObject):
                 vx  = best_hand.get("vx", 0.0)
                 vy  = best_hand.get("vy", 0.0)
                 predicted_pos = np.array(
-                    [best_hand["x"] + vx, best_hand["y"] + vy], dtype=np.float32
+                    [best_hand["x"], best_hand["y"]], dtype=np.float32
                 )
                 cup["carrier_hand_id"]    = hid
                 cup["has_active_hand"]    = True
@@ -636,7 +644,7 @@ class Algorithm_Analysis(QObject):
                 cup["pos_is_graph_space"] = True
                 # Recharger le lock à chaque association réussie
                 self._carrier_lock_frames[marker_id] = self.CARRIER_LOCK_DURATION
-
+                self._last_hand_ts[marker_id] = best_hand.get("ts_ms", -1)
             # ------------------------------------------------------------------
             # Association échouée — carrier lock
             # ------------------------------------------------------------------

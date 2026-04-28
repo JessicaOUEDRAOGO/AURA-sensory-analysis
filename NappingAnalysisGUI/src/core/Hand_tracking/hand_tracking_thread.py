@@ -13,95 +13,177 @@ from src.core.utils.paths import config_path
 
 
 # ---------------------------------------------------------------------------
-# Filtre de Kalman 2D pour le suivi d'une main
+# Filtre de Kalman 2D — position + vitesse
 # ---------------------------------------------------------------------------
-# Modélise l'état [x, y, vx, vy] — position + vitesse en pixels graphe.
-#
-# Avantages vs la moyenne glissante adaptative précédente :
-#   • Sépare automatiquement le bruit de mesure du mouvement réel.
-#   • Pas de délai fixe : la fenêtre effective s'adapte à l'incertitude.
-#   • Fournit la vélocité estimée directement, sans recalcul dans Algorithm_Analysis.
-#   • Peut prédire la position quand MediaPipe manque un frame.
-#
-# Réglage rapide :
-#   process_noise (Q) : augmenter si le suivi décroche en accélération rapide.
-#   measure_noise (R) : augmenter si le point reste tremblant.
-#   Valeurs de départ raisonnables : Q=1e-2, R=5.0
-# ---------------------------------------------------------------------------
-
 class KalmanHand:
-    """Filtre de Kalman 2D pour une main (position + vitesse)."""
-
     def __init__(self, x: float, y: float,
-                 process_noise: float = 1e-2,
-                 measure_noise: float = 5.0):
+                 process_noise: float = 5e-2,
+                 measure_noise: float = 3.0):
         self.kf = cv2.KalmanFilter(4, 2)
-
-        # Modèle vitesse constante (dt = 1 frame)
         self.kf.transitionMatrix = np.array([
             [1, 0, 1, 0],
             [0, 1, 0, 1],
             [0, 0, 1, 0],
             [0, 0, 0, 1],
         ], dtype=np.float32)
-
-        # On observe uniquement x et y
         self.kf.measurementMatrix = np.array([
             [1, 0, 0, 0],
             [0, 1, 0, 0],
         ], dtype=np.float32)
-
         self.kf.processNoiseCov     = np.eye(4, dtype=np.float32) * process_noise
         self.kf.measurementNoiseCov = np.eye(2, dtype=np.float32) * measure_noise
         self.kf.errorCovPost        = np.eye(4, dtype=np.float32) * 100.0
-
-        self.kf.statePost = np.array(
-            [[x], [y], [0.0], [0.0]], dtype=np.float32
-        )
+        self.kf.statePost = np.array([[x], [y], [0.], [0.]], dtype=np.float32)
 
     def update(self, x: float, y: float) -> np.ndarray:
-        """Intègre une mesure → retourne position filtrée [x, y]."""
         self.kf.predict()
-        corrected = self.kf.correct(np.array([[x], [y]], dtype=np.float32))
-        return np.array([corrected[0, 0], corrected[1, 0]], dtype=np.float32)
+        c = self.kf.correct(np.array([[x], [y]], dtype=np.float32))
+        return np.array([c[0, 0], c[1, 0]], dtype=np.float32)
 
     def predict_only(self) -> np.ndarray:
-        """
-        Prédit la position au frame suivant SANS mesure.
-        Utile lors des sauts de détection MediaPipe (1–2 frames).
-        """
-        predicted = self.kf.predict()
-        return np.array([predicted[0, 0], predicted[1, 0]], dtype=np.float32)
+        p = self.kf.predict()
+        return np.array([p[0, 0], p[1, 0]], dtype=np.float32)
 
     @property
     def velocity(self) -> np.ndarray:
-        """Vélocité courante estimée [vx, vy] en pixels graphe / frame."""
         s = self.kf.statePost
-        return np.array([s[2, 0], s[3, 0]], dtype=np.float32)
+        return np.clip(
+            np.array([s[2, 0], s[3, 0]], dtype=np.float32),
+            -80, 80   # sécurité anti-spike
+        )
+
+    @property
+    def position(self) -> np.ndarray:
+        s = self.kf.statePost
+        return np.array([s[0, 0], s[1, 0]], dtype=np.float32)
 
 
+# ---------------------------------------------------------------------------
+# Gestionnaire de slots de mains
+# ---------------------------------------------------------------------------
+# Problème résolu : l'ID MediaPipe (index dans la liste) change aléatoirement
+# quand une main entre/sort du champ. L'ID basé sur gauche/droite crée un
+# saut quand la main traverse x=350.
+#
+# Solution : on maintient un pool de "slots" (max MAX_HANDS slots actifs).
+# Chaque slot a une position Kalman. À chaque frame, on associe les détections
+# MediaPipe aux slots existants par distance minimale (Hungarian simplifié).
+# Un slot non alimenté pendant MAX_MISSING_FRAMES est supprimé.
+# L'ID émis est l'index du slot → stable tant que la main reste dans le champ.
+# ---------------------------------------------------------------------------
+class HandSlotManager:
+    MAX_HANDS         = 2
+    MAX_MISSING_FRAMES = 8    # frames avant suppression du slot
+    MATCH_THRESHOLD   = 150   # pixels graphe — au-delà on crée un nouveau slot
+
+    def __init__(self, process_noise: float, measure_noise: float):
+        self._process_noise = process_noise
+        self._measure_noise = measure_noise
+        # slot_id → { "kf": KalmanHand, "missing": int }
+        self._slots: dict[int, dict] = {}
+        self._next_id = 0
+
+    def update(self, raw_detections: list[tuple[float, float]]) -> list[dict]:
+        """
+        raw_detections : liste de (xg, yg) mesurés ce frame.
+        Retourne la liste des slots mis à jour (ou prédits).
+        """
+        # --- Associer chaque détection au slot le plus proche ---
+        unmatched_detections = list(range(len(raw_detections)))
+        matched_slots        = set()
+
+        if self._slots and raw_detections:
+            # Matrice de coûts : slots × détections
+            slot_ids = list(self._slots.keys())
+            costs = np.full((len(slot_ids), len(raw_detections)), np.inf)
+
+            for si, sid in enumerate(slot_ids):
+                slot_pos = self._slots[sid]["kf"].position
+                for di, (xg, yg) in enumerate(raw_detections):
+                    det_pos = np.array([xg, yg], dtype=np.float32)
+                    costs[si, di] = float(np.linalg.norm(slot_pos - det_pos))
+
+            # Greedy matching (suffisant pour MAX_HANDS = 2)
+            while True:
+                if costs.size == 0:
+                    break
+                si, di = np.unravel_index(np.argmin(costs), costs.shape)
+                if costs[si, di] > self.MATCH_THRESHOLD:
+                    break   # toutes les associations restantes sont trop loin
+                sid = slot_ids[si]
+                xg, yg = raw_detections[di]
+                self._slots[sid]["kf"].update(xg, yg)
+                self._slots[sid]["missing"] = 0
+                matched_slots.add(sid)
+                unmatched_detections.remove(di)
+                # Masquer ligne et colonne pour ne pas les réutiliser
+                costs[si, :]  = np.inf
+                costs[:, di]  = np.inf
+
+        # --- Créer un slot pour chaque détection non associée ---
+        for di in unmatched_detections:
+            if len(self._slots) >= self.MAX_HANDS:
+                break   # limite atteinte
+            xg, yg = raw_detections[di]
+            sid = self._next_id
+            self._next_id += 1
+            self._slots[sid] = {
+                "kf":      KalmanHand(xg, yg, self._process_noise, self._measure_noise),
+                "missing": 0,
+            }
+            self._slots[sid]["kf"].update(xg, yg)  # première mise à jour
+            matched_slots.add(sid)
+
+        # --- Prédire / supprimer les slots non alimentés ---
+        to_delete = []
+        for sid, slot in self._slots.items():
+            if sid in matched_slots:
+                continue
+            slot["missing"] += 1
+            if slot["missing"] > self.MAX_MISSING_FRAMES:
+                to_delete.append(sid)
+            else:
+                slot["kf"].predict_only()  # avance le modèle sans correction
+
+        for sid in to_delete:
+            del self._slots[sid]
+
+        # --- Construire la sortie ---
+        result = []
+        for sid, slot in self._slots.items():
+            pos = slot["kf"].position
+            vel = slot["kf"].velocity
+            result.append({
+                "id":        sid,
+                "x":         float(pos[0]),
+                "y":         float(pos[1]),
+                "vx":        float(vel[0]),
+                "vy":        float(vel[1]),
+                "missing":   slot["missing"],
+            })
+        return result
+
+
+# ---------------------------------------------------------------------------
+# Thread principal
+# ---------------------------------------------------------------------------
 class HandTrackingThread(QThread):
     """
     Thread de suivi des mains (caméra top).
 
     Chaque entrée émise dans hands_signal :
         {
-            "id":    int,    identifiant MediaPipe (0 ou 1)
-            "x":     float,  position filtrée Kalman en pixels graphe
-            "y":     float,
-            "vx":    float,  vélocité Kalman (pixels graphe / frame)
-            "vy":    float,
-            "ts_ms": int,    timestamp monotone — permet à Algorithm_Analysis
-                             de détecter si la donnée est trop ancienne
+            "id":      int,    ID de slot stable (ne change pas en cours de déplacement)
+            "x":       float,  position filtrée Kalman en pixels graphe
+            "y":       float,
+            "vx":      float,  vélocité Kalman (pixels graphe / frame top)
+            "vy":      float,
+            "missing": int,    0 si mesure réelle, >0 si prédiction
+            "ts_ms":   int,    timestamp monotone du thread
         }
     """
-
     frame_signal = pyqtSignal(object)
     hands_signal = pyqtSignal(object)
-
-    # Frames consécutifs sans détection avant suppression du filtre Kalman.
-    # Valeur haute → moins de clignotements sur les occultations brèves.
-    MAX_MISSING_FRAMES = 8
 
     def __init__(self, camera_id: int = 0,
                  kalman_process_noise: float = 5e-2,
@@ -109,25 +191,20 @@ class HandTrackingThread(QThread):
         super().__init__()
 
         BASE_DIR = Path(__file__).resolve().parent
-
         self.MODEL_PATH  = BASE_DIR / "hand_landmarker.task"
         self.POSE_PATH   = Path("config/camtop_table_pose.json")
         self.OUTPUT_PATH = config_path("hands_positions.json")
 
-        self.camera_id = camera_id
-        self.running   = True
-
+        self.camera_id     = camera_id
+        self.running       = True
         self.TABLE_SIZE_MM = 597.0
         self.GRID_SIZE     = 700
 
-        self._kf_process_noise = kalman_process_noise
-        self._kf_measure_noise = kalman_measure_noise
+        self._slot_manager = HandSlotManager(
+            process_noise=kalman_process_noise,
+            measure_noise=kalman_measure_noise,
+        )
 
-        # Un filtre Kalman + compteur de frames manquants par main
-        self._kalman_filters: dict[int, KalmanHand] = {}
-        self._missing_frames: dict[int, int]        = {}
-
-        # Résultat MediaPipe LIVE_STREAM (thread-safe)
         import threading
         self._result_lock   = threading.Lock()
         self._latest_result = None
@@ -143,16 +220,12 @@ class HandTrackingThread(QThread):
         )
         self.detector = vision.HandLandmarker.create_from_options(options)
 
-    # ======================================================================
-    # Callback MediaPipe
-    # ======================================================================
+    # --- Callback MediaPipe ---
     def _on_result(self, result, output_image, timestamp_ms):
         with self._result_lock:
             self._latest_result = result
 
-    # ======================================================================
-    # Calibration
-    # ======================================================================
+    # --- Calibration ---
     def _load_pose(self):
         data = json.load(open(self.POSE_PATH))
         return (
@@ -161,9 +234,7 @@ class HandTrackingThread(QThread):
             np.array(data["camera_matrix"], dtype=np.float64),
         )
 
-    # ======================================================================
-    # Géométrie pixel → espace graphe
-    # ======================================================================
+    # --- Géométrie ---
     def _pixel_to_ray(self, u, v):
         ray = np.linalg.inv(self.K) @ np.array([u, v, 1.0])
         return ray / np.linalg.norm(ray)
@@ -197,10 +268,7 @@ class HandTrackingThread(QThread):
             (y_mm / self.TABLE_SIZE_MM) * self.GRID_SIZE,
         )
 
-    # ======================================================================
-    # Point de grip (centroïde pondéré MCP + palme)
-    # Plus stable que pouce+index lors des mouvements rapides.
-    # ======================================================================
+    # --- Point de grip (centroïde MCP + palme, plus stable que pouce+index) ---
     def _get_grip_point(self, hand, w, h):
         IDX     = [(5, 1.2), (9, 1.5), (13, 1.2), (17, 0.8), (0, 0.8)]
         total_w = sum(wi for _, wi in IDX)
@@ -211,68 +279,14 @@ class HandTrackingThread(QThread):
             y_sum += lm.y * h * wi
         return np.array([x_sum / total_w, y_sum / total_w], dtype=np.float32)
 
-    # ======================================================================
-    # Gestion des filtres Kalman
-    # ======================================================================
-    def _get_or_create_kalman(self, hand_id: int, x: float, y: float) -> KalmanHand:
-        if hand_id not in self._kalman_filters:
-            self._kalman_filters[hand_id] = KalmanHand(
-                x, y,
-                process_noise=self._kf_process_noise,
-                measure_noise=self._kf_measure_noise,
-            )
-            self._missing_frames[hand_id] = 0
-        return self._kalman_filters[hand_id]
-
-    def _handle_missing_hands(self, detected_ids: set) -> list:
-        """
-        Pour chaque main non détectée ce frame :
-          - si <= 2 frames manquants → prédiction Kalman (continuité)
-          - au-delà de MAX_MISSING_FRAMES → suppression du filtre
-        Retourne la liste des entrées prédites à ajouter à hands_data.
-        """
-        predicted_entries = []
-        for hid in list(self._kalman_filters.keys()):
-            if hid in detected_ids:
-                continue
-            self._missing_frames[hid] = self._missing_frames.get(hid, 0) + 1
-            n_miss = self._missing_frames[hid]
-
-            if n_miss <= 2:
-                # Court saut de détection → on prédit pour éviter le clignotement
-                kf   = self._kalman_filters[hid]
-                pred = kf.predict_only()
-                vel  = kf.velocity
-                # clamp vitesse pour éviter spikes
-                vel = np.clip(vel, -50, 50)
-                predicted_entries.append({
-                    "id":        hid,
-                    "x":         float(pred[0]),
-                    "y":         float(pred[1]),
-                    "vx":        float(vel[0]),
-                    "vy":        float(vel[1]),
-                    "ts_ms":     -1,          # -1 = position prédite, pas mesurée
-                    "predicted": True,
-                })
-            elif n_miss > self.MAX_MISSING_FRAMES:
-                del self._kalman_filters[hid]
-                del self._missing_frames[hid]
-
-        return predicted_entries
-
-    # ======================================================================
-    # Boucle principale
-    # ======================================================================
+    # --- Boucle principale ---
     def run(self):
         cap = cv2.VideoCapture(self.camera_id, cv2.CAP_DSHOW)
         cap.set(cv2.CAP_PROP_FRAME_WIDTH,  1920)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
-        cap.set(cv2.CAP_PROP_BUFFERSIZE,   1)    # latence minimale
+        cap.set(cv2.CAP_PROP_BUFFERSIZE,   1)
 
-        print(
-            f"[HAND THREAD] Camera {self.camera_id} – Kalman "
-            f"(Q={self._kf_process_noise}, R={self._kf_measure_noise})"
-        )
+        print(f"[HAND THREAD] Camera {self.camera_id} – SlotManager + Kalman active")
         if not cap.isOpened():
             print("[HAND THREAD ERROR] Camera not opened")
             return
@@ -294,39 +308,24 @@ class HandTrackingThread(QThread):
             with self._result_lock:
                 result = self._latest_result
 
-            hands_data   = []
-            detected_ids = set()
-
+            # Collecter les détections brutes de ce frame
+            raw_detections: list[tuple[float, float]] = []
             if result and result.hand_landmarks:
-                for _, hand in enumerate(result.hand_landmarks):
+                for hand in result.hand_landmarks:
                     grip = self._get_grip_point(hand, w, h)
                     res  = self._pixel_to_table(grip[0], grip[1])
                     if res is None:
                         continue
-
                     x_mm, y_mm = self._flip_y(*res)
                     xg, yg     = self._mm_to_graph(x_mm, y_mm)
-                    # ID stable basé sur la position (gauche / droite)
-                    hand_id = 0 if xg < (self.GRID_SIZE / 2) else 1
+                    raw_detections.append((xg, yg))
 
-                    kf = self._get_or_create_kalman(hand_id, xg, yg)
-                    filtered = kf.update(xg, yg)
-                    vel      = kf.velocity
+            # Mise à jour du gestionnaire de slots (association + Kalman)
+            hands_data = self._slot_manager.update(raw_detections)
 
-                    detected_ids.add(hand_id)
-                    self._missing_frames[hand_id] = 0
-
-                    hands_data.append({
-                        "id": hand_id,
-                        "x":     float(filtered[0]),
-                        "y":     float(filtered[1]),
-                        "vx":    float(vel[0]),
-                        "vy":    float(vel[1]),
-                        "ts_ms": timestamp_ms,
-                    })
-
-            # Prédiction pour les mains brièvement perdues
-            hands_data.extend(self._handle_missing_hands(detected_ids))
+            # Ajouter le timestamp
+            for h_entry in hands_data:
+                h_entry["ts_ms"] = timestamp_ms
 
             self.hands_signal.emit(hands_data)
             self.frame_signal.emit(frame)
