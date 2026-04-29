@@ -527,20 +527,36 @@ class Algorithm_Analysis(QObject):
                     "carrier_hand_id":    None,
                     "has_active_hand":    False,
                     "lift_frames":        0,
+                    "pose_frames":        0,   # NOUVEAU
                     "pos_is_graph_space": False,
                 }
-                # Bug 4 fix : initialisation explicite du lock pour ce marker
                 self._carrier_lock_frames[marker_id] = 0
 
             cup = self.cups[marker_id]
-            cup["last_pos"]           = pos.copy()
-            cup["lost_frames"]        = 0
-            cup["lift_frames"]        = 0
-            cup["carrier_hand_id"]    = None
-            cup["state"]              = "POSEE"
-            cup["pos_is_graph_space"] = False
-            # Tasse reposée → réinitialiser le lock
-            self._carrier_lock_frames[marker_id] = 0
+            cup["last_pos"]    = pos.copy()
+            cup["lost_frames"] = 0
+
+            if cup["state"] in ("SOULEVEE", "PEUT_ETRE_SOULEVEE"):
+                # Confirmer la pose sur N frames consécutives
+                N_POSE_CONFIRM = getattr(self, "N_POSE_CONFIRM", 4)
+                cup["pose_frames"] = cup.get("pose_frames", 0) + 1
+                if cup["pose_frames"] >= N_POSE_CONFIRM:
+                    cup["lift_frames"]        = 0
+                    cup["pose_frames"]        = 0
+                    cup["carrier_hand_id"]    = None
+                    cup["state"]              = "POSEE"
+                    cup["pos_is_graph_space"] = False
+                    self._carrier_lock_frames[marker_id] = 0
+                # Sinon : on garde l'état SOULEVEE le temps de confirmer,
+                # mais on met à jour la position depuis ArUco (plus fiable)
+                cup["pos_is_graph_space"] = False
+            else:
+                cup["lift_frames"]        = 0
+                cup["pose_frames"]        = 0
+                cup["carrier_hand_id"]    = None
+                cup["state"]              = "POSEE"
+                cup["pos_is_graph_space"] = False
+                self._carrier_lock_frames[marker_id] = 0
 
         for marker_id, cup in self.cups.items():
             if marker_id in detected_markers:
@@ -587,7 +603,14 @@ class Algorithm_Analysis(QObject):
                 cup["has_active_hand"] = False
                 self._carrier_lock_frames[marker_id] = 0
                 continue
-
+            # forcer la sortie du tracking main immédiatement
+            if cup.get("lost_frames", 0) == 0:
+                # ArUco voit la tasse ce frame → priorité absolue à ArUco
+                cup["carrier_hand_id"] = None
+                cup["has_active_hand"] = False
+                cup["pos_is_graph_space"] = False
+                self._carrier_lock_frames[marker_id] = 0
+                continue
             # Position tasse en espace graphe
             if cup.get("pos_is_graph_space", False):
                 cup_graph = np.array(cup["last_pos"], dtype=np.float32)
