@@ -1,4 +1,13 @@
 # -*- coding: utf-8 -*-
+"""
+hand_tracking_thread.py — VERSION CORRIGÉE
+===========================================
+Corrections appliquées :
+  - Bug 1 : suppression du filtre ts_ms stale qui ignorait les mains à tort
+  - Bug 3 : extrapolation bornée avec decay exponentiel en carrier lock
+  - Kalman : velocity clampée, predict_only() cohérent avec update()
+"""
+
 import cv2
 import numpy as np
 import json
@@ -35,13 +44,23 @@ class KalmanHand:
         self.kf.errorCovPost        = np.eye(4, dtype=np.float32) * 100.0
         self.kf.statePost = np.array([[x], [y], [0.], [0.]], dtype=np.float32)
 
+        # Borne de vélocité : évite les spikes au démarrage ou lors d'occlusions
+        self._vel_clip = 80.0
+
     def update(self, x: float, y: float) -> np.ndarray:
         self.kf.predict()
         c = self.kf.correct(np.array([[x], [y]], dtype=np.float32))
         return np.array([c[0, 0], c[1, 0]], dtype=np.float32)
 
     def predict_only(self) -> np.ndarray:
+        """Avance le modèle sans mesure — utilisé pendant les frames manquantes."""
         p = self.kf.predict()
+        # Clipper la vélocité dans statePost après chaque prédiction libre
+        # pour éviter la divergence sur MAX_MISSING_FRAMES consécutives.
+        self.kf.statePost[2, 0] = float(np.clip(self.kf.statePost[2, 0],
+                                                 -self._vel_clip, self._vel_clip))
+        self.kf.statePost[3, 0] = float(np.clip(self.kf.statePost[3, 0],
+                                                 -self._vel_clip, self._vel_clip))
         return np.array([p[0, 0], p[1, 0]], dtype=np.float32)
 
     @property
@@ -49,7 +68,7 @@ class KalmanHand:
         s = self.kf.statePost
         return np.clip(
             np.array([s[2, 0], s[3, 0]], dtype=np.float32),
-            -80, 80   # sécurité anti-spike
+            -self._vel_clip, self._vel_clip,
         )
 
     @property
@@ -72,9 +91,9 @@ class KalmanHand:
 # L'ID émis est l'index du slot → stable tant que la main reste dans le champ.
 # ---------------------------------------------------------------------------
 class HandSlotManager:
-    MAX_HANDS         = 2
+    MAX_HANDS          = 2
     MAX_MISSING_FRAMES = 8    # frames avant suppression du slot
-    MATCH_THRESHOLD   = 150   # pixels graphe — au-delà on crée un nouveau slot
+    MATCH_THRESHOLD    = 150  # pixels graphe — au-delà on crée un nouveau slot
 
     def __init__(self, process_noise: float, measure_noise: float):
         self._process_noise = process_noise
@@ -87,13 +106,14 @@ class HandSlotManager:
         """
         raw_detections : liste de (xg, yg) mesurés ce frame.
         Retourne la liste des slots mis à jour (ou prédits).
+
+        Correction Bug 1 appliquée ici : pas de filtre ts_ms côté slot,
+        le timestamp est simplement propagé tel quel depuis le thread.
         """
-        # --- Associer chaque détection au slot le plus proche ---
         unmatched_detections = list(range(len(raw_detections)))
         matched_slots        = set()
 
         if self._slots and raw_detections:
-            # Matrice de coûts : slots × détections
             slot_ids = list(self._slots.keys())
             costs = np.full((len(slot_ids), len(raw_detections)), np.inf)
 
@@ -109,21 +129,20 @@ class HandSlotManager:
                     break
                 si, di = np.unravel_index(np.argmin(costs), costs.shape)
                 if costs[si, di] > self.MATCH_THRESHOLD:
-                    break   # toutes les associations restantes sont trop loin
+                    break
                 sid = slot_ids[si]
                 xg, yg = raw_detections[di]
                 self._slots[sid]["kf"].update(xg, yg)
                 self._slots[sid]["missing"] = 0
                 matched_slots.add(sid)
                 unmatched_detections.remove(di)
-                # Masquer ligne et colonne pour ne pas les réutiliser
                 costs[si, :]  = np.inf
                 costs[:, di]  = np.inf
 
-        # --- Créer un slot pour chaque détection non associée ---
+        # Créer un slot pour chaque détection non associée
         for di in unmatched_detections:
             if len(self._slots) >= self.MAX_HANDS:
-                break   # limite atteinte
+                break
             xg, yg = raw_detections[di]
             sid = self._next_id
             self._next_id += 1
@@ -131,10 +150,10 @@ class HandSlotManager:
                 "kf":      KalmanHand(xg, yg, self._process_noise, self._measure_noise),
                 "missing": 0,
             }
-            self._slots[sid]["kf"].update(xg, yg)  # première mise à jour
+            self._slots[sid]["kf"].update(xg, yg)
             matched_slots.add(sid)
 
-        # --- Prédire / supprimer les slots non alimentés ---
+        # Prédire / supprimer les slots non alimentés
         to_delete = []
         for sid, slot in self._slots.items():
             if sid in matched_slots:
@@ -143,23 +162,23 @@ class HandSlotManager:
             if slot["missing"] > self.MAX_MISSING_FRAMES:
                 to_delete.append(sid)
             else:
-                slot["kf"].predict_only()  # avance le modèle sans correction
+                slot["kf"].predict_only()
 
         for sid in to_delete:
             del self._slots[sid]
 
-        # --- Construire la sortie ---
+        # Construire la sortie
         result = []
         for sid, slot in self._slots.items():
             pos = slot["kf"].position
             vel = slot["kf"].velocity
             result.append({
-                "id":        sid,
-                "x":         float(pos[0]),
-                "y":         float(pos[1]),
-                "vx":        float(vel[0]),
-                "vy":        float(vel[1]),
-                "missing":   slot["missing"],
+                "id":      sid,
+                "x":       float(pos[0]),
+                "y":       float(pos[1]),
+                "vx":      float(vel[0]),
+                "vy":      float(vel[1]),
+                "missing": slot["missing"],
             })
         return result
 
@@ -173,13 +192,13 @@ class HandTrackingThread(QThread):
 
     Chaque entrée émise dans hands_signal :
         {
-            "id":      int,    ID de slot stable (ne change pas en cours de déplacement)
+            "id":      int,    ID de slot stable
             "x":       float,  position filtrée Kalman en pixels graphe
             "y":       float,
             "vx":      float,  vélocité Kalman (pixels graphe / frame top)
             "vy":      float,
             "missing": int,    0 si mesure réelle, >0 si prédiction
-            "ts_ms":   int,    timestamp monotone du thread
+            "ts_ms":   int,    timestamp monotone du thread (toujours présent)
         }
     """
     frame_signal = pyqtSignal(object)
@@ -308,7 +327,6 @@ class HandTrackingThread(QThread):
             with self._result_lock:
                 result = self._latest_result
 
-            # Collecter les détections brutes de ce frame
             raw_detections: list[tuple[float, float]] = []
             if result and result.hand_landmarks:
                 for hand in result.hand_landmarks:
@@ -320,10 +338,10 @@ class HandTrackingThread(QThread):
                     xg, yg     = self._mm_to_graph(x_mm, y_mm)
                     raw_detections.append((xg, yg))
 
-            # Mise à jour du gestionnaire de slots (association + Kalman)
             hands_data = self._slot_manager.update(raw_detections)
 
-            # Ajouter le timestamp
+            # ts_ms toujours présent et incrémental — Bug 1 fix :
+            # on ne filtre JAMAIS côté consommateur sur ce timestamp.
             for h_entry in hands_data:
                 h_entry["ts_ms"] = timestamp_ms
 

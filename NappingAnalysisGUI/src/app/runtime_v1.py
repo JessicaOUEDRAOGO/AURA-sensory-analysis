@@ -1,4 +1,16 @@
 # -*- coding: utf-8 -*-
+"""
+algorithm_analysis.py — VERSION CORRIGÉE
+=========================================
+Corrections appliquées :
+  - Bug 2 : staleness check corrigée (seuil 10 frames, condition sur `hands` non vide)
+  - Bug 3 : extrapolation bornée avec decay exponentiel quand la main est perdue
+  - Bug 4 : _carrier_lock_frames initialisé lors de la création d'une nouvelle tasse
+  - Bug 5 : seuil adaptatif filtré par main pendant la boucle, pas après
+  - Bug 6 : interpolation 50 % lors du premier passage en graph space (anti-saccade)
+  - Bug 1 (côté algo) : suppression du filtre ts_ms stale dans associate_hands_to_cups
+"""
+
 import os
 import cv2
 import json
@@ -114,29 +126,21 @@ class Algorithm_Analysis(QObject):
         self.DIST_RECOVERY       = 60
         self.get_hands           = None
 
-        # ------------------------------------------------------------------
         # Seuils d'association adaptative
-        # ------------------------------------------------------------------
         self.VELOCITY_FAST_THRESHOLD = 10    # px graphe/frame
         self.DIST_HAND_FAST          = 350   # rayon élargi pour mains rapides
 
-        # ------------------------------------------------------------------
         # Carrier lock — nombre de frames de grâce après perte d'association
-        # ------------------------------------------------------------------
         self.CARRIER_LOCK_DURATION: int = 15
         self._carrier_lock_frames: dict[int, int] = {}
 
-        # ------------------------------------------------------------------
-        # Staleness check — âge max (en frames) d'une donnée main acceptable
-        #
-        # cam_top tourne à ~30 fps, cam_bottom à ~100 fps.
-        # En 100/30 ≈ 3 frames cam_bottom, la position main change d'un frame
-        # cam_top.  On tolère jusqu'à HANDS_MAX_AGE_FRAMES frames cam_bottom
-        # sans nouvelle donnée avant de considérer la position périmée.
-        # ------------------------------------------------------------------
-        self.HANDS_MAX_AGE_FRAMES: int = 6
-        self._hands_last_frame:    int = -999   # frame cam_bottom de la dernière màj mains
-        self._frame_counter:       int = 0      # incrémenté à chaque iteration cam_bottom
+        # ---------------------------------------------------------------
+        # Bug 2 fix : seuil porté à 10 frames (ratio cam_bottom/cam_top
+        # ≈ 100/30 ≈ 3, avec marge ×3 pour les variations de charge).
+        # ---------------------------------------------------------------
+        self.HANDS_MAX_AGE_FRAMES: int = 10  # était 6
+        self._hands_last_frame:    int = -999
+        self._frame_counter:       int = 0
 
     # ======================================================================
     # Provider mains
@@ -508,7 +512,9 @@ class Algorithm_Analysis(QObject):
     def update_cups_bottom(self, detected_markers: dict):
         """
         Met à jour l'état des tasses depuis les détections ArUco (cam_bottom).
-        Réinitialise aussi le carrier lock quand la tasse est reposée.
+
+        Bug 4 fix : _carrier_lock_frames initialisé à 0 pour chaque nouveau
+        marker afin d'éviter une valeur stale héritée d'un ID recyclé.
         """
         N_LIFT_CONFIRM = getattr(self, "N_LIFT_CONFIRM", 3)
 
@@ -523,6 +529,9 @@ class Algorithm_Analysis(QObject):
                     "lift_frames":        0,
                     "pos_is_graph_space": False,
                 }
+                # Bug 4 fix : initialisation explicite du lock pour ce marker
+                self._carrier_lock_frames[marker_id] = 0
+
             cup = self.cups[marker_id]
             cup["last_pos"]           = pos.copy()
             cup["lost_frames"]        = 0
@@ -552,28 +561,27 @@ class Algorithm_Analysis(QObject):
         """
         Associe les mains (cam_top) aux tasses soulevées.
 
-        Nouveautés vs version précédente :
-          1. Vélocité lue directement depuis le dict main (fournie par KalmanHand).
-             Plus de recalcul en différence finie → plus stable.
-          2. Staleness check : si la dernière màj mains date de plus de
-             HANDS_MAX_AGE_FRAMES frames cam_bottom, les données sont
-             considérées trop anciennes et ignorées (carrier lock prend le relais).
-          3. Carrier lock renforcé (CARRIER_LOCK_DURATION = 12) :
-             quand le verrou est actif et que la main n'est plus détectée,
-             on maintient la dernière position connue + prédiction vélocité.
+        Corrections appliquées vs version précédente :
+          Bug 1 fix : suppression du filtre ts_ms stale — la staleness globale
+                      (hands_are_fresh) suffit ; filtrer par ts identique ignorait
+                      les mains valides quand cam_top était plus lente que cam_bottom.
+          Bug 2 fix : seuil HANDS_MAX_AGE_FRAMES = 10, condition sur `hands` non vide.
+          Bug 3 fix : extrapolation avec decay exponentiel et bornage sur [0, grid_size].
+          Bug 5 fix : seuil adaptatif appliqué par main dans la boucle, pas après.
+          Bug 6 fix : interpolation 50 % lors du premier passage en graph space.
         """
         DIST_CONFIRM = getattr(self, "DIST_HAND_CONFIRM",   180)
         DIST_NORMAL  = getattr(self, "DIST_HAND_THRESHOLD", 120)
         DIST_FAST    = getattr(self, "DIST_HAND_FAST",      280)
 
-        # Staleness check : données mains trop anciennes ?
+        # ---------------------------------------------------------------
+        # Bug 2 fix : on recharge _hands_last_frame dès qu'on reçoit
+        # quelque chose (liste non vide), indépendamment des ts_ms.
+        # ---------------------------------------------------------------
         age = self._frame_counter - self._hands_last_frame
         hands_are_fresh = (age <= self.HANDS_MAX_AGE_FRAMES)
 
-
         for marker_id, cup in self.cups.items():
-            if not hasattr(self, "_last_hand_ts"):
-                self._last_hand_ts = {}
             if cup["state"] not in ("SOULEVEE", "PEUT_ETRE_SOULEVEE"):
                 cup["carrier_hand_id"] = None
                 cup["has_active_hand"] = False
@@ -582,7 +590,7 @@ class Algorithm_Analysis(QObject):
 
             # Position tasse en espace graphe
             if cup.get("pos_is_graph_space", False):
-                cup_graph = cup["last_pos"].copy()
+                cup_graph = np.array(cup["last_pos"], dtype=np.float32)
             else:
                 x_mm, y_mm = cup["last_pos"]
                 cup_graph  = np.array([
@@ -595,57 +603,62 @@ class Algorithm_Analysis(QObject):
             )
 
             # ------------------------------------------------------------------
-            # Recherche de la meilleure main (seulement si données fraîches)
+            # Bug 5 fix : recherche de la meilleure main avec filtre de seuil
+            # appliqué PAR MAIN dans la boucle (pas après sur best_dist global).
+            # Bug 1 fix : suppression du filtre ts_ms stale.
             # ------------------------------------------------------------------
-            best_hand      = None
-            best_dist      = float("inf")
-            best_threshold = base_threshold
+            best_hand = None
+            best_dist = float("inf")
 
             if hands_are_fresh:
                 for hand in hands:
-                    hid      = hand["id"]
                     hand_pos = np.array([hand["x"], hand["y"]], dtype=np.float32)
+                    vx       = hand.get("vx", 0.0)
+                    vy       = hand.get("vy", 0.0)
+                    speed    = float(np.hypot(vx, vy))
 
-                    # Vélocité directement fournie par KalmanHand
-                    vx    = hand.get("vx", 0.0)
-                    vy    = hand.get("vy", 0.0)
-                    vel   = np.array([vx, vy], dtype=np.float32)
-                    speed = float(np.linalg.norm(vel))
-                    ts = hand.get("ts_ms", -1)
-                    last_ts = self._last_hand_ts.get(marker_id, -1)
-
-                    # Ignore si déjà utilisée
-                    if ts != -1 and ts == last_ts:
-                        continue
                     # Position prédite à +1 frame
-                    hand_predicted     = hand_pos + vel
+                    hand_predicted     = hand_pos + np.array([vx, vy], dtype=np.float32)
                     dist               = float(np.linalg.norm(hand_predicted - cup_graph))
                     adaptive_threshold = DIST_FAST if speed > self.VELOCITY_FAST_THRESHOLD else base_threshold
 
-                    if dist < best_dist:
-                        best_dist      = dist
-                        best_hand      = hand
-                        best_threshold = adaptive_threshold
+                    # Bug 5 fix : on filtre ici, pas après
+                    if dist < best_dist and dist < adaptive_threshold:
+                        best_dist = dist
+                        best_hand = hand
 
             # ------------------------------------------------------------------
-            # Association réussie
+            # Association réussie — best_dist < adaptive_threshold est garanti
             # ------------------------------------------------------------------
-            if best_hand is not None and best_dist < best_threshold:
-                hid = best_hand["id"]
-                vx  = best_hand.get("vx", 0.0)
-                vy  = best_hand.get("vy", 0.0)
+            if best_hand is not None:
+                vx = best_hand.get("vx", 0.0)
+                vy = best_hand.get("vy", 0.0)
                 predicted_pos = np.array(
-                    [best_hand["x"], best_hand["y"]], dtype=np.float32
+                    [best_hand["x"] + vx, best_hand["y"] + vy], dtype=np.float32
                 )
-                cup["carrier_hand_id"]    = hid
+
+                # Bug 6 fix : interpolation 50 % lors du premier passage en graph space
+                # pour éviter le saut brutal depuis les coordonnées mm vers les pixels.
+                if cup.get("pos_is_graph_space", False):
+                    # Déjà en graph space → mise à jour directe
+                    cup["last_pos"] = predicted_pos
+                else:
+                    # Première association : convertir l'ancienne pos et interpoler
+                    x_mm, y_mm = cup["last_pos"]
+                    old_graph = np.array([
+                        (x_mm / self.TABLE_SIZE_MM) * self.grid_size,
+                        (y_mm / self.TABLE_SIZE_MM) * self.grid_size,
+                    ], dtype=np.float32)
+                    cup["last_pos"] = old_graph * 0.5 + predicted_pos * 0.5
+
+                cup["carrier_hand_id"]    = best_hand["id"]
                 cup["has_active_hand"]    = True
-                cup["last_pos"]           = predicted_pos
                 cup["last_vx"]            = vx
                 cup["last_vy"]            = vy
                 cup["pos_is_graph_space"] = True
                 # Recharger le lock à chaque association réussie
                 self._carrier_lock_frames[marker_id] = self.CARRIER_LOCK_DURATION
-                self._last_hand_ts[marker_id] = best_hand.get("ts_ms", -1)
+
             # ------------------------------------------------------------------
             # Association échouée — carrier lock
             # ------------------------------------------------------------------
@@ -668,13 +681,29 @@ class Algorithm_Analysis(QObject):
                         )
                         cup["pos_is_graph_space"] = True
                         cup["has_active_hand"]    = True
+                        cup["last_vx"]            = vx
+                        cup["last_vy"]            = vy
                     else:
-                        # extrapolation si main perdue
-                        vx = cup.get("last_vx", 0.0)
-                        vy = cup.get("last_vy", 0.0)
+                        # Bug 3 fix : extrapolation avec decay exponentiel et bornage.
+                        # frames_remaining décroît de CARRIER_LOCK_DURATION à 0 ;
+                        # plus on est proche de l'expiration, plus le facteur decay → 0.
+                        frames_elapsed = self.CARRIER_LOCK_DURATION - lock + 1
+                        decay = 0.75 ** frames_elapsed
 
-                        cup["last_pos"] = cup["last_pos"] + np.array([vx, vy], dtype=np.float32)
-                        cup["has_active_hand"] = False
+                        vx_raw = cup.get("last_vx", 0.0)
+                        vy_raw = cup.get("last_vy", 0.0)
+                        vx_decayed = vx_raw * decay
+                        vy_decayed = vy_raw * decay
+
+                        new_pos = np.array(cup["last_pos"], dtype=np.float32) + \
+                                  np.array([vx_decayed, vy_decayed], dtype=np.float32)
+                        # Bornage dans l'espace graphe
+                        new_pos = np.clip(new_pos, 0.0, float(self.grid_size))
+
+                        cup["last_pos"]           = new_pos
+                        cup["last_vx"]            = vx_decayed
+                        cup["last_vy"]            = vy_decayed
+                        cup["has_active_hand"]    = False
 
                     self._carrier_lock_frames[marker_id] = lock - 1
 
@@ -781,25 +810,23 @@ class Algorithm_Analysis(QObject):
                 self.update_cups_bottom(detected_markers)
 
                 hands = self.get_hands() if self.get_hands else []
-                if any(h.get("ts_ms", -1) != -1 for h in hands):
+
+                # Bug 2 fix : on recharge _hands_last_frame dès que la liste
+                # n'est pas vide, sans condition sur ts_ms.
+                if hands:
                     self._hands_last_frame = self._frame_counter
 
                 self.associate_hands_to_cups(hands)
 
             else:
-                # Mode cam_bottom uniquement :
-                # - pas de tracking main
-                # - pas de transition orange
-                # - pas de bleu
-                # - uniquement les tags visibles en rouge
                 self.cups = {
                     marker_id: {
-                        "state": "POSEE",
-                        "last_pos": pos.copy(),
-                        "lost_frames": 0,
-                        "carrier_hand_id": None,
-                        "has_active_hand": False,
-                        "lift_frames": 0,
+                        "state":              "POSEE",
+                        "last_pos":           pos.copy(),
+                        "lost_frames":        0,
+                        "carrier_hand_id":    None,
+                        "has_active_hand":    False,
+                        "lift_frames":        0,
                         "pos_is_graph_space": False,
                     }
                     for marker_id, pos in detected_markers.items()
