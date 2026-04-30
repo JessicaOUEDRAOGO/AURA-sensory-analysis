@@ -1,14 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-algorithm_analysis.py — VERSION v2 ROBUSTE
+algorithm_analysis.py — VERSION v3 STABLE
 ==========================================
-Améliorations vs version corrigée :
-  - CARRIER_LOCK_DURATION réduit à 6 (était 15) — arrêt rapide de l'extrapolation
-  - N_POSE_CONFIRM = 4 : confirmation de pose sur N frames ArUco consécutives
-  - Garde lost_frames == 0 dans associate_hands_to_cups : ArUco prime sur la main
-  - Une seule tasse par main : on vérifie qu'un hand_id n'est pas déjà pris
-  - update_cups_bottom : réinitialisation propre de pose_frames au lever
-  - Decay exponentiel du lock déjà présent, conservé et renforcé
+Changements vs v2 :
+  - Consomme HandStateBuffer.get_fresh_snapshot() au lieu de get_hands()
+    → associate_hands_to_cups n'est appelé QUE sur un ts_ms nouveau
+  - CARRIER_LOCK_DURATION = 2 (était 6)
+  - N_POSE_CONFIRM = 6 (était 4) — confirmation plus robuste au clignotement
+  - Règle métier "1 seule tasse soulevée" appliquée dans update_cups_bottom
+  - assigned_hand_ids persistant par ts_ms (plus de double-association)
+  - Guard fraîcheur : si buffer.last_age_ms > HAND_STALE_MS → libère les locks
+  - pytime.sleep(0.01) retiré — les deux boucles se régulent sur leur caméra
 """
 
 import os
@@ -23,6 +25,7 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from src.core.utils.paths import config_path, data_path
 from src.core.projection.display_manager import DisplayManager
 from src.core.projection.draw_utils import DrawUtils
+from src.core.Hand_tracking.hand_state_buffer import HandStateBuffer   # ← nouveau
 
 
 COLOR_CUP_POSEE    = (0, 0, 255)
@@ -34,6 +37,9 @@ RING_RADIUS_FACTOR    = 3.0
 RING_THICKNESS_FACTOR = 0.18
 
 TABLE_SIZE_MM = 597.0
+
+# Au-delà de cette ancienneté, on considère qu'il n'y a plus de main active
+HAND_STALE_MS = 250
 
 
 class Algorithm_Analysis(QObject):
@@ -57,6 +63,7 @@ class Algorithm_Analysis(QObject):
         assets=None,
         timeline_steps=None,
         protocol=None,
+        hand_buffer: HandStateBuffer = None,   # ← injecté depuis l'appelant
     ):
         super().__init__()
 
@@ -71,6 +78,9 @@ class Algorithm_Analysis(QObject):
         self.protocol        = protocol
         self.record_window   = record_window
         self.TABLE_SIZE_MM   = TABLE_SIZE_MM
+
+        # Buffer partagé — créé localement si non injecté (mode standalone/test)
+        self.hand_buffer: HandStateBuffer = hand_buffer or HandStateBuffer(max_age_ms=250)
 
         pose      = json.load(open(config_path("cambottom_table_pose.json")))
         self.rvec = np.array(pose["rvec"], dtype=np.float64)
@@ -115,26 +125,29 @@ class Algorithm_Analysis(QObject):
         self.cups              = {}
         self.N_LIFT            = 5
         self.N_LIFT_CONFIRM    = 3
-        self.N_POSE_CONFIRM    = 6   # NOUVEAU : frames ArUco consécutives pour confirmer la pose
+        self.N_POSE_CONFIRM    = 6    # v3 : était 4 — plus robuste au clignotement ArUco
         self.DIST_HAND_THRESHOLD = 120
         self.DIST_HAND_CONFIRM   = 180
         self.DIST_RECOVERY       = 60
+        # get_hands conservé pour compatibilité — non utilisé dans v3
         self.get_hands           = None
 
         self.VELOCITY_FAST_THRESHOLD = 10
         self.DIST_HAND_FAST          = 350
 
-        # RÉDUIT : était 15 — l'extrapolation s'arrête en ~6 frames maintenant
-        self.CARRIER_LOCK_DURATION: int = 2
+        self.CARRIER_LOCK_DURATION: int = 2    # v3 : était 6
         self._carrier_lock_frames: dict[int, int] = {}
+
+        # État interne pour la gate ts_ms
+        self._last_associated_ts:   int       = -1
+        self._assigned_hand_ids:    set[int]  = set()
 
         self.HANDS_MAX_AGE_FRAMES: int = 10
         self._hands_last_frame:    int = -999
         self._frame_counter:       int = 0
-        self._assigned_hand_ids_ts: int = -1
-        self._assigned_hand_ids: set = set()
+
     # ======================================================================
-    # Provider mains
+    # Provider mains (compatibilité v2 — non utilisé en v3)
     # ======================================================================
     def set_hands_provider(self, func):
         self.get_hands = func
@@ -502,13 +515,12 @@ class Algorithm_Analysis(QObject):
     # ======================================================================
     def update_cups_bottom(self, detected_markers: dict):
         """
-        Met à jour l'état des tasses depuis les détections ArUco (cam_bottom).
+        Met à jour l'état des tasses depuis les détections ArUco.
 
-        N_POSE_CONFIRM : nombre de frames ArUco consécutives avant de repasser
-        à POSEE — évite les faux retours lors d'un lever (ArUco clignote).
+        v3 : règle métier "1 seule tasse soulevée simultanément" appliquée ici.
         """
         N_LIFT_CONFIRM = getattr(self, "N_LIFT_CONFIRM", 3)
-        N_POSE_CONFIRM = getattr(self, "N_POSE_CONFIRM", 4)
+        N_POSE_CONFIRM = getattr(self, "N_POSE_CONFIRM", 6)
 
         for marker_id, pos in detected_markers.items():
             if marker_id not in self.cups:
@@ -528,11 +540,8 @@ class Algorithm_Analysis(QObject):
             cup["lost_frames"] = 0
 
             if cup["state"] in ("SOULEVEE", "PEUT_ETRE_SOULEVEE"):
-                # ArUco voit la tasse : incrémenter le compteur de confirmation
                 cup["pose_frames"] = cup.get("pose_frames", 0) + 1
-
                 if cup["pose_frames"] >= N_POSE_CONFIRM:
-                    # Confirmation : la tasse est posée pour de bon
                     cup["last_pos"]           = pos.copy()
                     cup["lift_frames"]        = 0
                     cup["pose_frames"]        = 0
@@ -541,13 +550,9 @@ class Algorithm_Analysis(QObject):
                     cup["pos_is_graph_space"] = False
                     self._carrier_lock_frames[marker_id] = 0
                 else:
-                    # Pas encore confirmé : mettre à jour la position depuis ArUco
-                    # mais garder l'état soulevé — la garde dans associate bloquera
-                    # l'association main pendant ce temps.
                     cup["last_pos"]           = pos.copy()
                     cup["pos_is_graph_space"] = False
             else:
-                # Tasse déjà posée — mise à jour normale
                 cup["last_pos"]           = pos.copy()
                 cup["lift_frames"]        = 0
                 cup["pose_frames"]        = 0
@@ -559,8 +564,7 @@ class Algorithm_Analysis(QObject):
         for marker_id, cup in self.cups.items():
             if marker_id in detected_markers:
                 continue
-            # ArUco ne voit plus la tasse
-            cup["pose_frames"] = 0   # reset : le compteur de pose repart à 0
+            cup["pose_frames"] = 0
             cup["lost_frames"] += 1
             if cup["state"] == "POSEE":
                 cup["state"]       = "PEUT_ETRE_SOULEVEE"
@@ -570,49 +574,40 @@ class Algorithm_Analysis(QObject):
                 if cup["lift_frames"] >= N_LIFT_CONFIRM:
                     cup["state"] = "SOULEVEE"
 
-            # Règle métier : max 1 tasse soulevée simultanément
-            soulevees = [mid for mid, c in self.cups.items() if c["state"] == "SOULEVEE"]
-            if len(soulevees) > 1:
-                # Garder celle avec le plus grand lift_frames (la plus anciennement soulevée)
-                soulevees.sort(key=lambda mid: self.cups[mid].get("lift_frames", 0), reverse=True)
-                for mid in soulevees[1:]:
-                    self.cups[mid]["state"] = "POSEE"
-                    self.cups[mid]["carrier_hand_id"] = None
-                    self._carrier_lock_frames[mid] = 0
+        # ── Règle métier v3 : max 1 tasse soulevée simultanément ──────────
+        soulevees = [
+            mid for mid, c in self.cups.items()
+            if c["state"] == "SOULEVEE"
+        ]
+        if len(soulevees) > 1:
+            # Conserver celle avec le plus grand lift_frames (la plus ancienne)
+            soulevees.sort(
+                key=lambda mid: self.cups[mid].get("lift_frames", 0),
+                reverse=True
+            )
+            for mid in soulevees[1:]:
+                self.cups[mid]["state"]           = "POSEE"
+                self.cups[mid]["carrier_hand_id"] = None
+                self._carrier_lock_frames[mid]    = 0
 
     # ======================================================================
     # Cup tracking — association mains
     # ======================================================================
     def associate_hands_to_cups(self, hands: list):
         """
-        Associe les mains (cam_top) aux tasses soulevées.
+        v3 : appelé UNIQUEMENT depuis detect_and_process via hand_buffer,
+        donc seulement quand ts_ms a changé → pas de double-association
+        sur données périmées.
 
-        Nouvelles gardes v2 :
-          - lost_frames == 0 → ArUco voit la tasse ce frame, la main ne prend pas
-            le dessus (même pendant les N_POSE_CONFIRM frames de confirmation).
-          - Exclusivité hand_id : une main ne peut être associée qu'à une seule
-            tasse par frame (évite deux anneaux bleus pour une seule main).
+        assigned_hand_ids est persistant sur le ts_ms courant.
         """
         DIST_CONFIRM = getattr(self, "DIST_HAND_CONFIRM",   180)
         DIST_NORMAL  = getattr(self, "DIST_HAND_THRESHOLD", 120)
         DIST_FAST    = getattr(self, "DIST_HAND_FAST",      280)
 
-        # age = self._frame_counter - self._hands_last_frame
-        # hands_are_fresh = (age <= self.HANDS_MAX_AGE_FRAMES)
-        current_time = int(pytime.time() * 1000)
-
-        hands = [
-            h for h in hands
-            if (current_time - h.get("ts_ms", 0)) < 100
-        ]
-
         hands_are_fresh = len(hands) > 0
 
-        # réinitialiser seulement sur un nouveau ts_ms
-        current_ts = max((h.get("ts_ms", 0) for h in hands), default=0)
-        if current_ts != self._assigned_hand_ids_ts:
-            self._assigned_hand_ids_ts = current_ts
-            self._assigned_hand_ids = set()
+        # assigned_hand_ids est déjà géré par detect_and_process (réinit par ts_ms)
         assigned_hand_ids = self._assigned_hand_ids
 
         for marker_id, cup in self.cups.items():
@@ -622,11 +617,6 @@ class Algorithm_Analysis(QObject):
                 self._carrier_lock_frames[marker_id] = 0
                 continue
 
-            # -------------------------------------------------------------------
-            # GARDE CLÉE v2 : si ArUco voit la tasse ce frame (lost_frames == 0),
-            # on ne laisse pas la main reprendre le contrôle — même pendant la
-            # période N_POSE_CONFIRM.
-            # -------------------------------------------------------------------
             if cup.get("lost_frames", 0) == 0:
                 cup["carrier_hand_id"] = None
                 cup["has_active_hand"] = False
@@ -634,7 +624,6 @@ class Algorithm_Analysis(QObject):
                 self._carrier_lock_frames[marker_id] = 0
                 continue
 
-            # Position tasse en espace graphe
             if cup.get("pos_is_graph_space", False):
                 cup_graph = np.array(cup["last_pos"], dtype=np.float32)
             else:
@@ -653,34 +642,25 @@ class Algorithm_Analysis(QObject):
 
             if hands_are_fresh:
                 for hand in hands:
-                    # Exclusivité : cette main est-elle déjà prise par une autre tasse ?
                     if hand["id"] in assigned_hand_ids:
                         continue
-
-                    hand_pos = np.array([hand["x"], hand["y"]], dtype=np.float32)
-                    vx       = hand.get("vx", 0.0)
-                    vy       = hand.get("vy", 0.0)
-                    speed    = float(np.hypot(vx, vy))
-
-                    hand_predicted     = hand_pos + np.array([vx, vy], dtype=np.float32)
-                    dist               = float(np.linalg.norm(hand_predicted - cup_graph))
-                    adaptive_threshold = DIST_FAST if speed > self.VELOCITY_FAST_THRESHOLD else base_threshold
-
-                    if dist < best_dist and dist < adaptive_threshold:
+                    hand_pos  = np.array([hand["x"], hand["y"]], dtype=np.float32)
+                    vx        = hand.get("vx", 0.0)
+                    vy        = hand.get("vy", 0.0)
+                    speed     = float(np.hypot(vx, vy))
+                    hand_pred = hand_pos + np.array([vx, vy], dtype=np.float32)
+                    dist      = float(np.linalg.norm(hand_pred - cup_graph))
+                    threshold = DIST_FAST if speed > self.VELOCITY_FAST_THRESHOLD else base_threshold
+                    if dist < best_dist and dist < threshold:
                         best_dist = dist
                         best_hand = hand
-            # N'extrapoler que si la main était réellement fraîche (age < 80 ms)
-            hands_truly_fresh = any(
-                (int(pytime.time() * 1000) - h.get("ts_ms", 0)) < 80
-                for h in hands
-            )
-            if best_hand is not None and hands_truly_fresh:
+
+            if best_hand is not None:
                 vx = best_hand.get("vx", 0.0)
                 vy = best_hand.get("vy", 0.0)
                 predicted_pos = np.array(
                     [best_hand["x"] + vx, best_hand["y"] + vy], dtype=np.float32
                 )
-
                 if cup.get("pos_is_graph_space", False):
                     cup["last_pos"] = predicted_pos
                 else:
@@ -697,24 +677,17 @@ class Algorithm_Analysis(QObject):
                 cup["last_vy"]            = vy
                 cup["pos_is_graph_space"] = True
                 self._carrier_lock_frames[marker_id] = self.CARRIER_LOCK_DURATION
-
-                # Marquer cette main comme utilisée pour ce frame
                 assigned_hand_ids.add(best_hand["id"])
-            elif not hands_truly_fresh:
-                # main trop vieille : ne pas extrapoler, couper le lock
-                cup["carrier_hand_id"] = None
-                cup["has_active_hand"] = False
-                self._carrier_lock_frames[marker_id] = 0
+
             else:
                 lock = self._carrier_lock_frames.get(marker_id, 0)
-
                 if lock > 0 and cup.get("carrier_hand_id") is not None:
                     known_hid  = cup["carrier_hand_id"]
                     found_hand = next(
-                        (h for h in hands if h["id"] == known_hid
-                         and h["id"] not in assigned_hand_ids), None
+                        (h for h in hands
+                         if h["id"] == known_hid and h["id"] not in assigned_hand_ids),
+                        None
                     )
-
                     if found_hand is not None:
                         vx = found_hand.get("vx", 0.0)
                         vy = found_hand.get("vy", 0.0)
@@ -728,26 +701,18 @@ class Algorithm_Analysis(QObject):
                         cup["last_vy"]            = vy
                         assigned_hand_ids.add(known_hid)
                     else:
-                        # Extrapolation avec decay exponentiel — arrêt rapide
                         frames_elapsed = self.CARRIER_LOCK_DURATION - lock + 1
-                        decay = 0.65 ** frames_elapsed   # plus agressif qu'avant (0.65 vs 0.75)
-
-                        vx_raw = cup.get("last_vx", 0.0)
-                        vy_raw = cup.get("last_vy", 0.0)
-                        vx_decayed = vx_raw * decay
-                        vy_decayed = vy_raw * decay
-
-                        new_pos = np.array(cup["last_pos"], dtype=np.float32) + \
-                                  np.array([vx_decayed, vy_decayed], dtype=np.float32)
-                        new_pos = np.clip(new_pos, 0.0, float(self.grid_size))
-
-                        cup["last_pos"]           = new_pos
-                        cup["last_vx"]            = vx_decayed
-                        cup["last_vy"]            = vy_decayed
-                        cup["has_active_hand"]    = False
-
+                        decay          = 0.65 ** frames_elapsed
+                        vx_decayed = cup.get("last_vx", 0.0) * decay
+                        vy_decayed = cup.get("last_vy", 0.0) * decay
+                        new_pos    = np.array(cup["last_pos"], dtype=np.float32) + \
+                                     np.array([vx_decayed, vy_decayed], dtype=np.float32)
+                        new_pos    = np.clip(new_pos, 0.0, float(self.grid_size))
+                        cup["last_pos"]        = new_pos
+                        cup["last_vx"]         = vx_decayed
+                        cup["last_vy"]         = vy_decayed
+                        cup["has_active_hand"] = False
                     self._carrier_lock_frames[marker_id] = lock - 1
-
                 else:
                     cup["carrier_hand_id"] = None
                     cup["has_active_hand"] = False
@@ -760,19 +725,13 @@ class Algorithm_Analysis(QObject):
         from src.core.config.app_config import CALIBRATION_TAG_IDS
 
         self.running = True
-        print("detect_and_process started")
+        print("detect_and_process started — v3")
 
         self._fps_counter_bottom = 0
-        self._fps_time_bottom = pytime.time()
+        self._fps_time_bottom    = pytime.time()
 
         overlay_on    = self.is_enabled("overlay_ra",       False)
         projection_on = self.is_enabled("projection_media", False)
-        adv_logs      = self.is_enabled("advanced_logs",    False)
-
-        print("=== RUNTIME DEBUG ===")
-        print("projection_on:", projection_on, "overlay_on:", overlay_on)
-        print("timeline_steps:", len(self.timeline_steps), "assets:", len(self.assets))
-        print("=====================")
 
         ra_config = self.load_config(config_path("ra_config.json")) if overlay_on else {}
 
@@ -781,14 +740,13 @@ class Algorithm_Analysis(QObject):
 
         while self.running:
             self._frame_counter += 1
-
             self._fps_counter_bottom += 1
             now = pytime.time()
-
             if now - self._fps_time_bottom >= 1.0:
-                print(f"[FPS] cam_bottom = {self._fps_counter_bottom}")
+                print(f"[FPS] cam_bottom = {self._fps_counter_bottom} | "
+                      f"hand_buffer_age = {self.hand_buffer.last_age_ms} ms")
                 self._fps_counter_bottom = 0
-                self._fps_time_bottom = now
+                self._fps_time_bottom    = now
 
             proj_w = 3840
             proj_h = 2160
@@ -857,39 +815,24 @@ class Algorithm_Analysis(QObject):
             if self.hand_tracking_enabled:
                 self.update_cups_bottom(detected_markers)
 
-                hands = self.get_hands() if self.get_hands else []
-                
-                if hands:
-                    latest_ts = max(h.get("ts_ms", 0) for h in hands)
-                    age_ms = int(pytime.time() * 1000) - latest_ts
+                # ── v3 : gate sur ts_ms via HandStateBuffer ──────────────
+                snapshot = self.hand_buffer.get_fresh_snapshot()
 
-                    print(f"[SYNC] hand_age = {age_ms} ms | bottom_frame = {self._frame_counter}")
-                        # Seuil réel basé sur ton système (~100 ms max)
-                    if age_ms < 100:
-                        self._hands_last_frame = self._frame_counter
-
-                if hands:
-                    if not hasattr(self, "_last_hand_ts"):
-                        self._last_hand_ts = latest_ts
-                        self._frames_since_new_hand = 0
-
-                    if latest_ts != self._last_hand_ts:
-                        print(f"[SYNC] new hand frame after {self._frames_since_new_hand} bottom frames")
-                        self._frames_since_new_hand = 0
-                        self._last_hand_ts = latest_ts
-                    else:
-                        self._frames_since_new_hand += 1
-
-                
-                if hands:
-                    latest_ts = max(h.get("ts_ms", 0) for h in hands)
-                    if latest_ts != getattr(self, "_last_associated_ts", -1):
-                        self._last_associated_ts = latest_ts
-                        self.associate_hands_to_cups(hands)
-                    # Sinon : données inchangées → on ne ré-associe pas
-                else:
-                    self._last_associated_ts = -1
-                    self.associate_hands_to_cups([])  # libère les locks
+                if snapshot is not None:
+                    # Nouveau ts_ms → réinitialiser l'exclusivité et associer
+                    self._assigned_hand_ids = set()
+                    self.associate_hands_to_cups(snapshot.hands)
+                    age = self.hand_buffer.last_age_ms
+                    print(f"[SYNC] assoc ts={snapshot.ts_ms} age={age} ms | "
+                          f"bottom_frame={self._frame_counter}")
+                elif self.hand_buffer.last_age_ms > HAND_STALE_MS:
+                    # Buffer trop vieux → libérer tous les locks proprement
+                    for marker_id, cup in self.cups.items():
+                        if cup.get("has_active_hand", False):
+                            cup["carrier_hand_id"] = None
+                            cup["has_active_hand"] = False
+                            self._carrier_lock_frames[marker_id] = 0
+                # else : snapshot déjà traité, rien à faire — pas de ré-association
 
             else:
                 self.cups = {
@@ -940,7 +883,7 @@ class Algorithm_Analysis(QObject):
             self.data_signal.emit({"data": graph_coords_fusion})
             self.save_to_buffer(graph_coords_fusion)
 
-            pytime.sleep(0.01)
+            # PAS de sleep ici en v3 — régulation par la caméra
 
         self.save_to_csv()
         print("detect_and_process terminé")

@@ -1,12 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-hand_tracking_thread.py — VERSION v2 ROBUSTE
-=============================================
-Améliorations vs version corrigée :
-  - MAX_MISSING_FRAMES réduit à 3 (évite l'extrapolation Kalman prolongée)
-  - Score de matching composite : distance + cohérence vélocité (évite les cross-associations)
-  - predict_only() avec decay progressif de la vélocité (0.7^n) — arrêt rapide
-  - Slot supprimé dès que missing > MAX_MISSING_FRAMES (pas de zombie)
+hand_tracking_thread.py — VERSION v3 STABLE
+============================================
+Changements vs v2 :
+  - Écrit dans HandStateBuffer au lieu d'émettre hands_signal
+    → découple complètement les deux threads
+  - MAX_MISSING_FRAMES = 2 (était 3) — slot zombie éliminé encore plus vite
+  - detect_async : timestamp capturé juste avant l'appel (évite la dérive
+    entre cap.read() et la soumission à MediaPipe)
+  - pytime.sleep retiré de la boucle principale — la caméra est le vrai
+    régulateur de cadence ; le sleep artificiel aggravait le GIL contention
 """
 
 import cv2
@@ -20,6 +23,7 @@ import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 from src.core.utils.paths import config_path
+from src.core.Hand_tracking.hand_state_buffer import HandStateBuffer   # ← nouveau
 
 
 # ---------------------------------------------------------------------------
@@ -45,8 +49,7 @@ class KalmanHand:
         self.kf.errorCovPost        = np.eye(4, dtype=np.float32) * 100.0
         self.kf.statePost = np.array([[x], [y], [0.], [0.]], dtype=np.float32)
 
-        self._vel_clip = 80.0
-        # Compteur de frames sans mesure — pour decay progressif
+        self._vel_clip      = 80.0
         self._missing_count = 0
 
     def update(self, x: float, y: float) -> np.ndarray:
@@ -56,16 +59,9 @@ class KalmanHand:
         return np.array([c[0, 0], c[1, 0]], dtype=np.float32)
 
     def predict_only(self) -> np.ndarray:
-        """
-        Avance le modèle sans mesure avec decay exponentiel de la vélocité.
-        Chaque frame sans mesure réduit la vélocité de 30 % → arrêt en ~4 frames.
-        """
         self._missing_count += 1
-        decay = 0.70 ** self._missing_count   # 0.70, 0.49, 0.34, 0.24 …
-
+        decay = 0.70 ** self._missing_count
         p = self.kf.predict()
-
-        # Appliquer decay sur statePost pour les prochaines prédictions
         self.kf.statePost[2, 0] = float(np.clip(
             self.kf.statePost[2, 0] * decay, -self._vel_clip, self._vel_clip
         ))
@@ -93,10 +89,9 @@ class KalmanHand:
 # ---------------------------------------------------------------------------
 class HandSlotManager:
     MAX_HANDS          = 2
-    MAX_MISSING_FRAMES = 3    # RÉDUIT : était 8 — évite l'extrapolation prolongée
-    MATCH_THRESHOLD    = 150  # pixels graphe — distance seule
-    # Poids du score composite distance + vélocité
-    VELOCITY_WEIGHT    = 0.4  # 0 = distance pure, 1 = vélocité pure
+    MAX_MISSING_FRAMES = 2    # v3 : réduit de 3 à 2 — élimine les zombies plus vite
+    MATCH_THRESHOLD    = 150
+    VELOCITY_WEIGHT    = 0.4
 
     def __init__(self, process_noise: float, measure_noise: float):
         self._process_noise = process_noise
@@ -105,23 +100,14 @@ class HandSlotManager:
         self._next_id = 0
 
     def _composite_score(self, slot: dict, xg: float, yg: float) -> float:
-        """
-        Score composite = distance_pos + VELOCITY_WEIGHT * distance_predicted.
-        La composante vélocité favorise le slot dont la trajectoire prédite
-        pointe vers la détection (évite les échanges de slots en croisement).
-        """
-        pos      = slot["kf"].position
-        vel      = slot["kf"].velocity
-        det_pos  = np.array([xg, yg], dtype=np.float32)
-        predicted = pos + vel                                   # position dans 1 frame
-
+        pos       = slot["kf"].position
+        vel       = slot["kf"].velocity
+        det_pos   = np.array([xg, yg], dtype=np.float32)
+        predicted = pos + vel
         dist_pos  = float(np.linalg.norm(pos - det_pos))
         dist_pred = float(np.linalg.norm(predicted - det_pos))
-
-        # Si dist_pos > seuil dur, on rejette directement
         if dist_pos > self.MATCH_THRESHOLD:
             return float("inf")
-
         return (1.0 - self.VELOCITY_WEIGHT) * dist_pos + self.VELOCITY_WEIGHT * dist_pred
 
     def update(self, raw_detections: list[tuple[float, float]]) -> list[dict]:
@@ -131,12 +117,9 @@ class HandSlotManager:
         if self._slots and raw_detections:
             slot_ids = list(self._slots.keys())
             scores   = np.full((len(slot_ids), len(raw_detections)), np.inf)
-
             for si, sid in enumerate(slot_ids):
                 for di, (xg, yg) in enumerate(raw_detections):
                     scores[si, di] = self._composite_score(self._slots[sid], xg, yg)
-
-            # Greedy matching sur score composite
             while True:
                 if scores.size == 0 or np.all(np.isinf(scores)):
                     break
@@ -152,7 +135,6 @@ class HandSlotManager:
                 scores[si, :]  = np.inf
                 scores[:, di]  = np.inf
 
-        # Créer un slot pour chaque détection non associée
         for di in unmatched_detections:
             if len(self._slots) >= self.MAX_HANDS:
                 break
@@ -166,7 +148,6 @@ class HandSlotManager:
             self._slots[sid]["kf"].update(xg, yg)
             matched_slots.add(sid)
 
-        # Prédire (avec decay) / supprimer les slots non alimentés
         to_delete = []
         for sid, slot in self._slots.items():
             if sid in matched_slots:
@@ -176,11 +157,9 @@ class HandSlotManager:
                 to_delete.append(sid)
             else:
                 slot["kf"].predict_only()
-
         for sid in to_delete:
             del self._slots[sid]
 
-        # Construire la sortie
         result = []
         for sid, slot in self._slots.items():
             pos = slot["kf"].position
@@ -200,15 +179,15 @@ class HandSlotManager:
 # Thread principal
 # ---------------------------------------------------------------------------
 class HandTrackingThread(QThread):
-    """
-    Thread de suivi des mains (caméra top).
-    """
     frame_signal = pyqtSignal(object)
+    # hands_signal conservé pour compatibilité ascendante mais plus utilisé
+    # pour l'association — préférer hand_buffer.get_fresh_snapshot()
     hands_signal = pyqtSignal(object)
 
     def __init__(self, camera_id: int = 0,
                  kalman_process_noise: float = 5e-2,
-                 kalman_measure_noise: float = 3.0):
+                 kalman_measure_noise: float = 3.0,
+                 hand_buffer: HandStateBuffer = None):
         super().__init__()
 
         BASE_DIR = Path(__file__).resolve().parent
@@ -220,6 +199,9 @@ class HandTrackingThread(QThread):
         self.running       = True
         self.TABLE_SIZE_MM = 597.0
         self.GRID_SIZE     = 700
+
+        # Buffer partagé — créé ici si non fourni par l'appelant
+        self.hand_buffer = hand_buffer or HandStateBuffer(max_age_ms=200)
 
         self._slot_manager = HandSlotManager(
             process_noise=kalman_process_noise,
@@ -242,12 +224,8 @@ class HandTrackingThread(QThread):
         self.detector = vision.HandLandmarker.create_from_options(options)
 
     def _on_result(self, result, output_image, timestamp_ms):
-        current_time = int(pytime.time() * 1000)
-        latency = current_time - timestamp_ms
-
-        print(f"[MP] latency = {latency} ms")
         with self._result_lock:
-            self._latest_result = result
+            self._latest_result = (result, timestamp_ms)   # ← on conserve le ts original
 
     def _load_pose(self):
         data = json.load(open(self.POSE_PATH))
@@ -306,58 +284,69 @@ class HandTrackingThread(QThread):
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
         cap.set(cv2.CAP_PROP_BUFFERSIZE,   1)
 
-        print(f"[HAND THREAD] Camera {self.camera_id} – SlotManager v2 + Kalman decay active")
+        print(f"[HAND THREAD] Camera {self.camera_id} — v3 HandStateBuffer active")
         if not cap.isOpened():
             print("[HAND THREAD ERROR] Camera not opened")
             return
+
         self._fps_counter_top = 0
-        self._fps_time_top = pytime.time()
-        timestamp_ms = 0
+        self._fps_time_top    = pytime.time()
+        _last_result_ts       = -1    # ts_ms du dernier résultat MediaPipe traité
 
         while self.running:
-            
             ret, frame = cap.read()
-            
             if not ret:
                 continue
-            
+
             h, w, _ = frame.shape
             rgb      = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
+            # Timestamp capturé JUSTE avant l'envoi à MediaPipe
             timestamp_ms = int(pytime.time() * 1000)
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
             self.detector.detect_async(mp_image, timestamp_ms)
 
+            # Lire le dernier résultat disponible (peut être None si MP n'a pas encore répondu)
             with self._result_lock:
-                result = self._latest_result
+                result_payload = self._latest_result   # (result, original_ts) ou None
 
             raw_detections: list[tuple[float, float]] = []
-            if result and result.hand_landmarks:
-                for hand in result.hand_landmarks:
-                    grip = self._get_grip_point(hand, w, h)
-                    res  = self._pixel_to_table(grip[0], grip[1])
-                    if res is None:
-                        continue
-                    x_mm, y_mm = self._flip_y(*res)
-                    xg, yg     = self._mm_to_graph(x_mm, y_mm)
-                    raw_detections.append((xg, yg))
 
-            hands_data = self._slot_manager.update(raw_detections)
+            if result_payload is not None:
+                result, result_ts = result_payload
 
-            for h_entry in hands_data:
-                h_entry["ts_ms"] = timestamp_ms
+                # Ne retraiter que si nouveau résultat MP
+                if result_ts != _last_result_ts:
+                    _last_result_ts = result_ts
+
+                    if result and result.hand_landmarks:
+                        for hand in result.hand_landmarks:
+                            grip = self._get_grip_point(hand, w, h)
+                            res  = self._pixel_to_table(grip[0], grip[1])
+                            if res is None:
+                                continue
+                            x_mm, y_mm = self._flip_y(*res)
+                            xg, yg     = self._mm_to_graph(x_mm, y_mm)
+                            raw_detections.append((xg, yg))
+
+                    hands_data = self._slot_manager.update(raw_detections)
+                    for h_entry in hands_data:
+                        h_entry["ts_ms"] = result_ts   # ts original MP, pas wall_ms
+
+                    # ← écriture dans le buffer partagé (thread-safe)
+                    self.hand_buffer.push(hands_data)
+                    # Signal conservé pour les éventuels autres abonnés (UI, debug)
+                    self.hands_signal.emit(hands_data)
 
             self._fps_counter_top += 1
             now = pytime.time()
-
             if now - self._fps_time_top >= 1.0:
                 print(f"[FPS] cam_top = {self._fps_counter_top}")
                 self._fps_counter_top = 0
-                self._fps_time_top = now
-            self.hands_signal.emit(hands_data)
-            self.frame_signal.emit(frame)
+                self._fps_time_top    = now
 
-            pytime.sleep(0.001)
+            self.frame_signal.emit(frame)
+            # PAS de sleep ici — la caméra régule naturellement à son FPS matériel
 
         cap.release()
         print("[HAND THREAD] stopped")
