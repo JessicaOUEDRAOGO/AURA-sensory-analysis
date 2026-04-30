@@ -586,8 +586,16 @@ class Algorithm_Analysis(QObject):
         DIST_NORMAL  = getattr(self, "DIST_HAND_THRESHOLD", 120)
         DIST_FAST    = getattr(self, "DIST_HAND_FAST",      280)
 
-        age = self._frame_counter - self._hands_last_frame
-        hands_are_fresh = (age <= self.HANDS_MAX_AGE_FRAMES)
+        # age = self._frame_counter - self._hands_last_frame
+        # hands_are_fresh = (age <= self.HANDS_MAX_AGE_FRAMES)
+        current_time = int(pytime.time() * 1000)
+
+        hands = [
+            h for h in hands
+            if (current_time - h.get("ts_ms", 0)) < 100
+        ]
+
+        hands_are_fresh = len(hands) > 0
 
         # Ensemble des hand_id déjà assignés ce frame — exclusivité 1 main / 1 tasse
         assigned_hand_ids: set[int] = set()
@@ -833,7 +841,9 @@ class Algorithm_Analysis(QObject):
                     age_ms = int(pytime.time() * 1000) - latest_ts
 
                     print(f"[SYNC] hand_age = {age_ms} ms | bottom_frame = {self._frame_counter}")
-                    self._hands_last_frame = self._frame_counter
+                        # Seuil réel basé sur ton système (~100 ms max)
+                    if age_ms < 100:
+                        self._hands_last_frame = self._frame_counter
 
                 if hands:
                     if not hasattr(self, "_last_hand_ts"):
