@@ -115,7 +115,7 @@ class Algorithm_Analysis(QObject):
         self.cups              = {}
         self.N_LIFT            = 5
         self.N_LIFT_CONFIRM    = 3
-        self.N_POSE_CONFIRM    = 4   # NOUVEAU : frames ArUco consécutives pour confirmer la pose
+        self.N_POSE_CONFIRM    = 6   # NOUVEAU : frames ArUco consécutives pour confirmer la pose
         self.DIST_HAND_THRESHOLD = 120
         self.DIST_HAND_CONFIRM   = 180
         self.DIST_RECOVERY       = 60
@@ -125,13 +125,14 @@ class Algorithm_Analysis(QObject):
         self.DIST_HAND_FAST          = 350
 
         # RÉDUIT : était 15 — l'extrapolation s'arrête en ~6 frames maintenant
-        self.CARRIER_LOCK_DURATION: int = 6
+        self.CARRIER_LOCK_DURATION: int = 2
         self._carrier_lock_frames: dict[int, int] = {}
 
         self.HANDS_MAX_AGE_FRAMES: int = 10
         self._hands_last_frame:    int = -999
         self._frame_counter:       int = 0
-
+        self._assigned_hand_ids_ts: int = -1
+        self._assigned_hand_ids: set = set()
     # ======================================================================
     # Provider mains
     # ======================================================================
@@ -569,6 +570,16 @@ class Algorithm_Analysis(QObject):
                 if cup["lift_frames"] >= N_LIFT_CONFIRM:
                     cup["state"] = "SOULEVEE"
 
+            # Règle métier : max 1 tasse soulevée simultanément
+            soulevees = [mid for mid, c in self.cups.items() if c["state"] == "SOULEVEE"]
+            if len(soulevees) > 1:
+                # Garder celle avec le plus grand lift_frames (la plus anciennement soulevée)
+                soulevees.sort(key=lambda mid: self.cups[mid].get("lift_frames", 0), reverse=True)
+                for mid in soulevees[1:]:
+                    self.cups[mid]["state"] = "POSEE"
+                    self.cups[mid]["carrier_hand_id"] = None
+                    self._carrier_lock_frames[mid] = 0
+
     # ======================================================================
     # Cup tracking — association mains
     # ======================================================================
@@ -597,8 +608,12 @@ class Algorithm_Analysis(QObject):
 
         hands_are_fresh = len(hands) > 0
 
-        # Ensemble des hand_id déjà assignés ce frame — exclusivité 1 main / 1 tasse
-        assigned_hand_ids: set[int] = set()
+        # réinitialiser seulement sur un nouveau ts_ms
+        current_ts = max((h.get("ts_ms", 0) for h in hands), default=0)
+        if current_ts != self._assigned_hand_ids_ts:
+            self._assigned_hand_ids_ts = current_ts
+            self._assigned_hand_ids = set()
+        assigned_hand_ids = self._assigned_hand_ids
 
         for marker_id, cup in self.cups.items():
             if cup["state"] not in ("SOULEVEE", "PEUT_ETRE_SOULEVEE"):
@@ -654,8 +669,12 @@ class Algorithm_Analysis(QObject):
                     if dist < best_dist and dist < adaptive_threshold:
                         best_dist = dist
                         best_hand = hand
-
-            if best_hand is not None:
+            # N'extrapoler que si la main était réellement fraîche (age < 80 ms)
+            hands_truly_fresh = any(
+                (int(pytime.time() * 1000) - h.get("ts_ms", 0)) < 80
+                for h in hands
+            )
+            if best_hand is not None and hands_truly_fresh:
                 vx = best_hand.get("vx", 0.0)
                 vy = best_hand.get("vy", 0.0)
                 predicted_pos = np.array(
@@ -681,7 +700,11 @@ class Algorithm_Analysis(QObject):
 
                 # Marquer cette main comme utilisée pour ce frame
                 assigned_hand_ids.add(best_hand["id"])
-
+            elif not hands_truly_fresh:
+                # main trop vieille : ne pas extrapoler, couper le lock
+                cup["carrier_hand_id"] = None
+                cup["has_active_hand"] = False
+                self._carrier_lock_frames[marker_id] = 0
             else:
                 lock = self._carrier_lock_frames.get(marker_id, 0)
 
@@ -857,7 +880,16 @@ class Algorithm_Analysis(QObject):
                     else:
                         self._frames_since_new_hand += 1
 
-                self.associate_hands_to_cups(hands)
+                
+                if hands:
+                    latest_ts = max(h.get("ts_ms", 0) for h in hands)
+                    if latest_ts != getattr(self, "_last_associated_ts", -1):
+                        self._last_associated_ts = latest_ts
+                        self.associate_hands_to_cups(hands)
+                    # Sinon : données inchangées → on ne ré-associe pas
+                else:
+                    self._last_associated_ts = -1
+                    self.associate_hands_to_cups([])  # libère les locks
 
             else:
                 self.cups = {
