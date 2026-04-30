@@ -731,6 +731,9 @@ class Algorithm_Analysis(QObject):
         self.running = True
         print("detect_and_process started")
 
+        self._fps_counter_bottom = 0
+        self._fps_time_bottom = pytime.time()
+
         overlay_on    = self.is_enabled("overlay_ra",       False)
         projection_on = self.is_enabled("projection_media", False)
         adv_logs      = self.is_enabled("advanced_logs",    False)
@@ -747,6 +750,14 @@ class Algorithm_Analysis(QObject):
 
         while self.running:
             self._frame_counter += 1
+
+            self._fps_counter_bottom += 1
+            now = pytime.time()
+
+            if now - self._fps_time_bottom >= 1.0:
+                print(f"[FPS] cam_bottom = {self._fps_counter_bottom}")
+                self._fps_counter_bottom = 0
+                self._fps_time_bottom = now
 
             proj_w = 3840
             proj_h = 2160
@@ -816,9 +827,25 @@ class Algorithm_Analysis(QObject):
                 self.update_cups_bottom(detected_markers)
 
                 hands = self.get_hands() if self.get_hands else []
+                
+                if hands:
+                    latest_ts = max(h.get("ts_ms", 0) for h in hands)
+                    age_ms = int(pytime.time() * 1000) - latest_ts
+
+                    print(f"[SYNC] hand_age = {age_ms} ms | bottom_frame = {self._frame_counter}")
+                    self._hands_last_frame = self._frame_counter
 
                 if hands:
-                    self._hands_last_frame = self._frame_counter
+                    if not hasattr(self, "_last_hand_ts"):
+                        self._last_hand_ts = latest_ts
+                        self._frames_since_new_hand = 0
+
+                    if latest_ts != self._last_hand_ts:
+                        print(f"[SYNC] new hand frame after {self._frames_since_new_hand} bottom frames")
+                        self._frames_since_new_hand = 0
+                        self._last_hand_ts = latest_ts
+                    else:
+                        self._frames_since_new_hand += 1
 
                 self.associate_hands_to_cups(hands)
 

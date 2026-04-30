@@ -242,6 +242,10 @@ class HandTrackingThread(QThread):
         self.detector = vision.HandLandmarker.create_from_options(options)
 
     def _on_result(self, result, output_image, timestamp_ms):
+        current_time = int(pytime.time() * 1000)
+        latency = current_time - timestamp_ms
+
+        print(f"[MP] latency = {latency} ms")
         with self._result_lock:
             self._latest_result = result
 
@@ -306,18 +310,21 @@ class HandTrackingThread(QThread):
         if not cap.isOpened():
             print("[HAND THREAD ERROR] Camera not opened")
             return
-
+        self._fps_counter_top = 0
+        self._fps_time_top = pytime.time()
         timestamp_ms = 0
 
         while self.running:
+            
             ret, frame = cap.read()
+            
             if not ret:
                 continue
-
+            
             h, w, _ = frame.shape
             rgb      = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-            timestamp_ms += 1
+            timestamp_ms = int(pytime.time() * 1000)
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
             self.detector.detect_async(mp_image, timestamp_ms)
 
@@ -340,6 +347,13 @@ class HandTrackingThread(QThread):
             for h_entry in hands_data:
                 h_entry["ts_ms"] = timestamp_ms
 
+            self._fps_counter_top += 1
+            now = pytime.time()
+
+            if now - self._fps_time_top >= 1.0:
+                print(f"[FPS] cam_top = {self._fps_counter_top}")
+                self._fps_counter_top = 0
+                self._fps_time_top = now
             self.hands_signal.emit(hands_data)
             self.frame_signal.emit(frame)
 
