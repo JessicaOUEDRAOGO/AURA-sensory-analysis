@@ -19,6 +19,7 @@ from src.ui.views.ui_background_window import BackgroundWindow
 from src.ui.views.ui_projection_background_bg import ProjectionBackgroundWindowWithBG
 from src.ui.views.ui_settings_menu import SettingsMenu
 from src.core.Hand_tracking.hand_tracking_thread import HandTrackingThread
+from src.core.Hand_tracking.hand_state_buffer import HandStateBuffer
 
 def build_useful_background(projector_width, projector_height, useful_x, useful_y, useful_w, useful_h):
         bg = np.zeros((projector_height, projector_width, 3), dtype=np.uint8)
@@ -132,7 +133,8 @@ class MainApp(QtWidgets.QMainWindow):
 
         self.hand_thread = None
         self.current_hands = []
-    
+        self.shared_hand_buffer = HandStateBuffer(max_age_ms=200)
+
     def update_hands(self, hands):
         self.current_hands = hands
 
@@ -143,7 +145,10 @@ class MainApp(QtWidgets.QMainWindow):
         print("[MAIN] Démarrage HandTrackingThread")
         self.current_hands = []
 
-        self.hand_thread = HandTrackingThread(camera_id=self.camera_top_id)
+        self.hand_thread = HandTrackingThread(
+            camera_id=self.camera_top_id,
+            hand_buffer=self.shared_hand_buffer   # ← AJOUT CRITIQUE
+        )
         self.hand_thread.hands_signal.connect(self.update_hands)
         self.hand_thread.finished.connect(self._on_hand_thread_finished)
         self.hand_thread.start()

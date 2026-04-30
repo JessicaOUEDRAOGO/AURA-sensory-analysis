@@ -303,6 +303,7 @@ class RecordWindow(QtWidgets.QWidget):
         else:
             self.parent.stop_hand_tracking()
         # Init algo — les JSON de calibration sont chargés dans __init__
+ 
         self.algorithm_analysis = Algorithm_Analysis(
             parent=self,
             display_manager=self.display_manager,
@@ -313,7 +314,8 @@ class RecordWindow(QtWidgets.QWidget):
             modules_enabled=p_db.modules_enabled or {},
             assets=assets,
             timeline_steps=steps,
-            protocol=p_db
+            protocol=p_db,
+            hand_buffer=self.parent.shared_hand_buffer   # ← AJOUT ICI
         )
         if hand_tracking_on:
             self.algorithm_analysis.set_hands_provider(lambda: self.parent.current_hands)
