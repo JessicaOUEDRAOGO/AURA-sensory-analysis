@@ -133,7 +133,7 @@ class MainApp(QtWidgets.QMainWindow):
 
         self.hand_thread = None
         self.current_hands = []
-        self.shared_hand_buffer = HandStateBuffer(max_age_ms=200)
+        self.shared_hand_buffer = HandStateBuffer(max_age_ms=300)
 
     def update_hands(self, hands):
         self.current_hands = hands
