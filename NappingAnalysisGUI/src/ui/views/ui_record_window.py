@@ -315,7 +315,8 @@ class RecordWindow(QtWidgets.QWidget):
             assets=assets,
             timeline_steps=steps,
             protocol=p_db,
-            hand_buffer=self.parent.shared_hand_buffer   # ← AJOUT ICI
+            hand_buffer=self.parent.shared_hand_buffer,
+            frame_buffer=self.parent.shared_frame_buffer,    # ← AJOUTER cette ligne
         )
         if hand_tracking_on:
             self.algorithm_analysis.set_hands_provider(lambda: self.parent.current_hands)

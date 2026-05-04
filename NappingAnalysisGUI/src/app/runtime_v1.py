@@ -1,16 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-algorithm_analysis.py — VERSION v3 STABLE
-==========================================
-Changements vs v2 :
-  - Consomme HandStateBuffer.get_fresh_snapshot() au lieu de get_hands()
-    → associate_hands_to_cups n'est appelé QUE sur un ts_ms nouveau
-  - CARRIER_LOCK_DURATION = 2 (était 6)
-  - N_POSE_CONFIRM = 6 (était 4) — confirmation plus robuste au clignotement
-  - Règle métier "1 seule tasse soulevée" appliquée dans update_cups_bottom
-  - assigned_hand_ids persistant par ts_ms (plus de double-association)
-  - Guard fraîcheur : si buffer.last_age_ms > HAND_STALE_MS → libère les locks
-  - pytime.sleep(0.01) retiré — les deux boucles se régulent sur leur caméra
+algorithm_analysis.py — VERSION v4
+====================================
+Changements vs v3 :
+  - associate_hands_to_cups() supprimée
+  - Nouveau : logique CSRT dans detect_and_process()
+      · quand une tasse passe SOULEVEE → CupTopTracker.start() via bbox projetée
+      · chaque frame → CupTopTracker.update(frame_top) → pos_mm
+      · quand ArUco réapparaît → CupTopTracker.stop()
+  - Nouveau : FrameBuffer injecté (frame_top disponible à chaque frame)
+  - HandStateBuffer conservé mais silencieux — prêt pour la feature dessin
+  - _carrier_lock_frames, _assigned_hand_ids, CARRIER_LOCK_DURATION supprimés
+  - Couleurs inchangées : Rouge=POSEE, Orange=INCERT, Bleu=SOULEVEE
 """
 
 import os
@@ -19,13 +20,15 @@ import json
 import numpy as np
 import time as pytime
 import pandas as pd
-from datetime import datetime, time
+from datetime import datetime
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from src.core.utils.paths import config_path, data_path
 from src.core.projection.display_manager import DisplayManager
 from src.core.projection.draw_utils import DrawUtils
-from src.core.Hand_tracking.hand_state_buffer import HandStateBuffer   # ← nouveau
+from src.core.Hand_tracking.hand_state_buffer import HandStateBuffer
+from src.core.Hand_tracking.frame_buffer import FrameBuffer               # ← NOUVEAU
+from src.core.Hand_tracking.cup_top_tracker import CupTopTracker          # ← NOUVEAU
 
 
 COLOR_CUP_POSEE    = (0, 0, 255)
@@ -38,8 +41,10 @@ RING_THICKNESS_FACTOR = 0.18
 
 TABLE_SIZE_MM = 597.0
 
-# Au-delà de cette ancienneté, on considère qu'il n'y a plus de main active
-HAND_STALE_MS = 250
+# Taille de la bbox d'initialisation CSRT en pixels (cam_top 1920x1080)
+# Une tasse de ~80mm de diamètre vue de 1m ≈ 80–120 px selon la hauteur caméra
+# À ajuster selon ta configuration réelle
+CUP_BBOX_PX = 60  # dessus interieur tasse uniquement (~50mm a 890mm hauteur)
 
 
 class Algorithm_Analysis(QObject):
@@ -63,7 +68,8 @@ class Algorithm_Analysis(QObject):
         assets=None,
         timeline_steps=None,
         protocol=None,
-        hand_buffer: HandStateBuffer = None,   # ← injecté depuis l'appelant
+        hand_buffer: HandStateBuffer = None,
+        frame_buffer: FrameBuffer = None,                                  # ← NOUVEAU
     ):
         super().__init__()
 
@@ -79,8 +85,13 @@ class Algorithm_Analysis(QObject):
         self.record_window   = record_window
         self.TABLE_SIZE_MM   = TABLE_SIZE_MM
 
-        # Buffer partagé — créé localement si non injecté (mode standalone/test)
-        self.hand_buffer: HandStateBuffer = hand_buffer or HandStateBuffer(max_age_ms=250)
+        # Buffers partagés
+        self.hand_buffer:  HandStateBuffer = hand_buffer  or HandStateBuffer(max_age_ms=250)
+        self.frame_buffer: FrameBuffer     = frame_buffer or FrameBuffer(max_age_ms=200)  # ← NOUVEAU
+
+        # Tracker CSRT — une seule tasse levée à la fois
+        _pose_path = config_path("camtop_table_pose.json")
+        self.cup_tracker = CupTopTracker(pose_path=str(_pose_path))        # ← NOUVEAU
 
         pose      = json.load(open(config_path("cambottom_table_pose.json")))
         self.rvec = np.array(pose["rvec"], dtype=np.float64)
@@ -125,31 +136,18 @@ class Algorithm_Analysis(QObject):
         self.cups              = {}
         self.N_LIFT            = 5
         self.N_LIFT_CONFIRM    = 3
-        self.N_POSE_CONFIRM    = 6    # v3 : était 4 — plus robuste au clignotement ArUco
-        self.DIST_HAND_THRESHOLD = 120
-        self.DIST_HAND_CONFIRM   = 180
-        self.DIST_RECOVERY       = 60
-        # get_hands conservé pour compatibilité — non utilisé dans v3
-        self.get_hands           = None
-
-        self.VELOCITY_FAST_THRESHOLD = 10
-        self.DIST_HAND_FAST          = 350
-
-        self.CARRIER_LOCK_DURATION: int = 2    # v3 : était 6
-        self._carrier_lock_frames: dict[int, int] = {}
-
-        # État interne pour la gate ts_ms
-        self._last_associated_ts:   int       = -1
-        self._assigned_hand_ids:    set[int]  = set()
+        self.N_POSE_CONFIRM    = 6
+        self.get_hands         = None   # conservé pour compatibilité
 
         self.HANDS_MAX_AGE_FRAMES: int = 10
         self._hands_last_frame:    int = -999
         self._frame_counter:       int = 0
 
     # ======================================================================
-    # Provider mains (compatibilité v2 — non utilisé en v3)
+    # Compatibilité v3 (no-op en v4)
     # ======================================================================
     def set_hands_provider(self, func):
+        """Conservé pour compatibilité avec record_window. Sans effet en v4."""
         self.get_hands = func
 
     # ======================================================================
@@ -195,8 +193,10 @@ class Algorithm_Analysis(QObject):
     # ======================================================================
     def _cup_to_graph_coords(self, cup: dict):
         x_raw, y_raw = cup["last_pos"]
-        if cup.get("pos_is_graph_space", False):
-            xg, yg = int(x_raw), int(y_raw)
+        if cup.get("pos_is_top_mm", False):
+            # pos_is_top_mm=True → last_pos est déjà en mm table
+            xg = int((x_raw / self.TABLE_SIZE_MM) * self.grid_size)
+            yg = int((y_raw / self.TABLE_SIZE_MM) * self.grid_size)
         else:
             xg = int((x_raw / self.TABLE_SIZE_MM) * self.grid_size)
             yg = int((y_raw / self.TABLE_SIZE_MM) * self.grid_size)
@@ -276,11 +276,12 @@ class Algorithm_Analysis(QObject):
     def stop(self):
         print("[ALGO] STOP demandé")
         self.running = False
+        self.cup_tracker.stop()                                            # ← NOUVEAU
         pytime.sleep(0.01)
         self.waiting_for_consigne_key = False
 
     # ======================================================================
-    # Config / assets
+    # Config / assets (inchangé)
     # ======================================================================
     def load_config(self, path: str):
         try:
@@ -341,7 +342,7 @@ class Algorithm_Analysis(QObject):
                     cv2.waitKey(1)
 
     # ======================================================================
-    # Détection ArUco
+    # Détection ArUco (inchangé)
     # ======================================================================
     def _detect_markers(self, frame):
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -367,7 +368,7 @@ class Algorithm_Analysis(QObject):
         return state
 
     # ======================================================================
-    # Dessin overlays RA
+    # Dessin overlays RA (inchangé)
     # ======================================================================
     def draw_from_config(self, img, marker_config, projector_x, projector_y, marker_size, marker_id=None):
         for element in marker_config:
@@ -446,7 +447,7 @@ class Algorithm_Analysis(QObject):
         cv2.waitKey(1)
 
     # ======================================================================
-    # Export
+    # Export (inchangé)
     # ======================================================================
     def save_to_buffer(self, graph_coords_ArUco):
         frame_data = {
@@ -467,7 +468,7 @@ class Algorithm_Analysis(QObject):
         print(f"Données sauvegardées dans {self.output_csv}")
 
     # ======================================================================
-    # MultiDim
+    # MultiDim (inchangé)
     # ======================================================================
     def select_next_marker(self, direction):
         if not self.marker_states:
@@ -511,30 +512,22 @@ class Algorithm_Analysis(QObject):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
 
     # ======================================================================
-    # Cup tracking — cam_bottom
+    # Cup tracking — cam_bottom (inchangé vs v3)
     # ======================================================================
     def update_cups_bottom(self, detected_markers: dict):
-        """
-        Met à jour l'état des tasses depuis les détections ArUco.
-
-        v3 : règle métier "1 seule tasse soulevée simultanément" appliquée ici.
-        """
         N_LIFT_CONFIRM = getattr(self, "N_LIFT_CONFIRM", 3)
         N_POSE_CONFIRM = getattr(self, "N_POSE_CONFIRM", 6)
 
         for marker_id, pos in detected_markers.items():
             if marker_id not in self.cups:
                 self.cups[marker_id] = {
-                    "state":              "POSEE",
-                    "last_pos":           pos.copy(),
-                    "lost_frames":        0,
-                    "carrier_hand_id":    None,
-                    "has_active_hand":    False,
-                    "lift_frames":        0,
-                    "pose_frames":        0,
-                    "pos_is_graph_space": False,
+                    "state":          "POSEE",
+                    "last_pos":       pos.copy(),
+                    "lost_frames":    0,
+                    "lift_frames":    0,
+                    "pose_frames":    0,
+                    "pos_is_top_mm":  False,
                 }
-                self._carrier_lock_frames[marker_id] = 0
 
             cup = self.cups[marker_id]
             cup["lost_frames"] = 0
@@ -542,24 +535,20 @@ class Algorithm_Analysis(QObject):
             if cup["state"] in ("SOULEVEE", "PEUT_ETRE_SOULEVEE"):
                 cup["pose_frames"] = cup.get("pose_frames", 0) + 1
                 if cup["pose_frames"] >= N_POSE_CONFIRM:
-                    cup["last_pos"]           = pos.copy()
-                    cup["lift_frames"]        = 0
-                    cup["pose_frames"]        = 0
-                    cup["carrier_hand_id"]    = None
-                    cup["state"]              = "POSEE"
-                    cup["pos_is_graph_space"] = False
-                    self._carrier_lock_frames[marker_id] = 0
+                    cup["last_pos"]        = pos.copy()
+                    cup["lift_frames"]     = 0
+                    cup["pose_frames"]     = 0
+                    cup["state"]           = "POSEE"
+                    cup["pos_is_top_mm"]   = False
                 else:
-                    cup["last_pos"]           = pos.copy()
-                    cup["pos_is_graph_space"] = False
+                    cup["last_pos"]        = pos.copy()
+                    cup["pos_is_top_mm"]   = False
             else:
-                cup["last_pos"]           = pos.copy()
-                cup["lift_frames"]        = 0
-                cup["pose_frames"]        = 0
-                cup["carrier_hand_id"]    = None
-                cup["state"]              = "POSEE"
-                cup["pos_is_graph_space"] = False
-                self._carrier_lock_frames[marker_id] = 0
+                cup["last_pos"]        = pos.copy()
+                cup["lift_frames"]     = 0
+                cup["pose_frames"]     = 0
+                cup["state"]           = "POSEE"
+                cup["pos_is_top_mm"]   = False
 
         for marker_id, cup in self.cups.items():
             if marker_id in detected_markers:
@@ -574,149 +563,65 @@ class Algorithm_Analysis(QObject):
                 if cup["lift_frames"] >= N_LIFT_CONFIRM:
                     cup["state"] = "SOULEVEE"
 
-        # ── Règle métier v3 : max 1 tasse soulevée simultanément ──────────
-        soulevees = [
-            mid for mid, c in self.cups.items()
-            if c["state"] == "SOULEVEE"
-        ]
+        # Règle métier : max 1 tasse soulevée (inchangé)
+        soulevees = [mid for mid, c in self.cups.items() if c["state"] == "SOULEVEE"]
         if len(soulevees) > 1:
-            # Conserver celle avec le plus grand lift_frames (la plus ancienne)
-            soulevees.sort(
-                key=lambda mid: self.cups[mid].get("lift_frames", 0),
-                reverse=True
-            )
+            soulevees.sort(key=lambda mid: self.cups[mid].get("lift_frames", 0), reverse=True)
             for mid in soulevees[1:]:
-                self.cups[mid]["state"]           = "POSEE"
-                self.cups[mid]["carrier_hand_id"] = None
-                self._carrier_lock_frames[mid]    = 0
+                self.cups[mid]["state"]        = "POSEE"
+                self.cups[mid]["pos_is_top_mm"] = False
 
     # ======================================================================
-    # Cup tracking — association mains
+    # Cup tracking — cam_top CSRT                                 ← NOUVEAU
     # ======================================================================
-    def associate_hands_to_cups(self, hands: list):
+    def _init_csrt_for_cup(self, marker_id: int, frame_top: np.ndarray) -> bool:
         """
-        v3 : appelé UNIQUEMENT depuis detect_and_process via hand_buffer,
-        donc seulement quand ts_ms a changé → pas de double-association
-        sur données périmées.
+        Initialise le tracker CSRT quand une tasse passe à l'état SOULEVEE.
 
-        assigned_hand_ids est persistant sur le ts_ms courant.
+        La bbox est construite en projetant la dernière position ArUco connue
+        (en mm) dans l'espace pixel de la cam_top via cup_tracker.table_mm_to_pixel().
         """
-        DIST_CONFIRM = getattr(self, "DIST_HAND_CONFIRM",   180)
-        DIST_NORMAL  = getattr(self, "DIST_HAND_THRESHOLD", 120)
-        DIST_FAST    = getattr(self, "DIST_HAND_FAST",      280)
+        cup = self.cups.get(marker_id)
+        if cup is None:
+            return False
 
-        hands_are_fresh = len(hands) > 0
+        x_mm, y_mm = cup["last_pos"]
 
-        # assigned_hand_ids est déjà géré par detect_and_process (réinit par ts_ms)
-        assigned_hand_ids = self._assigned_hand_ids
+        # Projeter la position mm → pixel cam_top
+        px, py = self.cup_tracker.table_mm_to_pixel(x_mm, y_mm)
+        half   = CUP_BBOX_PX // 2
+        bbox   = (int(px - half), int(py - half), CUP_BBOX_PX, CUP_BBOX_PX)
 
-        for marker_id, cup in self.cups.items():
-            if cup["state"] not in ("SOULEVEE", "PEUT_ETRE_SOULEVEE"):
-                cup["carrier_hand_id"] = None
-                cup["has_active_hand"] = False
-                self._carrier_lock_frames[marker_id] = 0
-                continue
+        ok = self.cup_tracker.start(frame_top, bbox, cup_id=marker_id)
+        return ok
 
-            if cup.get("lost_frames", 0) == 0:
-                cup["carrier_hand_id"] = None
-                cup["has_active_hand"] = False
-                cup["pos_is_graph_space"] = False
-                self._carrier_lock_frames[marker_id] = 0
-                continue
+    def _update_csrt(self, frame_top: np.ndarray):
+        """
+        Met à jour le tracker CSRT et écrit la position dans cups[].
 
-            if cup.get("pos_is_graph_space", False):
-                cup_graph = np.array(cup["last_pos"], dtype=np.float32)
-            else:
-                x_mm, y_mm = cup["last_pos"]
-                cup_graph  = np.array([
-                    (x_mm / self.TABLE_SIZE_MM) * self.grid_size,
-                    (y_mm / self.TABLE_SIZE_MM) * self.grid_size,
-                ], dtype=np.float32)
+        Appelé à chaque frame quand au moins une tasse est SOULEVEE.
+        Si le tracker échoue, la tasse garde sa dernière position connue.
+        """
+        if not self.cup_tracker.is_active:
+            return
 
-            base_threshold = (
-                DIST_CONFIRM if cup["state"] == "PEUT_ETRE_SOULEVEE" else DIST_NORMAL
-            )
+        ok, pos_mm = self.cup_tracker.update(frame_top)
+        marker_id  = self.cup_tracker.cup_id
 
-            best_hand = None
-            best_dist = float("inf")
+        if marker_id not in self.cups:
+            self.cup_tracker.stop()
+            return
 
-            if hands_are_fresh:
-                for hand in hands:
-                    if hand["id"] in assigned_hand_ids:
-                        continue
-                    hand_pos  = np.array([hand["x"], hand["y"]], dtype=np.float32)
-                    vx        = hand.get("vx", 0.0)
-                    vy        = hand.get("vy", 0.0)
-                    speed     = float(np.hypot(vx, vy))
-                    hand_pred = hand_pos + np.array([vx, vy], dtype=np.float32)
-                    dist      = float(np.linalg.norm(hand_pred - cup_graph))
-                    threshold = DIST_FAST if speed > self.VELOCITY_FAST_THRESHOLD else base_threshold
-                    if dist < best_dist and dist < threshold:
-                        best_dist = dist
-                        best_hand = hand
+        cup = self.cups[marker_id]
 
-            if best_hand is not None:
-                vx = best_hand.get("vx", 0.0)
-                vy = best_hand.get("vy", 0.0)
-                predicted_pos = np.array(
-                    [best_hand["x"] + vx, best_hand["y"] + vy], dtype=np.float32
-                )
-                if cup.get("pos_is_graph_space", False):
-                    cup["last_pos"] = predicted_pos
-                else:
-                    x_mm, y_mm = cup["last_pos"]
-                    old_graph = np.array([
-                        (x_mm / self.TABLE_SIZE_MM) * self.grid_size,
-                        (y_mm / self.TABLE_SIZE_MM) * self.grid_size,
-                    ], dtype=np.float32)
-                    cup["last_pos"] = old_graph * 0.5 + predicted_pos * 0.5
-
-                cup["carrier_hand_id"]    = best_hand["id"]
-                cup["has_active_hand"]    = True
-                cup["last_vx"]            = vx
-                cup["last_vy"]            = vy
-                cup["pos_is_graph_space"] = True
-                self._carrier_lock_frames[marker_id] = self.CARRIER_LOCK_DURATION
-                assigned_hand_ids.add(best_hand["id"])
-
-            else:
-                lock = self._carrier_lock_frames.get(marker_id, 0)
-                if lock > 0 and cup.get("carrier_hand_id") is not None:
-                    known_hid  = cup["carrier_hand_id"]
-                    found_hand = next(
-                        (h for h in hands
-                         if h["id"] == known_hid and h["id"] not in assigned_hand_ids),
-                        None
-                    )
-                    if found_hand is not None:
-                        vx = found_hand.get("vx", 0.0)
-                        vy = found_hand.get("vy", 0.0)
-                        cup["last_pos"] = np.array(
-                            [found_hand["x"] + vx, found_hand["y"] + vy],
-                            dtype=np.float32,
-                        )
-                        cup["pos_is_graph_space"] = True
-                        cup["has_active_hand"]    = True
-                        cup["last_vx"]            = vx
-                        cup["last_vy"]            = vy
-                        assigned_hand_ids.add(known_hid)
-                    else:
-                        frames_elapsed = self.CARRIER_LOCK_DURATION - lock + 1
-                        decay          = 0.65 ** frames_elapsed
-                        vx_decayed = cup.get("last_vx", 0.0) * decay
-                        vy_decayed = cup.get("last_vy", 0.0) * decay
-                        new_pos    = np.array(cup["last_pos"], dtype=np.float32) + \
-                                     np.array([vx_decayed, vy_decayed], dtype=np.float32)
-                        new_pos    = np.clip(new_pos, 0.0, float(self.grid_size))
-                        cup["last_pos"]        = new_pos
-                        cup["last_vx"]         = vx_decayed
-                        cup["last_vy"]         = vy_decayed
-                        cup["has_active_hand"] = False
-                    self._carrier_lock_frames[marker_id] = lock - 1
-                else:
-                    cup["carrier_hand_id"] = None
-                    cup["has_active_hand"] = False
-                    self._carrier_lock_frames[marker_id] = 0
+        if ok and pos_mm is not None:
+            cup["last_pos"]      = list(pos_mm)   # (x_mm, y_mm) repère table
+            cup["pos_is_top_mm"] = True
+        else:
+            # Tracker perdu → on garde la dernière position, on ne stoppe pas
+            # (peut se récupérer si le drift était temporaire)
+            # Le stop se fera quand ArUco réapparaît (dans update_cups_bottom)
+            pass
 
     # ======================================================================
     # Boucle principale
@@ -725,7 +630,7 @@ class Algorithm_Analysis(QObject):
         from src.core.config.app_config import CALIBRATION_TAG_IDS
 
         self.running = True
-        print("detect_and_process started — v3")
+        print("detect_and_process started — v4 CSRT")
 
         self._fps_counter_bottom = 0
         self._fps_time_bottom    = pytime.time()
@@ -738,13 +643,16 @@ class Algorithm_Analysis(QObject):
         self._show_timeline_assets()
         print("Consignes affichées — démarrage détection.")
 
+        # État CSRT : on track quel marker_id est actuellement suivi
+        _csrt_tracking_id: int = -1  # -1 = aucun
+
         while self.running:
             self._frame_counter += 1
             self._fps_counter_bottom += 1
             now = pytime.time()
             if now - self._fps_time_bottom >= 1.0:
                 print(f"[FPS] cam_bottom = {self._fps_counter_bottom} | "
-                      f"hand_buffer_age = {self.hand_buffer.last_age_ms} ms")
+                      f"frame_buffer_age = {self.frame_buffer.last_age_ms} ms")
                 self._fps_counter_bottom = 0
                 self._fps_time_bottom    = now
 
@@ -759,6 +667,7 @@ class Algorithm_Analysis(QObject):
             corners, ids       = self._detect_markers(frame)
             graph_coords_ArUco = []
             detected_markers   = {}
+            marker_size        = 40
 
             if ids is not None and len(ids) > 0:
                 valid_indices = [
@@ -789,7 +698,6 @@ class Algorithm_Analysis(QObject):
                     proj        = self.table_to_projector(x_mm, y_mm)
                     projector_x = int(proj[0])
                     projector_y = int(proj[1])
-                    marker_size = 40
 
                     graph_coords_ArUco.append([marker_id_int, [x_mm, y_mm]])
                     detected_markers[marker_id_int] = np.array([x_mm, y_mm], dtype=np.float32)
@@ -813,53 +721,77 @@ class Algorithm_Analysis(QObject):
                             )
 
             if self.hand_tracking_enabled:
+                # ── 1. Mise à jour états depuis cam_bottom ──────────────
                 self.update_cups_bottom(detected_markers)
 
-                # ── v3 : gate sur ts_ms via HandStateBuffer ──────────────
-                snapshot = self.hand_buffer.get_fresh_snapshot()
+                # ── 2. Récupérer la frame cam_top ───────────────────────
+                frame_top = self.frame_buffer.get_latest()
 
-                if snapshot is not None:
-                    # Nouveau ts_ms → réinitialiser l'exclusivité et associer
-                    self._assigned_hand_ids = set()
-                    self.associate_hands_to_cups(snapshot.hands)
-                    age = self.hand_buffer.last_age_ms
-                    print(f"[SYNC] assoc ts={snapshot.ts_ms} age={age} ms | "
-                          f"bottom_frame={self._frame_counter}")
-                elif self.hand_buffer.last_age_ms > HAND_STALE_MS:
-                    # Buffer trop vieux → libérer tous les locks proprement
+                # ── 3. Gestion du tracker CSRT ──────────────────────────
+                if frame_top is not None:
+
+                    # Chercher si une tasse vient de passer SOULEVEE
+                    # et que le CSRT n'est pas encore actif pour elle.
+                    # On attend CSRT_MIN_LOST_FRAMES frames sans ArUco avant
+                    # d'init le CSRT — évite le stop immédiat dû au clignotement
+                    # ArUco en bordure de levée.
+                    CSRT_MIN_LOST_FRAMES = self.N_POSE_CONFIRM  # même seuil que repose
                     for marker_id, cup in self.cups.items():
-                        if cup.get("has_active_hand", False):
-                            cup["carrier_hand_id"] = None
-                            cup["has_active_hand"] = False
-                            self._carrier_lock_frames[marker_id] = 0
-                # else : snapshot déjà traité, rien à faire — pas de ré-association
+                        if (cup["state"] == "SOULEVEE"
+                                and cup.get("lost_frames", 0) >= CSRT_MIN_LOST_FRAMES
+                                and not self.cup_tracker.is_active
+                                and marker_id != _csrt_tracking_id):
+                            ok = self._init_csrt_for_cup(marker_id, frame_top)
+                            if ok:
+                                _csrt_tracking_id = marker_id
+                            break
+
+                    # Mettre à jour le tracker si actif
+                    if self.cup_tracker.is_active:
+                        self._update_csrt(frame_top)
+
+                    # Stopper le tracker si ArUco est revenu de façon stable.
+                    # On utilise pose_frames (incrémenté dans update_cups_bottom
+                    # quand ArUco est détecté pendant état SOULEVEE) comme garde.
+                    if self.cup_tracker.is_active:
+                        tracked_id = self.cup_tracker.cup_id
+                        if tracked_id in detected_markers:
+                            cup = self.cups.get(tracked_id, {})
+                            if cup.get("pose_frames", 0) >= self.N_POSE_CONFIRM:
+                                print(f"[CSRT] ArUco stable ({self.N_POSE_CONFIRM} frames) "
+                                      f"— cup_id={tracked_id}, CSRT stoppé")
+                                self.cup_tracker.stop()
+                                _csrt_tracking_id = -1
+
+                else:
+                    # Pas de frame top disponible — si le tracker était actif,
+                    # on garde la dernière position connue (pas de stop brutal)
+                    if self.frame_buffer.last_age_ms > 500 and self.cup_tracker.is_active:
+                        print("[CSRT] frame_top indisponible > 500 ms — stop tracker")
+                        self.cup_tracker.stop()
+                        _csrt_tracking_id = -1
 
             else:
+                # Mode hand_tracking désactivé : tasses = positions ArUco uniquement
                 self.cups = {
                     marker_id: {
-                        "state":              "POSEE",
-                        "last_pos":           pos.copy(),
-                        "lost_frames":        0,
-                        "carrier_hand_id":    None,
-                        "has_active_hand":    False,
-                        "lift_frames":        0,
-                        "pos_is_graph_space": False,
+                        "state":         "POSEE",
+                        "last_pos":      pos.copy(),
+                        "lost_frames":   0,
+                        "lift_frames":   0,
+                        "pos_is_top_mm": False,
                     }
                     for marker_id, pos in detected_markers.items()
                 }
 
+            # ── 4. Rendu projecteur ─────────────────────────────────────
             for marker_id, cup in self.cups.items():
-                if cup.get("pos_is_graph_space", False):
-                    x_raw, y_raw = cup["last_pos"]
-                    x_mm = (x_raw / self.grid_size) * self.TABLE_SIZE_MM
-                    y_mm = (y_raw / self.grid_size) * self.TABLE_SIZE_MM
-                else:
-                    x_mm, y_mm = cup["last_pos"]
+                x_mm, y_mm = cup["last_pos"]
                 proj = self.table_to_projector(x_mm, y_mm)
                 self._draw_cup_ring_on_projector(
                     current_image_background,
                     int(proj[0]), int(proj[1]),
-                    marker_size=40, cup=cup,
+                    marker_size=marker_size, cup=cup,
                 )
 
             if self.show_grid and self.record_window is not None:
@@ -883,14 +815,12 @@ class Algorithm_Analysis(QObject):
             self.data_signal.emit({"data": graph_coords_fusion})
             self.save_to_buffer(graph_coords_fusion)
 
-            # PAS de sleep ici en v3 — régulation par la caméra
-
         self.save_to_csv()
         print("detect_and_process terminé")
         self.finished_signal.emit()
 
     # ======================================================================
-    # Helpers anchor
+    # Helpers anchor (inchangé)
     # ======================================================================
     def _select_physical_corner_runtime(self, pts, position):
         if position == "TL":

@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-hand_tracking_thread.py — VERSION v3 STABLE
-============================================
-Changements vs v2 :
-  - Écrit dans HandStateBuffer au lieu d'émettre hands_signal
-    → découple complètement les deux threads
-  - MAX_MISSING_FRAMES = 2 (était 3) — slot zombie éliminé encore plus vite
-  - detect_async : timestamp capturé juste avant l'appel (évite la dérive
-    entre cap.read() et la soumission à MediaPipe)
-  - pytime.sleep retiré de la boucle principale — la caméra est le vrai
-    régulateur de cadence ; le sleep artificiel aggravait le GIL contention
+hand_tracking_thread.py — VERSION v4
+=====================================
+Changements vs v3 :
+  - Accepte un FrameBuffer en plus du HandStateBuffer
+    → chaque frame cap.read() est poussée dans frame_buffer pour que
+      Algorithm_Analysis puisse l'utiliser pour le tracker CSRT
+  - Aucune autre logique modifiée : Kalman, HandSlotManager, HandStateBuffer
+    restent identiques
+  - hands_signal et hand_buffer.push() conservés — utilisés plus tard
+    pour la feature dessin
 """
 
 import cv2
@@ -23,11 +23,12 @@ import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 from src.core.utils.paths import config_path
-from src.core.Hand_tracking.hand_state_buffer import HandStateBuffer   # ← nouveau
+from src.core.Hand_tracking.hand_state_buffer import HandStateBuffer
+from src.core.Hand_tracking.frame_buffer import FrameBuffer          # ← NOUVEAU
 
 
 # ---------------------------------------------------------------------------
-# Filtre de Kalman 2D — position + vitesse
+# Filtre de Kalman 2D — position + vitesse (inchangé)
 # ---------------------------------------------------------------------------
 class KalmanHand:
     def __init__(self, x: float, y: float,
@@ -85,11 +86,11 @@ class KalmanHand:
 
 
 # ---------------------------------------------------------------------------
-# Gestionnaire de slots de mains
+# Gestionnaire de slots de mains (inchangé)
 # ---------------------------------------------------------------------------
 class HandSlotManager:
     MAX_HANDS          = 2
-    MAX_MISSING_FRAMES = 2    # v3 : réduit de 3 à 2 — élimine les zombies plus vite
+    MAX_MISSING_FRAMES = 2
     MATCH_THRESHOLD    = 150
     VELOCITY_WEIGHT    = 0.4
 
@@ -180,14 +181,13 @@ class HandSlotManager:
 # ---------------------------------------------------------------------------
 class HandTrackingThread(QThread):
     frame_signal = pyqtSignal(object)
-    # hands_signal conservé pour compatibilité ascendante mais plus utilisé
-    # pour l'association — préférer hand_buffer.get_fresh_snapshot()
-    hands_signal = pyqtSignal(object)
+    hands_signal = pyqtSignal(object)   # conservé pour la future feature dessin
 
     def __init__(self, camera_id: int = 0,
                  kalman_process_noise: float = 5e-2,
                  kalman_measure_noise: float = 3.0,
-                 hand_buffer: HandStateBuffer = None):
+                 hand_buffer: HandStateBuffer = None,
+                 frame_buffer: FrameBuffer = None):          # ← NOUVEAU paramètre
         super().__init__()
 
         BASE_DIR = Path(__file__).resolve().parent
@@ -200,8 +200,8 @@ class HandTrackingThread(QThread):
         self.TABLE_SIZE_MM = 597.0
         self.GRID_SIZE     = 700
 
-        # Buffer partagé — créé ici si non fourni par l'appelant
-        self.hand_buffer = hand_buffer or HandStateBuffer(max_age_ms=200)
+        self.hand_buffer  = hand_buffer  or HandStateBuffer(max_age_ms=200)
+        self.frame_buffer = frame_buffer or FrameBuffer(max_age_ms=200)  # ← NOUVEAU
 
         self._slot_manager = HandSlotManager(
             process_noise=kalman_process_noise,
@@ -225,7 +225,7 @@ class HandTrackingThread(QThread):
 
     def _on_result(self, result, output_image, timestamp_ms):
         with self._result_lock:
-            self._latest_result = (result, timestamp_ms)   # ← on conserve le ts original
+            self._latest_result = (result, timestamp_ms)
 
     def _load_pose(self):
         data = json.load(open(self.POSE_PATH))
@@ -284,38 +284,41 @@ class HandTrackingThread(QThread):
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
         cap.set(cv2.CAP_PROP_BUFFERSIZE,   1)
 
-        print(f"[HAND THREAD] Camera {self.camera_id} — v3 HandStateBuffer active")
+        print(f"[HAND THREAD] Camera {self.camera_id} — v4 FrameBuffer active")
         if not cap.isOpened():
             print("[HAND THREAD ERROR] Camera not opened")
             return
 
         self._fps_counter_top = 0
         self._fps_time_top    = pytime.time()
-        _last_result_ts       = -1    # ts_ms du dernier résultat MediaPipe traité
+        _last_result_ts       = -1
 
         while self.running:
             ret, frame = cap.read()
             if not ret:
                 continue
 
+            # ── NOUVEAU : pousser la frame brute dans le FrameBuffer ──────
+            # Algorithm_Analysis en a besoin pour le tracker CSRT.
+            # On pousse AVANT la détection MediaPipe pour minimiser la latence.
+            self.frame_buffer.push(frame)
+            # ─────────────────────────────────────────────────────────────
+
             h, w, _ = frame.shape
             rgb      = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-            # Timestamp capturé JUSTE avant l'envoi à MediaPipe
             timestamp_ms = int(pytime.time() * 1000)
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
             self.detector.detect_async(mp_image, timestamp_ms)
 
-            # Lire le dernier résultat disponible (peut être None si MP n'a pas encore répondu)
             with self._result_lock:
-                result_payload = self._latest_result   # (result, original_ts) ou None
+                result_payload = self._latest_result
 
             raw_detections: list[tuple[float, float]] = []
 
             if result_payload is not None:
                 result, result_ts = result_payload
 
-                # Ne retraiter que si nouveau résultat MP
                 if result_ts != _last_result_ts:
                     _last_result_ts = result_ts
 
@@ -331,22 +334,21 @@ class HandTrackingThread(QThread):
 
                     hands_data = self._slot_manager.update(raw_detections)
                     for h_entry in hands_data:
-                        h_entry["ts_ms"] = result_ts   # ts original MP, pas wall_ms
+                        h_entry["ts_ms"] = result_ts
 
-                    # ← écriture dans le buffer partagé (thread-safe)
+                    # Écriture dans HandStateBuffer (pour la future feature dessin)
                     self.hand_buffer.push(hands_data)
-                    # Signal conservé pour les éventuels autres abonnés (UI, debug)
                     self.hands_signal.emit(hands_data)
 
             self._fps_counter_top += 1
             now = pytime.time()
             if now - self._fps_time_top >= 1.0:
-                print(f"[FPS] cam_top = {self._fps_counter_top}")
+                print(f"[FPS] cam_top = {self._fps_counter_top} | "
+                      f"frame_buffer_age = {self.frame_buffer.last_age_ms} ms")
                 self._fps_counter_top = 0
                 self._fps_time_top    = now
 
             self.frame_signal.emit(frame)
-            # PAS de sleep ici — la caméra régule naturellement à son FPS matériel
 
         cap.release()
         print("[HAND THREAD] stopped")
