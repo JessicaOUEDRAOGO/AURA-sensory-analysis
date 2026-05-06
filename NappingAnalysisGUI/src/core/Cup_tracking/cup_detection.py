@@ -68,32 +68,33 @@ except ImportError as exc:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Parametres de detection HSV — calibres pour tasses blanches/creme top-view
+#  Parametres de detection — tasses NOIRES sur table BLANCHE retro-eclairee
 # ══════════════════════════════════════════════════════════════════════════════
+# Strategie : seuillage sur la VALEUR (V) en niveaux de gris.
+# La table est tres lumineuse (V~230-255), les tasses sont sombres (V<120).
+# On travaille en niveaux de gris + seuil adaptatif plutot qu en HSV
+# pour etre robuste aux variations de couleur (tasse noire, verte, bleue...).
 
-# Plage HSV : tasses blanches/creme (faible saturation, haute valeur)
-# H : 0-180 (toutes teintes, car blanc = pas de teinte)
-# S : 0-80  (peu sature -> blanc / creme)
-# V : 160-255 (lumineux)
-HSV_LOWER = np.array([0,   0, 150], dtype=np.uint8)
-HSV_UPPER = np.array([180, 90, 255], dtype=np.uint8)
+# Seuil V (luminosite) en dessous duquel un pixel est considere "tasse"
+# Valeur initiale : 110. Ajustable live avec +/- (pas de 5).
+V_THRESHOLD_INIT = 110
 
-# Aire contour en pixels carres
-AREA_MIN = 1_500
-AREA_MAX = 60_000
+# Aire contour en pixels carres — une tasse vue de cote occupe ~3000-30000 px
+AREA_MIN = 2_000
+AREA_MAX = 80_000
 
-# Circularite minimale (1.0 = cercle parfait) — tasse vue de dessus ~ 0.5-0.8
-CIRCULARITY_MIN = 0.40
+# Circularite minimale — tasse vue de cote = ellipse ~ 0.25-0.60
+CIRCULARITY_MIN = 0.20
 
-# Ratio W/H de la bounding rect (tasse ~ronde)
-ASPECT_MIN = 0.35
-ASPECT_MAX = 2.8
+# Ratio W/H acceptable (tasse+anse vue de cote : assez large)
+ASPECT_MIN = 0.25
+ASPECT_MAX = 3.5
 
-# Marge en pixels autour de la bbox detecee avant tracking
-BBOX_MARGIN = 18
+# Marge en pixels autour de la bbox detectee avant tracking
+BBOX_MARGIN = 20
 
 # IOU pour appariement detection <-> tracker existant
-IOU_MATCH_THRESHOLD = 0.20
+IOU_MATCH_THRESHOLD = 0.15
 
 # Frames perdues avant suppression du tracker
 MAX_LOST_FRAMES = 60
@@ -118,32 +119,33 @@ _PALETTE = [
 
 class HsvCupDetector:
     """
-    Detecte les tasses blanches/creme vues de dessus par segmentation HSV.
+    Detecte les tasses NOIRES/SOMBRES sur table BLANCHE retro-eclairee.
 
-    Approche :
-      1. Convertir BGR -> HSV
-      2. Appliquer un masque de couleur (blanc/creme : S faible, V eleve)
-      3. Fermeture morphologique pour boucher l'interieur de la tasse
-      4. Extraction de contours + filtres geometriques (aire, circularite, ratio)
+    Approche par seuillage sur la luminosite (canal V en HSV) :
+      1. Convertir BGR -> niveaux de gris
+      2. Seuil fixe : pixels sombres (V < v_threshold) = tasse
+      3. Fermeture morphologique pour remplir l anse et les reflets internes
+      4. Suppression des objets touchant le bord (artefacts de cadre)
+      5. Filtres geometriques : aire, circularite, ratio W/H
 
-    Ajustement live : modifier v_min avec les touches + et - pendant l'execution.
+    Ajustement live : touches + et - pour modifier v_threshold.
     """
 
     def __init__(self,
-                 hsv_lower:       np.ndarray = HSV_LOWER.copy(),
-                 hsv_upper:       np.ndarray = HSV_UPPER.copy(),
+                 v_threshold:     int   = V_THRESHOLD_INIT,
                  area_min:        int   = AREA_MIN,
                  area_max:        int   = AREA_MAX,
                  circularity_min: float = CIRCULARITY_MIN,
                  margin:          int   = BBOX_MARGIN):
-        self.hsv_lower       = hsv_lower.copy()
-        self.hsv_upper       = hsv_upper.copy()
+        self.v_threshold     = v_threshold
         self.area_min        = area_min
         self.area_max        = area_max
         self.circularity_min = circularity_min
         self.margin          = margin
-        self._k_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
+        # Noyaux morphologiques
+        self._k_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
         self._k_open  = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5,  5))
+        self._k_dilate= cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7,  7))
 
     # ── API ───────────────────────────────────────────────────────────────────
 
@@ -158,22 +160,41 @@ class HsvCupDetector:
 
     @property
     def v_min(self) -> int:
-        return int(self.hsv_lower[2])
+        """Alias pour l affichage HUD (v_threshold)."""
+        return self.v_threshold
 
     @v_min.setter
     def v_min(self, v: int) -> None:
-        self.hsv_lower[2] = np.clip(v, 0, 254)
+        self.v_threshold = int(np.clip(v, 10, 245))
 
     # ── Implementation ────────────────────────────────────────────────────────
 
     def _mask(self, frame: np.ndarray) -> np.ndarray:
-        hsv  = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv, self.hsv_lower, self.hsv_upper)
-        # Fermeture : bouche l'interieur creux de la tasse (reflet sombre)
+        # 1. Niveaux de gris
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        # 2. Seuil : sombre = tasse (255), clair = table (0)
+        _, mask = cv2.threshold(gray, self.v_threshold, 255, cv2.THRESH_BINARY_INV)
+        # 3. Fermeture : bouche l anse + reflets internes de la tasse
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self._k_close, iterations=3)
-        # Ouverture : retire les petits artefacts lumineux (reflets, bordures)
+        # 4. Ouverture : elimine les petits artefacts
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  self._k_open,  iterations=1)
+        # 5. Suppression des blobs touchant le bord (cadre de table, cables)
+        mask = self._remove_border_blobs(mask)
         return mask
+
+    @staticmethod
+    def _remove_border_blobs(mask: np.ndarray, border: int = 5) -> np.ndarray:
+        """Supprime les contours connectes au bord de l image."""
+        h, w = mask.shape
+        flood = mask.copy()
+        # Flood-fill depuis chaque pixel de bord
+        for x in range(w):
+            if flood[0, x]:       cv2.floodFill(flood, None, (x, 0),       0)
+            if flood[h-1, x]:     cv2.floodFill(flood, None, (x, h-1),     0)
+        for y in range(h):
+            if flood[y, 0]:       cv2.floodFill(flood, None, (0, y),       0)
+            if flood[y, w-1]:     cv2.floodFill(flood, None, (w-1, y),     0)
+        return flood
 
     def _bboxes(self,
                 frame: np.ndarray,
@@ -259,16 +280,28 @@ class TrackingManager:
                detected: List[Tuple[int, int, int, int]]
                ) -> List[TrackedCup]:
 
-        # 1. Update CSRT
+        # 1. Update CSRT — compatible avec les deux signatures de CupTopTracker :
+        #    ancienne : (ok, pos_mm)        — 2 valeurs
+        #    nouvelle : (ok, pos_mm, bbox)  — 3 valeurs
         for cup in list(self._cups.values()):
-            ok, pos_mm = cup.tracker.update(frame)
+            result = cup.tracker.update(frame)
+            if len(result) == 3:
+                ok, pos_mm, bbox = result
+            else:
+                ok, pos_mm = result
+                bbox = None
             if ok:
                 cup.pos_mm      = pos_mm
                 cup.lost_frames = 0
-                # Recuperer la bbox interne du tracker OpenCV
-                _, raw = cup.tracker._tracker.update(frame)
-                rx, ry, rw, rh = raw
-                cup.bbox = (int(rx), int(ry), max(4, int(rw)), max(4, int(rh)))
+                if bbox is not None:
+                    cup.bbox = bbox
+                else:
+                    # Ancienne signature : recuperer la bbox via un 2e appel
+                    # (moins optimal mais compatible)
+                    ok2, raw = cup.tracker._tracker.update(frame)
+                    if ok2:
+                        rx, ry, rw, rh = raw
+                        cup.bbox = (int(rx), int(ry), max(4, int(rw)), max(4, int(rh)))
             else:
                 cup.lost_frames += 1
 
@@ -392,7 +425,7 @@ def draw_overlay(frame:    np.ndarray,
     lines = [
         f"FPS: {fps:.1f}",
         f"Tasses: {len(cups)}",
-        f"V_min: {v_min}  (+/-)",
+        f"V_seuil: {v_min}  (+sombre/-strict)",
     ]
     if debug:
         lines.append("[DEBUG HSV ON]")
@@ -419,10 +452,7 @@ def run(camera_index: int  = 0,
         pose_path = Path(__file__).resolve().parents[3] / "config" / pose_path
 
     if not pose_path.exists():
-        raise FileNotFoundError(
-            f"camtop_table_pose.json introuvable.\n"
-            
-        )
+        raise FileNotFoundError(f"File not found: {pose_path}")
 
     # Source video
     if video_path:
@@ -551,11 +581,13 @@ def run(camera_index: int  = 0,
             last_mask  = detector.mask(frame) if debug_mode else None
             print(f"\n[Pipeline] Debug HSV : {'ON' if debug_mode else 'OFF'}")
         elif key == ord('+') or key == ord('='):
-            detector.v_min = detector.v_min - 5   # baisser = detecte plus sombre
-            print(f"\n[Pipeline] V_min={detector.v_min}")
+            # + : monte le seuil -> accepte des tasses plus claires
+            detector.v_min = detector.v_min + 5
+            print(f"\n[Pipeline] V_seuil={detector.v_min} (detecte jusqu a V={detector.v_min})")
         elif key == ord('-'):
-            detector.v_min = detector.v_min + 5   # monter = plus strict
-            print(f"\n[Pipeline] V_min={detector.v_min}")
+            # - : baisse le seuil -> plus strict, seulement les tres sombres
+            detector.v_min = detector.v_min - 5
+            print(f"\n[Pipeline] V_seuil={detector.v_min} (detecte jusqu a V={detector.v_min})")
         elif key == ord('p'):
             paused = not paused
             print(f"\n[Pipeline] {'PAUSE' if paused else 'REPRISE'}")
@@ -585,8 +617,9 @@ def _parse_args() -> argparse.Namespace:
                    help="Appliquer la correction de distorsion")
     p.add_argument("--dist",        type=str, default="",
                    help="JSON camera_matrix + dist_coeffs (si --undistort)")
-    p.add_argument("--v-min",       type=int, default=int(HSV_LOWER[2]),
-                   help=f"Luminosite HSV minimale des tasses (defaut:{int(HSV_LOWER[2])})")
+    p.add_argument("--v-thresh",     type=int, default=V_THRESHOLD_INIT,
+                   help=f"Seuil V (luminosite) : pixels plus sombres que cette valeur "
+                        f"sont detectes comme tasse (defaut:{V_THRESHOLD_INIT})")
     p.add_argument("--area-min",    type=int, default=AREA_MIN,
                    help=f"Aire min contour px2 (defaut:{AREA_MIN})")
     p.add_argument("--area-max",    type=int, default=AREA_MAX,
@@ -597,7 +630,7 @@ def _parse_args() -> argparse.Namespace:
 if __name__ == "__main__":
     args = _parse_args()
     # Surcharge des parametres HSV depuis CLI
-    HSV_LOWER[2] = args.v_min
+    V_THRESHOLD_INIT = args.v_thresh
     AREA_MIN     = args.area_min
     AREA_MAX     = args.area_max
     run(
