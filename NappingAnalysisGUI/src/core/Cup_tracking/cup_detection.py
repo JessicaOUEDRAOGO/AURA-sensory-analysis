@@ -75,8 +75,10 @@ except ImportError as exc:
 V_THRESHOLD_INIT = 110
 
 # Parametres geometriques des contours
-AREA_MIN         = 2_000
-AREA_MAX         = 80_000
+# Aires calibrees pour PROCESS_WIDTH=640 (frame full HD reduite au 1/3)
+# Tasse vue de cote a 640px de large : ~40x60px = ~2400px2
+AREA_MIN         = 800
+AREA_MAX         = 25_000
 CIRCULARITY_MIN  = 0.20
 ASPECT_MIN       = 0.25
 ASPECT_MAX       = 3.5
@@ -84,6 +86,13 @@ BBOX_MARGIN      = 20
 
 # Tracker OpenCV a utiliser : "kcf" (rapide), "csrt" (precis), "mil"
 TRACKER_TYPE     = "kcf"
+
+# Resolution interne de traitement (detection + tracking)
+# La frame est redimensionnee a cette largeur avant tout traitement.
+# L affichage reste en resolution native.
+# Plus c est petit -> plus c est rapide, mais moins de detail.
+# 640 : optimal pour KCF sur CPU  |  960 : bon compromis  |  1280 : precis
+PROCESS_WIDTH    = 640
 
 # Intervalle entre deux passes de detection HSV completes (secondes)
 DETECT_INTERVAL_S = 0.15   # ~7 detections/sec — assez frequent pour reinit rapide
@@ -133,8 +142,10 @@ class HsvCupDetector:
         self.area_max        = area_max
         self.circularity_min = circularity_min
         self.margin          = margin
-        self._k_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
-        self._k_open  = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5,  5))
+        # Noyaux calibres pour PROCESS_WIDTH=640
+        # A 640px : tasse ~80-150px de large -> fermeture de 9px suffit
+        self._k_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+        self._k_open  = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
 
     @property
     def v_min(self) -> int:
@@ -154,7 +165,8 @@ class HsvCupDetector:
     def _mask(self, frame: np.ndarray) -> np.ndarray:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         _, mask = cv2.threshold(gray, self.v_threshold, 255, cv2.THRESH_BINARY_INV)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self._k_close, iterations=3)
+        # iterations=1 au lieu de 3 : evite la fusion de tasses proches
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, self._k_close, iterations=1)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  self._k_open,  iterations=1)
         mask = self._remove_border_blobs(mask)
         return mask
@@ -300,10 +312,20 @@ class TrackedCup:
             self.active = False
             return False
 
-    def update_pos_mm(self, frame: np.ndarray) -> None:
-        """Calcule la position mm depuis la bbox courante."""
+    def update_pos_mm(self, frame: np.ndarray,
+                      scale: float = 1.0) -> None:
+        """
+        Calcule la position mm depuis la bbox courante.
+        scale : facteur pour remonter les coords proc -> coords full HD.
+                (ex: 1920/640 = 3.0 si le tracker tourne sur frame 640px)
+                La camera_matrix est calibree en resolution native -> on doit
+                passer des coordonnees full HD a _pixel_to_table_mm.
+        """
         cx, cy = _center(self.bbox)
-        result = self.pose_tracker._pixel_to_table_mm(cx, cy)
+        # Remonter en coordonnees full HD avant la conversion geometrique
+        cx_full = cx / scale if scale != 1.0 else cx
+        cy_full = cy / scale if scale != 1.0 else cy
+        result = self.pose_tracker._pixel_to_table_mm(cx_full, cy_full)
         if result is not None:
             self.pos_mm = result
 
@@ -324,26 +346,25 @@ class TrackingManager:
 
     Strategie :
       Chaque frame :
-        1. KCF update (rapide, ~5ms/tasse)
-        2. Calcul position mm
+        1. KCF update (rapide, ~5ms/tasse) sur frame proc (640px)
+        2. Calcul position mm avec remontee en coords full HD (x 1/scale)
       Toutes les DETECT_INTERVAL_S secondes (ou sur commande) :
-        3. Detection HSV -> bboxes
-        4. Association hongroise (score IoU + distance)
-        5. Reinitialisation KCF sur les bboxes HSV (corrige la derive)
+        3. Detection HSV sur frame proc -> bboxes proc
+        4. Association hongroise (score IoU + distance) -> identite stable
+        5. Reinitialisation KCF sur bboxes HSV (corrige la derive)
         6. Creation de nouveaux trackers pour les nouvelles detections
-        7. Suppression des trackers non retrouves par HSV pendant trop longtemps
+        7. Suppression des trackers perdus trop longtemps
 
-    Pourquoi cette strategie resout l identity switch :
-      Le tracker KCF n est utilise QUE pour l interpolation entre detections.
-      L identite est portee par l association hongroise detection->tracker,
-      qui utilise la distance et l IoU — pas la memoire du tracker.
-      Au croisement, les deux tasses ont des positions distinctes dans HSV
-      -> l association reste correcte.
+    scale : facteur proc->full (ex: 1920/640=3.0).
+            Stocke dans le manager et passe a update_pos_mm pour que
+            _pixel_to_table_mm recoive toujours des coordonnees full HD.
     """
 
-    def __init__(self, pose_path: str, tracker_type: str = TRACKER_TYPE):
+    def __init__(self, pose_path: str, tracker_type: str = TRACKER_TYPE,
+                 scale: float = 1.0):
         self._pose_path    = pose_path
         self._tracker_type = tracker_type
+        self._scale        = scale   # proc -> full HD
         self._cups:  Dict[int, TrackedCup] = {}
         self._next_id: int = 0
 
@@ -357,7 +378,7 @@ class TrackingManager:
         for cup in list(self._cups.values()):
             ok = cup.update_cv(frame)
             if ok:
-                cup.update_pos_mm(frame)
+                cup.update_pos_mm(frame, scale=self._scale)
                 cup.lost_frames = 0
             else:
                 cup.lost_frames += 1
@@ -404,7 +425,7 @@ class TrackingManager:
                 det = detected[j]
                 # Reinitialiser KCF sur la bbox HSV (corrige la derive)
                 cup.reinit_cv(frame, det, self._tracker_type)
-                cup.update_pos_mm(frame)
+                cup.update_pos_mm(frame, scale=self._scale)
                 cup.lost_frames = 0
                 used_t.add(i)
                 used_d.add(j)
@@ -454,7 +475,7 @@ class TrackingManager:
             bbox=(x, y, w, h),
             color=_PALETTE[cid % len(_PALETTE)],
         )
-        cup.update_pos_mm(frame)
+        cup.update_pos_mm(frame, scale=self._scale)
         self._cups[cid] = cup
         print(f"[Manager] Nouveau cup_id={cid} bbox=({x},{y},{w},{h})")
 
@@ -542,7 +563,8 @@ def run(camera_index:  int   = 0,
         pose_path = Path(__file__).resolve().parents[3] / "config" / pose_path
 
     if not pose_path.exists():
-        raise FileNotFoundError(f"File not found: {pose_path}")
+        raise IOError(f"Fichier de pose introuvable : {pose_path}")
+        
 
     if video_path:
         cap = cv2.VideoCapture(video_path)
@@ -573,7 +595,31 @@ def run(camera_index:  int   = 0,
         print("[Pipeline] Undistort active.")
 
     detector = HsvCupDetector()
-    manager  = TrackingManager(pose_path, tracker_type)
+
+    # ── Calcul du facteur de redimensionnement pour le traitement ─────────────
+    # Tout le traitement (detection HSV + KCF) se fait sur une frame reduite.
+    # Les bboxes sont ensuite remises a l echelle pour l affichage.
+    scale     = PROCESS_WIDTH / fw          # ex: 640/1920 = 0.333
+    proc_w    = PROCESS_WIDTH
+    proc_h    = int(fh * scale)
+    print(f"[Pipeline] Frame traitement : {proc_w}x{proc_h}  "
+          f"(scale={scale:.3f})  Tracker : {tracker_type.upper()}")
+
+    manager  = TrackingManager(pose_path, tracker_type, scale=1.0/scale)
+
+    def to_proc(frame_full: np.ndarray) -> np.ndarray:
+        return cv2.resize(frame_full, (proc_w, proc_h), interpolation=cv2.INTER_LINEAR)
+
+    def scale_bboxes_up(bboxes):
+        """Remonte les bboxes de l espace proc vers l espace full."""
+        inv = 1.0 / scale
+        return [(int(x*inv), int(y*inv), int(w*inv), int(h*inv))
+                for x, y, w, h in bboxes]
+
+    def scale_bboxes_down(bboxes):
+        """Reduit les bboxes de l espace full vers l espace proc."""
+        return [(int(x*scale), int(y*scale), int(w*scale), int(h*scale))
+                for x, y, w, h in bboxes]
 
     # Init sur la premiere frame
     ret, frame0 = cap.read()
@@ -582,18 +628,21 @@ def run(camera_index:  int   = 0,
     if map1 is not None:
         frame0 = cv2.remap(frame0, map1, map2, cv2.INTER_LINEAR)
 
-    init_det = detector.detect(frame0)
+    proc0    = to_proc(frame0)
+    init_det_proc = detector.detect(proc0)
+    init_det      = scale_bboxes_up(init_det_proc)
     print(f"[Pipeline] Detection initiale : {len(init_det)} tasse(s)  "
           f"(V_seuil={detector.v_min})")
-    manager.force_reset(frame0, init_det)
+    manager.force_reset(proc0, init_det_proc)
 
     debug_mode    = False
     paused        = False
     last_det_t    = time.monotonic()
     t_prev        = time.monotonic()
     measured_fps  = 0.0
-    last_det: List[Tuple] = init_det
-    last_mask: Optional[np.ndarray] = None
+    last_det_disp: List[Tuple] = init_det          # bboxes en coords full (affichage)
+    last_mask_disp: Optional[np.ndarray] = None    # masque redimensionne pour affichage
+    proc_frame    = proc0
 
     print("[Pipeline] q=quitter  r=redetection  d=debug  +/-=seuil  p=pause")
 
@@ -606,31 +655,54 @@ def run(camera_index:  int   = 0,
                 break
             if map1 is not None:
                 frame = cv2.remap(frame, map1, map2, cv2.INTER_LINEAR)
+            proc_frame = to_proc(frame)
 
-        # ── Tracking KCF rapide — chaque frame ───────────────────────────────
-        cups = manager.update_tracking(frame)
+        # ── Tracking KCF rapide sur frame reduite — chaque frame ──────────────
+        cups_proc = manager.update_tracking(proc_frame)
 
-        # ── Detection HSV periodique — realignement des trackers ─────────────
+        # ── Detection HSV periodique sur frame reduite ────────────────────────
         now = time.monotonic()
         if not paused and (now - last_det_t) >= DETECT_INTERVAL_S:
-            last_det   = detector.detect(frame)
-            last_det_t = now
-            manager.update_detection(frame, last_det)
-            cups = list(manager._cups.values())
+            det_proc       = detector.detect(proc_frame)
+            last_det_t     = now
+            manager.update_detection(proc_frame, det_proc)
+            cups_proc      = list(manager._cups.values())
+            last_det_disp  = scale_bboxes_up(det_proc)
             if debug_mode:
-                last_mask = detector.mask(frame)
+                mask_proc       = detector.mask(proc_frame)
+                last_mask_disp  = cv2.resize(mask_proc, (fw, fh),
+                                             interpolation=cv2.INTER_NEAREST)
 
-        if debug_mode and last_mask is None:
-            last_mask = detector.mask(frame)
+        if debug_mode and last_mask_disp is None:
+            mask_proc      = detector.mask(proc_frame)
+            last_mask_disp = cv2.resize(mask_proc, (fw, fh),
+                                        interpolation=cv2.INTER_NEAREST)
         if not debug_mode:
-            last_mask = None
+            last_mask_disp = None
+
+        # Remonter les bboxes proc -> full pour l affichage
+        cups_disp = []
+        for c in cups_proc:
+            bx, by, bw, bh = c.bbox
+            inv = 1.0 / scale
+            c_disp = TrackedCup(
+                cup_id=c.cup_id,
+                pose_tracker=c.pose_tracker,
+                cv_tracker=c.cv_tracker,
+                bbox=(int(bx*inv), int(by*inv), int(bw*inv), int(bh*inv)),
+                pos_mm=c.pos_mm,
+                lost_frames=c.lost_frames,
+                active=c.active,
+                color=c.color,
+            )
+            cups_disp.append(c_disp)
 
         # Console
-        if cups and not paused:
+        if cups_proc and not paused:
             parts = [
                 f"#{c.cup_id}=({c.pos_mm[0]:+.1f},{c.pos_mm[1]:+.1f})mm"
                 if c.pos_mm else f"#{c.cup_id}=?"
-                for c in cups
+                for c in cups_proc
             ]
             print(f"\r[Pos] {'  '.join(parts)}     ", end="", flush=True)
 
@@ -640,9 +712,9 @@ def run(camera_index:  int   = 0,
             measured_fps = 0.9*measured_fps + 0.1/max(t_now-t_prev, 1e-6)
             t_prev       = t_now
 
-        out = draw_overlay(frame, cups,
-                           det_bboxes=last_det if debug_mode else [],
-                           mask=last_mask,
+        out = draw_overlay(frame, cups_disp,
+                           det_bboxes=last_det_disp if debug_mode else [],
+                           mask=last_mask_disp,
                            debug=debug_mode,
                            fps=measured_fps,
                            v_seuil=detector.v_min)
@@ -657,13 +729,14 @@ def run(camera_index:  int   = 0,
             break
         elif key == ord('r'):
             print()
-            det = detector.detect(frame)
-            manager.force_reset(frame, det)
-            last_det = det; last_det_t = time.monotonic()
-            print(f"[Pipeline] Redetection : {len(det)} tasse(s)")
+            det_proc      = detector.detect(proc_frame)
+            manager.force_reset(proc_frame, det_proc)
+            last_det_disp = scale_bboxes_up(det_proc)
+            last_det_t    = time.monotonic()
+            print(f"[Pipeline] Redetection : {len(det_proc)} tasse(s)")
         elif key == ord('d'):
-            debug_mode = not debug_mode
-            last_mask  = detector.mask(frame) if debug_mode else None
+            debug_mode     = not debug_mode
+            last_mask_disp = None
             print(f"\n[Pipeline] Debug : {'ON' if debug_mode else 'OFF'}")
         elif key in (ord('+'), ord('=')):
             detector.v_min = detector.v_min + 5
