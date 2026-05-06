@@ -262,71 +262,98 @@ def _iou(b1: Tuple, b2: Tuple) -> float:
 
 class TrackingManager:
     """
-    Orchestre N trackers CSRT.
-    Cycle par frame :
-      1. update CSRT    -> nouvelle position de chaque tasse
-      2. associate      -> appariement detection HSV <-> tracker (IoU)
-      3. new            -> nouvelles detections -> nouveaux trackers
-      4. purge          -> trackers perdus depuis trop longtemps
+    Orchestre N trackers CSRT avec protection contre l identity switch.
+
+    Mecanismes anti-swap :
+      - Contrainte de distance max : si la bbox CSRT derive de plus de
+        MAX_DRIFT_RATIO * diagonale_bbox par rapport a la position precedente,
+        le tracker est considere perdu (evite l accrochage sur voisin).
+      - NMS post-update : si deux trackers se chevauchent (IoU > NMS_THRESH),
+        le moins fiable (plus de lost_frames) est reinitialise depuis HSV.
+      - Association honggroise simplifiee (greedy + distance) pour apparier
+        les detections HSV aux trackers de facon stable.
     """
+
+    # Ratio de deplacement max acceptable par frame (x diagonale bbox)
+    MAX_DRIFT_RATIO = 0.6
+    # IoU au-dessus duquel deux trackers sont consideres en conflit
+    NMS_IOU_THRESH  = 0.30
 
     def __init__(self, pose_path: str):
         self._pose_path = pose_path
         self._cups:    Dict[int, TrackedCup] = {}
         self._next_id: int = 0
 
+    # ── API publique ──────────────────────────────────────────────────────────
+
     def update(self,
                frame:    np.ndarray,
                detected: List[Tuple[int, int, int, int]]
-               ) -> List[TrackedCup]:
+               ) -> List["TrackedCup"]:
 
-        # 1. Update CSRT — compatible avec les deux signatures de CupTopTracker :
-        #    ancienne : (ok, pos_mm)        — 2 valeurs
-        #    nouvelle : (ok, pos_mm, bbox)  — 3 valeurs
+        # ── 1. Update CSRT + contrainte de derive ────────────────────────────
         for cup in list(self._cups.values()):
-            result = cup.tracker.update(frame)
+            prev_bbox = cup.bbox
+            result    = cup.tracker.update(frame)
+
+            # Compatibilite ancienne (2 val) / nouvelle (3 val) signature
             if len(result) == 3:
-                ok, pos_mm, bbox = result
+                ok, pos_mm, new_bbox = result
             else:
                 ok, pos_mm = result
-                bbox = None
-            if ok:
-                cup.pos_mm      = pos_mm
-                cup.lost_frames = 0
-                if bbox is not None:
-                    cup.bbox = bbox
-                else:
-                    # Ancienne signature : recuperer la bbox via un 2e appel
-                    # (moins optimal mais compatible)
+                new_bbox   = None
+                if ok:
                     ok2, raw = cup.tracker._tracker.update(frame)
                     if ok2:
                         rx, ry, rw, rh = raw
-                        cup.bbox = (int(rx), int(ry), max(4, int(rw)), max(4, int(rh)))
+                        new_bbox = (int(rx), int(ry),
+                                    max(4, int(rw)), max(4, int(rh)))
+
+            if ok and new_bbox is not None:
+                # Contrainte de derive : distance centre-a-centre < seuil
+                if self._drift_ok(prev_bbox, new_bbox):
+                    cup.pos_mm      = pos_mm
+                    cup.lost_frames = 0
+                    cup.bbox        = new_bbox
+                else:
+                    # Derive trop grande -> tracker a accroche un voisin
+                    print(f"[Manager] Derive excessive cup_id={cup.cup_id} "
+                          f"prev={prev_bbox} new={new_bbox} -> reset")
+                    cup.tracker.stop()
+                    cup.lost_frames += 1
             else:
                 cup.lost_frames += 1
 
-        # 2. Association detection -> tracker (greedy IoU)
+        # ── 2. NMS : resoudre les conflits entre trackers qui se chevauchent ─
+        self._resolve_nms_conflicts(frame)
+
+        # ── 3. Association detection HSV -> trackers (greedy distance+IoU) ───
         unmatched = list(detected)
-        for cup in self._cups.values():
+        # Trier les trackers par fiabilite (moins de lost_frames = plus fiable)
+        cups_sorted = sorted(self._cups.values(), key=lambda c: c.lost_frames)
+        for cup in cups_sorted:
             if not unmatched:
                 break
-            ious   = [_iou(cup.bbox, b) for b in unmatched]
-            best_i = int(np.argmax(ious))
-            if ious[best_i] >= IOU_MATCH_THRESHOLD:
-                new_bbox = unmatched.pop(best_i)
-                cup.bbox        = new_bbox
+            # Score = IoU + 0.3 * (1 - dist_normalisee)
+            scores = [self._match_score(cup.bbox, b) for b in unmatched]
+            best_i = int(np.argmax(scores))
+            if scores[best_i] > 0.05:   # seuil bas : on veut juste exclure
+                new_bbox        = unmatched.pop(best_i)
                 cup.lost_frames = 0
+                # Reinitialiser le tracker CSRT si perdu ou derive
                 if not cup.tracker.is_active:
                     cup.tracker.start(frame, new_bbox, cup.cup_id)
-                    print(f"[Manager] Reinit CSRT cup_id={cup.cup_id}")
+                    print(f"[Manager] Reinit cup_id={cup.cup_id} depuis HSV")
+                cup.bbox = new_bbox
 
-        # 3. Nouvelles detections
+        # ── 4. Nouvelles detections non appariees -> nouveaux trackers ────────
         for bbox in unmatched:
             self._create(frame, bbox)
 
-        # 4. Purge
-        for cid in [c for c, v in self._cups.items()
-                    if v.lost_frames >= MAX_LOST_FRAMES]:
+        # ── 5. Purge des trackers definitivement perdus ───────────────────────
+        to_del = [cid for cid, c in self._cups.items()
+                  if c.lost_frames >= MAX_LOST_FRAMES]
+        for cid in to_del:
             self._cups[cid].tracker.stop()
             del self._cups[cid]
             print(f"[Manager] Supprime cup_id={cid}")
@@ -343,6 +370,51 @@ class TrackingManager:
             self._create(frame, bbox)
         print(f"[Manager] Reset -> {len(detected)} tasse(s)")
 
+    # ── Internals ─────────────────────────────────────────────────────────────
+
+    def _drift_ok(self,
+                  prev: Tuple[int,int,int,int],
+                  new:  Tuple[int,int,int,int]) -> bool:
+        """Retourne True si le deplacement centre-a-centre est acceptable."""
+        px, py, pw, ph = prev
+        nx, ny, nw, nh = new
+        diag   = np.sqrt(pw**2 + ph**2)
+        cx_prev, cy_prev = px + pw / 2, py + ph / 2
+        cx_new,  cy_new  = nx + nw / 2, ny + nh / 2
+        dist   = np.sqrt((cx_new - cx_prev)**2 + (cy_new - cy_prev)**2)
+        return dist < self.MAX_DRIFT_RATIO * diag
+
+    def _match_score(self,
+                     bbox_tracker: Tuple,
+                     bbox_det:     Tuple) -> float:
+        """Score d appariement tracker <-> detection (IoU + proximite)."""
+        iou = _iou(bbox_tracker, bbox_det)
+        # Distance normalisee par la diagonale de la plus grande bbox
+        tx, ty, tw, th = bbox_tracker
+        dx, dy, dw, dh = bbox_det
+        diag = max(np.sqrt(tw**2 + th**2), np.sqrt(dw**2 + dh**2), 1.0)
+        cx_t, cy_t = tx + tw / 2, ty + th / 2
+        cx_d, cy_d = dx + dw / 2, dy + dh / 2
+        dist_norm  = np.sqrt((cx_t - cx_d)**2 + (cy_t - cy_d)**2) / diag
+        return iou + 0.3 * max(0.0, 1.0 - dist_norm)
+
+    def _resolve_nms_conflicts(self, frame: np.ndarray) -> None:
+        """
+        Si deux trackers se chevauchent fortement, le moins fiable est stoppe.
+        Il sera reinitialise lors de la prochaine detection HSV.
+        """
+        cups = list(self._cups.values())
+        for i in range(len(cups)):
+            for j in range(i + 1, len(cups)):
+                a, b = cups[i], cups[j]
+                if _iou(a.bbox, b.bbox) > self.NMS_IOU_THRESH:
+                    # Le moins fiable = plus de lost_frames, ou id plus recent
+                    loser = b if a.lost_frames <= b.lost_frames else a
+                    if loser.tracker.is_active:
+                        loser.tracker.stop()
+                        loser.lost_frames += 5   # accelrer sa purge ou reinit
+                        print(f"[Manager] Conflit NMS -> stop cup_id={loser.cup_id}")
+
     def _create(self, frame: np.ndarray, bbox: Tuple) -> None:
         cid     = self._next_id
         self._next_id += 1
@@ -358,8 +430,6 @@ class TrackingManager:
             print(f"[Manager] Nouveau tracker cup_id={cid} bbox={bbox}")
         else:
             print(f"[Manager] Echec CSRT bbox={bbox}")
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 #  Rendu visuel
 # ══════════════════════════════════════════════════════════════════════════════
@@ -452,8 +522,7 @@ def run(camera_index: int  = 0,
         pose_path = Path(__file__).resolve().parents[3] / "config" / pose_path
 
     if not pose_path.exists():
-        raise FileNotFoundError(f"File not found: {pose_path}")
-
+        raise IOError(f"Fichier de pose introuvable : {pose_path}")
     # Source video
     if video_path:
         cap = cv2.VideoCapture(video_path)
