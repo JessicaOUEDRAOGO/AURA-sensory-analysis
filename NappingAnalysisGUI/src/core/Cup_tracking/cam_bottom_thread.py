@@ -161,6 +161,7 @@ class CamBottomThread(QThread):
             mm        = self._pixel_to_table(cx, cy)
             if mm is not None:
                 detected[marker_id] = list(mm)
+            
 
         return detected
 

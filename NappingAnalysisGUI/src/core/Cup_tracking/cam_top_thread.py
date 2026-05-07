@@ -54,7 +54,7 @@ V_THRESHOLD = 110
 
 # Drift max acceptable entre deux frames (fraction de la diagonale bbox)
 MAX_DRIFT_RATIO = 0.8
-
+MAX_KCF_ARUCO_DIST_MM = 250.0  # distance max KCF↔ArUco en mm avant d'invalider
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Détecteur HSV (seuillage luminosité → contours → bbox)
@@ -410,7 +410,18 @@ class CamTopThread(QThread):
 
                 pos_mm = self._converter.pixel_to_mm(cx_full, cy_full)
                 if pos_mm is not None:
-                    # Écrire dans le buffer partagé
+                    # Validation cohérence géométrique avec dernière pos ArUco
+                    last_aruco = self.cup_state_buffer.get_last_aruco_pos(self._kcf_cup_id)
+                    if last_aruco is not None:
+                        dx   = pos_mm[0] - last_aruco[0]
+                        dy   = pos_mm[1] - last_aruco[1]
+                        dist = (dx*dx + dy*dy) ** 0.5
+                        if dist > MAX_KCF_ARUCO_DIST_MM:
+                            print(f"[CamTop] KCF dérive géo  dist={dist:.0f}mm "
+                                f"> {MAX_KCF_ARUCO_DIST_MM}mm → stop cup_id={self._kcf_cup_id}")
+                            self._stop_kcf()
+                            return
+
                     self.cup_state_buffer.update_from_top(self._kcf_cup_id, list(pos_mm))
                     self.pos_signal.emit(self._kcf_cup_id, pos_mm[0], pos_mm[1])
 

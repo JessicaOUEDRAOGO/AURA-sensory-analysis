@@ -24,6 +24,8 @@ FPS cible : ~30fps (limité par le DisplayManager / projecteur, pas par les cam�
 import cv2
 import json
 import numpy as np
+import threading
+import queue
 import time
 from PyQt6.QtCore import QThread, pyqtSignal
 
@@ -87,7 +89,13 @@ class ProjectionLoop(QThread):
 
         self._fps_count = 0
         self._fps_t0    = 0.0
+        
+        # Buffer pré-alloué
+        self._proj_frame = np.ones((PROJ_HEIGHT, PROJ_WIDTH, 3), dtype=np.uint8) * 255
 
+        # Queue pour découpler le rendu du display (taille 1 = toujours la frame la plus récente)
+        self._display_queue: queue.Queue = queue.Queue(maxsize=1)
+        self._display_thread: threading.Thread | None = None
     # ──────────────────────────────────────────────────────────────────
     # API publique
     # ──────────────────────────────────────────────────────────────────
@@ -112,44 +120,49 @@ class ProjectionLoop(QThread):
         self._fps_t0        = time.monotonic()
         self._last_display  = 0.0          # timestamp dernier affichage projecteur
         frame_duration      = 1.0 / TARGET_FPS
-        display_interval    = 1.0 / TARGET_DISPLAY_FPS
+        
 
-        # Buffer pré-alloué
-        self._proj_frame = np.ones((PROJ_HEIGHT, PROJ_WIDTH, 3), dtype=np.uint8) * 255
+        # Démarrer le thread display en arrière-plan
+        self._display_thread = threading.Thread(
+            target=self._display_worker, daemon=True, name="ProjectionDisplay"
+        )
+        self._display_thread.start()
 
-        print(f"[Projection] Thread démarré  data={TARGET_FPS}fps  "
-            f"display={TARGET_DISPLAY_FPS}fps  {PROJ_WIDTH}x{PROJ_HEIGHT}")
+        print(f"[Projection] Thread démarré  cible={TARGET_FPS}fps  "
+              f"{PROJ_WIDTH}x{PROJ_HEIGHT}")
 
         while self.running:
             t_start = time.monotonic()
             cups    = self.cup_state_buffer.get_all()
 
-            # ── Toujours émettre data_signal à 30fps (pour l'UI Qt) ──────
+            # ── Rendu frame ──────────────────────────────────────────
+            self._proj_frame[:] = 255
+            for marker_id, cup in cups.items():
+                proj_x, proj_y = self._table_to_projector(cup["last_pos"])
+                self._draw_cup_ring(self._proj_frame, proj_x, proj_y, cup)
+
+            if self.show_grid and self.record_window is not None:
+                grid = self._build_warped_grid(cups)
+                if grid is not None:
+                    cv2.addWeighted(grid, 1.0, self._proj_frame, 1.0, 0,
+                                    self._proj_frame)
+
+            # ── Envoyer au display_worker sans bloquer ────────────────
+            # Si la queue est pleine (display encore occupé), on drop la frame
+            display_copy = self._proj_frame.copy()
+            try:
+                self._display_queue.put_nowait(display_copy)
+            except queue.Full:
+                pass   # display trop lent → on skip cette frame, pas grave
+
+            # ── Émettre data_signal vers UI Qt ───────────────────────
             data_out = [
                 (mid, cup["last_pos"], cup.get("state", "POSEE"))
                 for mid, cup in cups.items()
             ]
             self.data_signal.emit({"data": data_out})
 
-            # ── Affichage projecteur throttlé à 15fps ────────────────────
-            now = time.monotonic()
-            if now - self._last_display >= display_interval:
-                self._last_display = now
-                self._proj_frame[:] = 255
-
-                for marker_id, cup in cups.items():
-                    proj_x, proj_y = self._table_to_projector(cup["last_pos"])
-                    self._draw_cup_ring(self._proj_frame, proj_x, proj_y, cup)
-
-                if self.show_grid and self.record_window is not None:
-                    grid = self._build_warped_grid(cups)
-                    if grid is not None:
-                        cv2.addWeighted(grid, 1.0, self._proj_frame, 1.0, 0,
-                                        self._proj_frame)
-
-                self.display_manager.display_image_on_projector_monitor(self._proj_frame)
-
-            # ── FPS data (pas display) ────────────────────────────────────
+            # ── FPS ──────────────────────────────────────────────────
             self._fps_count += 1
             now = time.monotonic()
             if now - self._fps_t0 >= 1.0:
@@ -159,14 +172,35 @@ class ProjectionLoop(QThread):
                 self._fps_count = 0
                 self._fps_t0    = now
 
-            # ── Throttle boucle data ──────────────────────────────────────
+            # ── Throttle ─────────────────────────────────────────────
             elapsed = time.monotonic() - t_start
             sleep   = frame_duration - elapsed
             if sleep > 0:
                 time.sleep(sleep)
 
+        # Arrêt propre du display worker
+        try:
+            self._display_queue.put_nowait(None)   # poison pill
+        except queue.Full:
+            pass
+        if self._display_thread:
+            self._display_thread.join(timeout=2.0)
+
         print("[Projection] Thread arrêté")
 
+    def _display_worker(self) -> None:
+        """Thread dédié à l'envoi des frames au projecteur — bloquant autorisé ici."""
+        print("[Projection] display_worker démarré")
+        while True:
+            frame = self._display_queue.get()
+            if frame is None:   # poison pill → arrêt
+                break
+            try:
+                self.display_manager.display_image_on_projector_monitor(frame)
+            except Exception as e:
+                print(f"[Projection] display_worker erreur : {e}")
+        print("[Projection] display_worker arrêté")
+        
     # ──────────────────────────────────────────────────────────────────
     # Géométrie
     # ──────────────────────────────────────────────────────────────────
