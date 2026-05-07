@@ -40,6 +40,7 @@ from src.core.utils.paths import config_path
 # Résolution interne de traitement (frame réduite pour le KCF)
 # 640px : KCF ~5ms  |  960px : ~10ms  |  1280px : ~20ms
 PROCESS_WIDTH = 640
+PROCESS_HEIGHT = 360
 
 # Intervalle entre deux réinitialisations KCF depuis détection HSV (secondes)
 DETECT_REINIT_INTERVAL_S = 0.20   # ~5 réinits/sec pour corriger la dérive
@@ -232,11 +233,20 @@ class CamTopThread(QThread):
         # pixel→mm attend donc une frame déjà undistordue.
         self._map1: Optional[np.ndarray] = None
         self._map2: Optional[np.ndarray] = None
-        self._load_undistort(cam_width, cam_height)
+        self._load_undistort(PROCESS_WIDTH, PROCESS_HEIGHT)
+        # Adapter la matrice K du converter à la résolution de capture réelle
+        scale_x = PROCESS_WIDTH  / self.cam_width   # 640/1920
+        scale_y = PROCESS_HEIGHT / self.cam_height  # 360/1080
+        K_scaled = self._converter._K.copy()
+        K_scaled[0, 0] *= scale_x   # fx
+        K_scaled[1, 1] *= scale_y   # fy
+        K_scaled[0, 2] *= scale_x   # cx
+        K_scaled[1, 2] *= scale_y   # cy
+        self._converter._K = K_scaled
+        # _scale = 1.0 donc cx_full = cx_proc dans _tick — cohérent
         
-        # Scale pour passer de la résolution native à PROCESS_WIDTH
-        self._scale     = PROCESS_WIDTH / cam_width    # ex: 640/1920 ≈ 0.333
-        self._proc_h    = int(cam_height * self._scale)
+        self._scale  = 1.0                    # on capture directement en 640×360
+        self._proc_h = PROCESS_HEIGHT
 
         # État KCF courant
         self._kcf_tracker: Optional[cv2.TrackerKCF] = None
@@ -265,8 +275,8 @@ class CamTopThread(QThread):
         try:
             # CAP_DSHOW obligatoire sur Windows pour éviter le blocage
             cap = cv2.VideoCapture(self.camera_index, cv2.CAP_DSHOW)
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH,  self.cam_width)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.cam_height)
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH,  PROCESS_WIDTH)   # 640 directement
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, PROCESS_HEIGHT)  # 360 directement
             cap.set(cv2.CAP_PROP_FPS, 30)
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
@@ -298,8 +308,8 @@ class CamTopThread(QThread):
                     frame = cv2.remap(frame, self._map1, self._map2,
                                     interpolation=cv2.INTER_LINEAR)
 
-                proc = cv2.resize(frame, (PROCESS_WIDTH, self._proc_h),
-                                interpolation=cv2.INTER_LINEAR)
+                proc = frame
+                
                 self._tick(proc, frame)
 
                 self._fps_count += 1

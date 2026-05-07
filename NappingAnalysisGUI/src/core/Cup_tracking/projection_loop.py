@@ -47,7 +47,7 @@ PROJ_WIDTH  = 3840
 PROJ_HEIGHT = 2160
 
 TARGET_FPS = 30.0   # FPS cible de la boucle de projection
-
+TARGET_DISPLAY_FPS = 15.0  # FPS max du DisplayManager / projecteur (limite réelle observée)
 
 class ProjectionLoop(QThread):
     """
@@ -105,56 +105,61 @@ class ProjectionLoop(QThread):
     # Boucle principale
     # ──────────────────────────────────────────────────────────────────
 
+
     def run(self) -> None:
-        self.running    = True
-        self._fps_count = 0
-        self._fps_t0    = time.monotonic()
+        self.running        = True
+        self._fps_count     = 0
+        self._fps_t0        = time.monotonic()
+        self._last_display  = 0.0          # timestamp dernier affichage projecteur
+        frame_duration      = 1.0 / TARGET_FPS
+        display_interval    = 1.0 / TARGET_DISPLAY_FPS
 
-        frame_duration = 1.0 / TARGET_FPS   # ~0.033s
+        # Buffer pré-alloué
+        self._proj_frame = np.ones((PROJ_HEIGHT, PROJ_WIDTH, 3), dtype=np.uint8) * 255
 
-        print(f"[Projection] Thread démarré  cible={TARGET_FPS}fps  "
-              f"{PROJ_WIDTH}x{PROJ_HEIGHT}")
+        print(f"[Projection] Thread démarré  data={TARGET_FPS}fps  "
+            f"display={TARGET_DISPLAY_FPS}fps  {PROJ_WIDTH}x{PROJ_HEIGHT}")
 
         while self.running:
             t_start = time.monotonic()
+            cups    = self.cup_state_buffer.get_all()
 
-            # ── Lire les états ──────────────────────────────────────────
-            cups = self.cup_state_buffer.get_all()
-
-            # ── Construire l'image projecteur ───────────────────────────
-            frame = np.ones((PROJ_HEIGHT, PROJ_WIDTH, 3), dtype=np.uint8) * 255
-
-            for marker_id, cup in cups.items():
-                proj_x, proj_y = self._table_to_projector(cup["last_pos"])
-                self._draw_cup_ring(frame, proj_x, proj_y, cup)
-
-            # ── Grille optionnelle ──────────────────────────────────────
-            if self.show_grid and self.record_window is not None:
-                grid = self._build_warped_grid(cups)
-                if grid is not None:
-                    frame = cv2.addWeighted(grid, 1.0, frame, 1.0, 0)
-
-            # ── Afficher sur le projecteur ──────────────────────────────
-            self.display_manager.display_image_on_projector_monitor(frame)
-
-            # ── Émettre les données pour l'UI ───────────────────────────
+            # ── Toujours émettre data_signal à 30fps (pour l'UI Qt) ──────
             data_out = [
-                (marker_id, cup["last_pos"], cup.get("state", "POSEE"))
-                for marker_id, cup in cups.items()
+                (mid, cup["last_pos"], cup.get("state", "POSEE"))
+                for mid, cup in cups.items()
             ]
             self.data_signal.emit({"data": data_out})
 
-            # ── FPS ─────────────────────────────────────────────────────
+            # ── Affichage projecteur throttlé à 15fps ────────────────────
+            now = time.monotonic()
+            if now - self._last_display >= display_interval:
+                self._last_display = now
+                self._proj_frame[:] = 255
+
+                for marker_id, cup in cups.items():
+                    proj_x, proj_y = self._table_to_projector(cup["last_pos"])
+                    self._draw_cup_ring(self._proj_frame, proj_x, proj_y, cup)
+
+                if self.show_grid and self.record_window is not None:
+                    grid = self._build_warped_grid(cups)
+                    if grid is not None:
+                        cv2.addWeighted(grid, 1.0, self._proj_frame, 1.0, 0,
+                                        self._proj_frame)
+
+                self.display_manager.display_image_on_projector_monitor(self._proj_frame)
+
+            # ── FPS data (pas display) ────────────────────────────────────
             self._fps_count += 1
             now = time.monotonic()
             if now - self._fps_t0 >= 1.0:
                 fps = self._fps_count / (now - self._fps_t0)
                 self.fps_signal.emit(fps)
-                print(f"[Projection] FPS={fps:.1f}")
+                print(f"[Projection] data_fps={fps:.1f}  cups={len(cups)}")
                 self._fps_count = 0
                 self._fps_t0    = now
 
-            # ── Throttle pour respecter le FPS cible ────────────────────
+            # ── Throttle boucle data ──────────────────────────────────────
             elapsed = time.monotonic() - t_start
             sleep   = frame_duration - elapsed
             if sleep > 0:
@@ -177,26 +182,14 @@ class ProjectionLoop(QThread):
     # Dessin
     # ──────────────────────────────────────────────────────────────────
 
-    def _draw_cup_ring(
-        self,
-        img: np.ndarray,
-        proj_x: int,
-        proj_y: int,
-        cup: dict,
-    ) -> None:
-        """Dessine un cercle coloré selon l'état de la tasse."""
+    def _draw_cup_ring(self, img, proj_x, proj_y, cup):
         state = cup.get("state", "POSEE")
-        if state == "POSEE":
-            color = COLOR_POSEE
-        elif state == "PEUT_ETRE_SOULEVEE":
-            color = COLOR_PEUT_ETRE_SOULEVEE
-        else:   # SOULEVEE
-            color = COLOR_SOULEVEE
-
-        overlay = img.copy()
-        cv2.circle(overlay, (proj_x, proj_y), RING_RADIUS_PX, color, RING_THICKNESS_PX)
-        cv2.addWeighted(overlay, RING_ALPHA, img, 1 - RING_ALPHA, 0, img)
-
+        color = (COLOR_SOULEVEE if state == "SOULEVEE"
+                else COLOR_PEUT_ETRE_SOULEVEE if state == "PEUT_ETRE_SOULEVEE"
+                else COLOR_POSEE)
+        cv2.circle(img, (proj_x, proj_y),
+                RING_RADIUS_PX, color, RING_THICKNESS_PX,
+                lineType=cv2.LINE_AA)
     # ──────────────────────────────────────────────────────────────────
     # Grille optionnelle
     # ──────────────────────────────────────────────────────────────────
