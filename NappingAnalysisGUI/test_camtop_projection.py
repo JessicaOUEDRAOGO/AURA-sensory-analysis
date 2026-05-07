@@ -18,7 +18,7 @@ from src.core.projection.display_manager import DisplayManager
 # ─────────────────────────────────────────────────────────────────────
 # PARAMÈTRES — modifie ici
 # ─────────────────────────────────────────────────────────────────────
-CAMERA_INDEX   = 0
+CAMERA_INDEX   = 1
 CAPTURE_W      = 1920
 CAPTURE_H      = 1080
 PROCESS_W      = 640

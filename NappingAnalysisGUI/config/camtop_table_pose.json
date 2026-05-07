@@ -1,36 +1,36 @@
 {
     "rvec": [
         [
-            -0.5074667779425381
+            -0.002300051361747193
         ],
         [
-            -0.004004005963006964
+            -0.016689354857379348
         ],
         [
-            0.004766387708508747
+            -0.005497166974140191
         ]
     ],
     "tvec": [
         [
-            -308.9531996401098
+            -313.1348434464183
         ],
         [
-            -324.7145710749427
+            -292.28675050640436
         ],
         [
-            1342.7222084639982
+            917.4397938734112
         ]
     ],
     "camera_matrix": [
         [
-            2247.723130139846,
+            1407.7467169047316,
             0.0,
-            955.3431817777339
+            960.2671949596626
         ],
         [
             0.0,
-            2114.03681407314,
-            554.2437723007281
+            1414.0710486018247,
+            559.3704596875691
         ],
         [
             0.0,
@@ -58,10 +58,10 @@
     "table_size_mm": 597.0,
     "tag_offset_mm": 10.0,
     "tag_ids": {
-        "TL": 41,
-        "TR": 40,
-        "BR": 43,
-        "BL": 42
+        "TL": 40,
+        "TR": 43,
+        "BR": 42,
+        "BL": 41
     },
     "note": "camera_matrix = new_K (apr\u00e8s getOptimalNewCameraMatrix). dist_coeffs = 0 car l'image est pr\u00e9alablement undistordue. Le rep\u00e8re table a son origine au coin TL de la table (pas au centre du tag TL). Les centres des tags sont \u00e0 TAG_OFFSET_MM=10.0 mm des bords."
 }

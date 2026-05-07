@@ -1,3 +1,4 @@
+
 # -*- coding: utf-8 -*-
 import cv2
 import numpy as np
@@ -10,10 +11,10 @@ from pathlib import Path
 CAMERA_ID = 1
 
 TAG_IDS = {
-    "TL": 41,
-    "TR": 40,
-    "BR": 43,
-    "BL": 42
+    "TL": 40,
+    "TR": 43,
+    "BR": 42,
+    "BL": 41
 }
 
 TABLE_SIZE_MM = 597.0
