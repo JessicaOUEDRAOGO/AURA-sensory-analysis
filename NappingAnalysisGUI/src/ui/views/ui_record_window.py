@@ -297,29 +297,27 @@ class RecordWindow(QtWidgets.QWidget):
         print("assets:", len(assets), "steps:", len(steps))
         print("=============================")
         self.algorithm_analysis = Algorithm_Analysis(
-            parent=self,
-            display_manager=self.display_manager,
-            image_background=self.image_background,
-            record_window=self,
-            output_dir=self.session_output_dir,
-            output_name=self.get_export_basename(),
-            modules_enabled=p_db.modules_enabled or {},
-            assets=assets,
-            timeline_steps=steps,
-            protocol=p_db,
-            # hand_buffer et frame_buffer sont acceptés mais ignorés (compatibilité)
-        )
+                parent=self,
+                display_manager=self.display_manager,
+                image_background=self.image_background,
+                record_window=self,
+                output_dir=self.session_output_dir,
+                output_name=self.get_export_basename(),
+                modules_enabled=p_db.modules_enabled or {},
+                assets=assets,
+                timeline_steps=steps,
+                protocol=p_db,
+            )
 
         self.key_handler.algorithm_analysis = self.algorithm_analysis
         self.connect_checkbox_to_algorithm()
 
-        # Open cam + undistort
+        # ── 1. Ouvrir la caméra bottom + undistort ───────────────────────
         self.camera_manager.open_camera()
         try:
             with open(config_path("camera_calibration_fisheye.json"), "r") as f:
                 calib = json.load(f)
             K    = np.array(calib["camera_matrix"], dtype=np.float64)
-            # dist fisheye : shape (4,1) attendue par cv2.fisheye
             dist = np.array(calib["dist_coeffs"], dtype=np.float64).reshape(4, 1)
             self.camera_manager.set_undistort(K, dist)
             self.runtime_K = self.camera_manager.K
@@ -328,15 +326,17 @@ class RecordWindow(QtWidgets.QWidget):
             print("❌ Erreur calibration undistort:", e)
             self.runtime_K = None
 
-        # Thread
+        # ── 2. Préparer les threads MAINTENANT (runtime_K disponible) ────
+        # UNE SEULE fois — __init__ ne l'appelle plus
+        self.algorithm_analysis._prepare_threads()
+
+        # ── 3. Connecter et démarrer le thread Qt wrappeur ───────────────
         self.algorithm_thread = QThread()
         self.algorithm_analysis.moveToThread(self.algorithm_thread)
-        self.algorithm_analysis.finished = False
 
         self.algorithm_thread.started.connect(self.algorithm_analysis.detect_and_process)
         self.algorithm_analysis.data_signal.connect(self.update_ui)
         self.algorithm_analysis.data_signal.connect(self.start_timer_on_first_frame)
-
         self.algorithm_analysis.finished_signal.connect(self.algorithm_thread.quit)
         self.algorithm_analysis.finished_signal.connect(self.algorithm_analysis.deleteLater)
         self.algorithm_thread.finished.connect(self.algorithm_thread.deleteLater)

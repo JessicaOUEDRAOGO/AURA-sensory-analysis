@@ -208,8 +208,22 @@ class CamTopThread(QThread):
         self.show_preview     = show_preview
         self.running          = False
 
-        self._converter = _PoseConverter(pose_path)
-        self._detector  = _HsvDetector()
+        # ── Vérification préalable des fichiers critiques ─────────────────
+        import os
+        if not os.path.isfile(pose_path):
+            raise FileNotFoundError(
+                f"[CamTop] ERREUR FATALE : pose_path introuvable → {pose_path}\n"
+                "Vérifie que camtop_table_pose.json existe dans config/."
+            )
+        print(f"[CamTop] pose_path OK : {pose_path}")
+
+        try:
+            self._converter = _PoseConverter(pose_path)
+            print("[CamTop] _PoseConverter initialisé OK")
+        except Exception as e:
+            raise RuntimeError(f"[CamTop] Échec _PoseConverter : {e}") from e
+
+        self._detector = _HsvDetector()
 
         # ── Undistort cam_top (pinhole standard, cv2.calibrateCamera) ──────────
         # camera_calibration_top.json contient K et dist bruts (pas new_K).
@@ -219,7 +233,7 @@ class CamTopThread(QThread):
         self._map1: Optional[np.ndarray] = None
         self._map2: Optional[np.ndarray] = None
         self._load_undistort(cam_width, cam_height)
-
+        
         # Scale pour passer de la résolution native à PROCESS_WIDTH
         self._scale     = PROCESS_WIDTH / cam_width    # ex: 640/1920 ≈ 0.333
         self._proc_h    = int(cam_height * self._scale)
@@ -246,56 +260,70 @@ class CamTopThread(QThread):
         self._fps_count = 0
         self._fps_t0    = time.monotonic()
 
-        cap = cv2.VideoCapture(self.camera_index)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH,  self.cam_width)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.cam_height)
-        cap.set(cv2.CAP_PROP_FPS, 30)
-        # Désactiver le buffer interne OpenCV pour avoir la frame la plus récente
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        print(f"[CamTop] run() entré — ouverture cam index={self.camera_index}")
 
-        print(f"[CamTop] Thread démarré  cam_index={self.camera_index}  "
-              f"scale={self._scale:.3f}  proc_size={PROCESS_WIDTH}x{self._proc_h}")
+        try:
+            # CAP_DSHOW obligatoire sur Windows pour éviter le blocage
+            cap = cv2.VideoCapture(self.camera_index, cv2.CAP_DSHOW)
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH,  self.cam_width)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.cam_height)
+            cap.set(cv2.CAP_PROP_FPS, 30)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
-        if not cap.isOpened():
-            print("[CamTop] ERREUR : impossible d'ouvrir la caméra")
-            return
+            if not cap.isOpened():
+                print(f"[CamTop] ERREUR : cam {self.camera_index} inaccessible "
+                    f"(index 0=top, 1=bottom — vérifie branchement USB)")
+                return
 
-        while self.running:
+            # Test lecture initiale avec timeout
+            t_open = time.monotonic()
             ret, frame = cap.read()
+            print(f"[CamTop] première frame : ret={ret}  "
+                f"délai={time.monotonic()-t_open:.2f}s")
             if not ret or frame is None:
-                continue
+                print("[CamTop] ERREUR : première frame échouée")
+                cap.release()
+                return
 
-            # ── Undistort pinhole (obligatoire : camtop_table_pose.json
-            #    stocke new_K + dist=zeros, donc la frame DOIT être
-            #    rectifiée avant toute conversion pixel→mm) ────────────
-            if self._map1 is not None:
-                frame = cv2.remap(frame, self._map1, self._map2,
-                                  interpolation=cv2.INTER_LINEAR)
+            print(f"[CamTop] Caméra {self.camera_index} ouverte  "
+                f"shape={frame.shape}  "
+                f"scale={self._scale:.3f}  proc={PROCESS_WIDTH}x{self._proc_h}")
 
-            # Réduire la frame pour le traitement KCF
-            proc = cv2.resize(frame, (PROCESS_WIDTH, self._proc_h),
-                              interpolation=cv2.INTER_LINEAR)
+            while self.running:
+                ret, frame = cap.read()
+                if not ret or frame is None:
+                    continue
 
-            self._tick(proc, frame)
+                if self._map1 is not None:
+                    frame = cv2.remap(frame, self._map1, self._map2,
+                                    interpolation=cv2.INTER_LINEAR)
 
-            # FPS
-            self._fps_count += 1
-            now = time.monotonic()
-            if now - self._fps_t0 >= 1.0:
-                fps = self._fps_count / (now - self._fps_t0)
-                self.fps_signal.emit(fps)
-                print(f"[CamTop] FPS={fps:.1f}  kcf_active={self._kcf_active}  "
-                      f"cup_id={self._kcf_cup_id}")
-                self._fps_count = 0
-                self._fps_t0    = now
+                proc = cv2.resize(frame, (PROCESS_WIDTH, self._proc_h),
+                                interpolation=cv2.INTER_LINEAR)
+                self._tick(proc, frame)
 
+                self._fps_count += 1
+                now = time.monotonic()
+                if now - self._fps_t0 >= 1.0:
+                    fps = self._fps_count / (now - self._fps_t0)
+                    self.fps_signal.emit(fps)
+                    print(f"[CamTop] FPS={fps:.1f}  kcf_active={self._kcf_active}  "
+                        f"cup_id={self._kcf_cup_id}")
+                    self._fps_count = 0
+                    self._fps_t0    = now
+
+                if self.show_preview:
+                    self._draw_preview(frame)
+
+        except Exception as e:
+            import traceback
+            print(f"[CamTop] EXCEPTION dans run() : {e}")
+            traceback.print_exc()
+        finally:
+            cap.release()
+            print("[CamTop] Thread arrêté")
             if self.show_preview:
-                self._draw_preview(frame)
-
-        cap.release()
-        print("[CamTop] Thread arrêté")
-        if self.show_preview:
-            cv2.destroyWindow("CamTop Preview")
+                cv2.destroyWindow("CamTop Preview")
 
     def stop(self) -> None:
         self.running = False

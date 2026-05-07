@@ -85,8 +85,21 @@ class Algorithm_Analysis(QObject):
         self.protocol         = protocol
         self.running          = False
 
-        # Validation background
-        self.image_background = self._validate_bg(image_background)
+        self._cup_buffer     = CupStateBuffer()
+        self._camera_manager = getattr(parent, "camera_manager", None)
+
+        self._pose_bottom_path = str(config_path("cambottom_table_pose.json"))
+        self._pose_top_path    = str(config_path("camtop_table_pose.json"))
+
+        self.status_popUpCamera = False
+        self.image_background   = self._validate_bg(image_background)
+
+        # Threads — initialisés par _prepare_threads() appelé depuis RecordWindow
+        # après que runtime_K soit disponible. NE PAS appeler ici.
+        self._cam_bottom    = None
+        self._cam_top       = None
+        self._projection    = None
+        self._threads_ready = False
 
         # Output CSV
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -98,25 +111,7 @@ class Algorithm_Analysis(QObject):
         self.output_csv  = os.path.join(output_dir, f"{output_name}_{timestamp}.csv")
         self.data_buffer = []
 
-        # Buffer partagé entre les 3 threads
-        self._cup_buffer = CupStateBuffer()
-
-        # Threads (créés dans start())
-        self._cam_bottom: CamBottomThread | None = None
-        self._cam_top:    CamTopThread    | None = None
-        self._projection: ProjectionLoop  | None = None
-
-        # Caméra bottom (déjà gérée par parent.camera_manager)
-        self._camera_manager = getattr(parent, "camera_manager", None)
-
-        # Config
-        self._pose_bottom_path = str(config_path("cambottom_table_pose.json"))
-        self._pose_top_path    = str(config_path("camtop_table_pose.json"))
-
-        # État preview caméra (ancienne feature conservée)
-        self.status_popUpCamera = False
         self._camera_was_active = False
-
         print("[Algo v5] Initialisé")
 
     # ──────────────────────────────────────────────────────────────────
@@ -137,17 +132,13 @@ class Algorithm_Analysis(QObject):
         if self._cam_top:
             self._cam_top.show_preview = self.status_popUpCamera
 
-    # ──────────────────────────────────────────────────────────────────
-    # API principale
-    # ──────────────────────────────────────────────────────────────────
 
-    def detect_and_process(self) -> None:
+    def _prepare_threads(self) -> None:
         """
-        Point d'entrée appelé par RecordWindow dans un QThread.
-        Démarre les 3 threads fils et attend leur fin.
+        Crée les 3 threads depuis le thread Qt principal.
+        Doit être appelé depuis __init__, pas depuis detect_and_process().
         """
-        self.running = True
-        print("[Algo v5] Démarrage des 3 threads")
+        print("[Algo v5] Préparation des threads...")
 
         # ── CamBottomThread ──────────────────────────────────────────
         self._cam_bottom = CamBottomThread(
@@ -156,7 +147,6 @@ class Algorithm_Analysis(QObject):
             pose_path=self._pose_bottom_path,
             show_preview=self.status_popUpCamera,
         )
-        # Surcharger K si undistort actif
         runtime_K = getattr(self.parent, "runtime_K", None)
         if runtime_K is not None:
             self._cam_bottom.set_camera_matrix(runtime_K)
@@ -165,12 +155,20 @@ class Algorithm_Analysis(QObject):
         cam_top_id = getattr(
             getattr(self.parent, "parent", None), "camera_top_id", 0
         )
-        self._cam_top = CamTopThread(
-            cup_state_buffer=self._cup_buffer,
-            camera_index=cam_top_id,
-            pose_path=self._pose_top_path,
-            show_preview=self.status_popUpCamera,
-        )
+        print(f"[Algo v5] CamTop : cam_index={cam_top_id}  pose={self._pose_top_path}")
+        try:
+            self._cam_top = CamTopThread(
+                cup_state_buffer=self._cup_buffer,
+                camera_index=cam_top_id,
+                pose_path=self._pose_top_path,
+                show_preview=self.status_popUpCamera,
+            )
+            print("[Algo v5] CamTopThread prêt")
+        except Exception as e:
+            import traceback
+            print(f"[Algo v5] ÉCHEC CamTopThread : {e}")
+            traceback.print_exc()
+            self._cam_top = None
 
         # ── ProjectionLoop ───────────────────────────────────────────
         self._projection = ProjectionLoop(
@@ -181,41 +179,58 @@ class Algorithm_Analysis(QObject):
             record_window=self.record_window,
             grid_size=self.grid_size,
         )
-
-        # Relayer data_signal depuis ProjectionLoop → UI
         self._projection.data_signal.connect(self._on_projection_data)
+        self._threads_ready = True
+        print("[Algo v5] Tous les threads prêts")
+    
+    # ──────────────────────────────────────────────────────────────────
+    # API principale
+    # ──────────────────────────────────────────────────────────────────
 
-        # ── Démarrage ────────────────────────────────────────────────
+    def detect_and_process(self) -> None:
+        """
+        Maintenant detect_and_process() ne fait QUE démarrer les threads
+        et attendre — plus de création ici.
+        """
+        if not self._threads_ready:
+            print("[Algo v5] ERREUR : threads non préparés")
+            self.finished_signal.emit()
+            return
+
+        self.running = True
+        print("[Algo v5] Démarrage des 3 threads")
+
         self._cam_bottom.start()
-        self._cam_top.start()
-        self._projection.start()
 
+        if self._cam_top is not None:
+            self._cam_top.start()
+        else:
+            print("[Algo v5] ⚠ CamTop désactivé")
+
+        self._projection.start()
         print("[Algo v5] 3 threads démarrés")
 
-        # ── Boucle de garde (très légère) ────────────────────────────
-        # Ce thread reste vivant pour pouvoir recevoir stop()
-        # et sauvegarder le CSV à la fin.
+        # Boucle de garde
         while self.running:
             pytime.sleep(0.1)
 
-        # ── Arrêt ordonné ────────────────────────────────────────────
+        # Arrêt ordonné
         print("[Algo v5] Arrêt en cours...")
-
         if self._projection:
             self._projection.stop()
             self._projection.wait(2000)
-
         if self._cam_bottom:
             self._cam_bottom.stop()
             self._cam_bottom.wait(2000)
-
-        if self._cam_top:
+        if self._cam_top is not None:
             self._cam_top.stop()
             self._cam_top.wait(2000)
 
         self._save_csv()
-        print("[Algo v5] Tous les threads arrêtés")
+        print("[Algo v5] Terminé")
         self.finished_signal.emit()
+
+
 
     def stop(self) -> None:
         print("[Algo v5] STOP demandé")
