@@ -1,38 +1,36 @@
 # -*- coding: utf-8 -*-
 """
-test_projection_blanc.py  —  VERSION FINALE PATCHÉE
-=====================================================
+test_projection_blanc.py  —  VERSION KCF ROBUSTE
+=================================================
 Projecteur : fond blanc + anneaux verts sur les tasses
-Détection  : seuillage gris sur frame réduite 640×360
+Tracking   : KCF (visuel, frame-par-frame) + recalage HSV periodique
 Conversion : pixel → mm via PoseConverter 3D + H_top_to_bottom
 Touches    : q=quitter  d=masque  +/-=seuil  r=reset  c=toggle correction 3D
 
-═══════════════════════════════════════════════════════════════════════════════
-CHAÎNE DE CONVERSION EXACTE (dans l'ordre) :
-  1. frame_native (1920×1080) → undistort (pinhole, map1/map2)
-  2. resize → frame_small (640×360) pour la détection
-  3. CupDetector → (cx_small, cy_small) = centre BASE de la tasse  [FIX-1]
-  4. cx_nat = cx_small * PROC_TO_NATIVE  (×3, small→native)
-  5. [optionnel] cup_base_pixel_correction(cx_nat, cy_nat)          [FIX-2]
-     → corrige le décalage perspective via rvec/tvec/CUP_HEIGHT_MM
-  6. PoseConverter.pixel_to_mm(cx_nat, cy_nat)
-       a. rayon → intersection plan table → (x_top, y_top) repère cam_top
-       b. perspectiveTransform(H_top_to_bottom) → (x_mm, y_mm) repère commun
-  7. Validation bornes table                                        [FIX-4]
-  8. Lissage EMA + tracking temporel                                [FIX-3/6]
-  9. perspectiveTransform(H_table_to_proj) → pixel projecteur
-═══════════════════════════════════════════════════════════════════════════════
+ARCHITECTURE (inspiree de cup_tracking_pipeline.py) :
+  Chaque frame :
+    1. KCF update sur frame_small → bbox mise a jour visuellement
+    2. Conversion centre bbox → mm via chaine geometrique complete
+  Toutes les DETECT_INTERVAL_S secondes :
+    3. Detection masque HSV → bboxes
+    4. Association greedy (score IoU + distance) → identite stable
+    5. Reinitialisation KCF sur bboxes HSV → corrige derive
+    6. Creation nouveaux trackers / suppression perdus
 
-CORRECTIONS vs version originale :
-  [FIX-1] CENTROÏDE BASE    : fitEllipse sur moitié inférieure du contour
-  [FIX-2] CORRECTION 3D     : cup_base_pixel_correction() analytique
-  [FIX-3] EMA               : lissage exponentiel α=0.4 sur positions mm
-  [FIX-4] BORNES            : rejette positions hors table
-  [FIX-5] CIRCULARITÉ       : seuil 0.20→0.30, ratio d'aspect ajouté
-  [FIX-6] TRACKING TEMPOREL : association distance pour identité stable
-  [FIX-H] H OBLIGATOIRE     : FileNotFoundError si H_top_to_bottom.json absent
-           (le fallback miroir Y était faux pour cette orientation de caméra)
-  [FIX-scale] PROC→NATIVE   : cx * PROC_TO_NATIVE (multiply ×3, pas divide)
+  Avantage : le masque ne doit PAS voir la tasse a chaque frame.
+  KCF la suit visuellement entre les recalages.
+  => main qui approche, mouvement rapide : tracking maintenu.
+
+CHAINE DE CONVERSION :
+  1. frame_native (1920x1080) → undistort
+  2. resize → frame_small (640x360)
+  3. KCF → (cx_proc, cy_proc) centre bbox
+  4. cx_nat = cx_proc * PROC_TO_NATIVE (x3)
+  5. [optionnel] cup_base_pixel_correction()
+  6. PoseConverter.pixel_to_mm() → (x_mm, y_mm) repere commun
+  7. Validation bornes table
+  8. EMA lissage
+  9. perspectiveTransform(H_table_to_proj) → pixel projecteur
 """
 
 import cv2
@@ -40,6 +38,7 @@ import json
 import numpy as np
 import os
 import time
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 from src.core.utils.paths import config_path
@@ -47,7 +46,7 @@ from src.core.projection.display_manager import DisplayManager
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  PARAMÈTRES
+#  PARAMETRES
 # ══════════════════════════════════════════════════════════════════════════════
 
 CAMERA_INDEX   = 0
@@ -64,35 +63,35 @@ RING_RADIUS    = 120
 RING_THICKNESS = 10
 RING_COLOR     = (0, 200, 0)
 
-# Détection
+# Detection masque
 V_THRESHOLD    = 110
 AREA_MIN       = 800
-AREA_MAX       = 25_000
-CIRC_MIN       = 0.15        # [FIX-5] était 0.20
+AREA_MAX       = 40_000
+CIRC_MIN       = 0.15
+ASPECT_MIN     = 0.25
 ASPECT_MAX     = 3.5
 MARGIN         = 20
 
-# [FIX-scale] proc→native : MULTIPLIER par ce facteur (pas diviser)
-PROC_TO_NATIVE = CAPTURE_W / PROCESS_W   # 3.0
+# Conversion
+PROC_TO_NATIVE  = CAPTURE_W / PROCESS_W   # 3.0
+CUP_HEIGHT_MM   = 90.0
 
-# [FIX-1] Centroïde base
-CUP_HEIGHT_MM       = 90.0   # hauteur physique tasse (mm) — À MESURER
-CUP_BASE_FACTOR     = 0.88   # fallback : base ≈ y + h × FACTOR
-FIT_ELLIPSE_MIN_PTS = 8
+# EMA
+EMA_ALPHA       = 0.35
+EMA_MAX_JUMP_MM = 200.0
 
-# [FIX-3] EMA
-EMA_ALPHA       = 0.25
-EMA_MAX_JUMP_MM = 120.0
-
-# [FIX-4] Bornes
+# Bornes table
 BOUNDS_MARGIN_MM = 30.0
 
-# [FIX-6] Tracking temporel
-ASSOC_MAX_DIST_MM = 250.0
+# KCF + recalage
+DETECT_INTERVAL_S = 0.15   # recalage HSV toutes les 150ms
+MAX_LOST_FRAMES   = 20     # frames avant suppression tracker
+MATCH_MIN_SCORE   = 0.01   # score minimum pour association
+MAX_DRIFT_RATIO   = 0.8    # derive max KCF (fraction diagonale bbox)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  [FIX-3] Filtre EMA
+#  EMA Filter
 # ══════════════════════════════════════════════════════════════════════════════
 
 class EMAFilter:
@@ -107,7 +106,7 @@ class EMAFilter:
             self._val = (x, y)
             return self._val
         dx, dy = x - self._val[0], y - self._val[1]
-        if (dx*dx + dy*dy) ** 0.5 > self._max_jump:
+        if (dx * dx + dy * dy) ** 0.5 > self._max_jump:
             self._val = (x, y)
             return self._val
         self._val = (
@@ -121,118 +120,12 @@ class EMAFilter:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  [FIX-6] Tracker temporel
-# ══════════════════════════════════════════════════════════════════════════════
-
-class SimpleCupTracker:
-    """
-    Tracker avec tolérance aux occultations courtes.
-    Un track survit MAX_MISSING frames sans détection avant d'être supprimé.
-    """
-    MAX_MISSING = 8  # frames de tolérance (~0.3s à 27fps)
-
-    def __init__(self, max_dist_mm: float = ASSOC_MAX_DIST_MM):
-        self._max_dist   = max_dist_mm
-        self._filters:   Dict[int, EMAFilter] = {}
-        self._last_pos:  Dict[int, Tuple[float, float]] = {}
-        self._missing:   Dict[int, int] = {}   # ← NOUVEAU : compteur d'absence
-        self._next_id    = 0
-
-    def update(self, detections_mm: List[Tuple[float, float]]) \
-            -> List[Tuple[int, float, float]]:
-
-        ids    = list(self._last_pos.keys())
-        result = []
-        used_tracks = set()
-        used_dets   = set()
-
-        # Association greedy par distance minimale
-        if ids and detections_mm:
-            dists = np.full((len(ids), len(detections_mm)), np.inf)
-            for i, tid in enumerate(ids):
-                px, py = self._last_pos[tid]
-                for j, (dx, dy) in enumerate(detections_mm):
-                    dists[i, j] = ((px - dx) ** 2 + (py - dy) ** 2) ** 0.5
-
-            for idx in np.argsort(dists.ravel()):
-                i, j = divmod(int(idx), len(detections_mm))
-                if i in used_tracks or j in used_dets:
-                    continue
-                if dists[i, j] > self._max_dist:
-                    break
-                tid = ids[i]
-                xs, ys = self._filters[tid].update(*detections_mm[j])
-                self._last_pos[tid] = (xs, ys)
-                self._missing[tid]  = 0          # ← reset compteur
-                result.append((tid, xs, ys))
-                used_tracks.add(i)
-                used_dets.add(j)
-
-        # Tracks non associés → incrémenter absence, garder dernière position
-        for i, tid in enumerate(ids):
-            if i not in used_tracks:
-                self._missing[tid] = self._missing.get(tid, 0) + 1
-                if self._missing[tid] <= self.MAX_MISSING:
-                    # ← SURVIVRE : republier la dernière position connue
-                    xs, ys = self._last_pos[tid]
-                    result.append((tid, xs, ys))
-                else:
-                    # Trop longtemps absent → supprimer
-                    del self._filters[tid]
-                    del self._last_pos[tid]
-                    del self._missing[tid]
-
-        # Nouvelles détections non associées → créer track
-        for j, (xr, yr) in enumerate(detections_mm):
-            if j not in used_dets:
-                tid = self._next_id
-                self._next_id += 1
-                f = EMAFilter()
-                xs, ys = f.update(xr, yr)
-                self._filters[tid]  = f
-                self._last_pos[tid] = (xs, ys)
-                self._missing[tid]  = 0
-                result.append((tid, xs, ys))
-
-        return result
-
-    def reset(self) -> None:
-        self._filters.clear()
-        self._last_pos.clear()
-        self._missing.clear()
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  [FIX-1] Centre BASE de la tasse
-# ══════════════════════════════════════════════════════════════════════════════
-
-def _base_center_from_contour(cnt, x, y, w, h):
-    """
-    Utilise le centroïde des moments sur le contour complet.
-    Vue du dessus : le centroïde M00 est bien le centre XY de la tasse.
-    fitEllipse sur moitié inférieure était biaisé (bord en perspective ≠ base).
-    """
-    M = cv2.moments(cnt)
-    if M["m00"] > 1:
-        cx = M["m10"] / M["m00"]
-        cy = M["m01"] / M["m00"]
-    else:
-        cx = x + w / 2.0
-        cy = y + h / 2.0
-    return float(cx), float(cy)
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  [FIX-2] Correction 3D perspective
+#  Correction 3D perspective
 # ══════════════════════════════════════════════════════════════════════════════
 
 def cup_base_pixel_correction(cx_px: float, cy_px: float,
                                rvec: np.ndarray, tvec: np.ndarray,
                                K: np.ndarray) -> Tuple[float, float]:
-    """
-    Corrige le pixel centroïde apparent → pixel correspondant à la base (Z=0).
-    Entrée/sortie : coordonnées pixels NATIVES undistorduées.
-    """
     dist_zero = np.zeros((5, 1), dtype=np.float64)
     K_inv = np.linalg.inv(K)
     ray   = K_inv @ np.array([cx_px, cy_px, 1.0], dtype=np.float64)
@@ -248,22 +141,17 @@ def cup_base_pixel_correction(cx_px: float, cy_px: float,
     pt_cam   = ray * t
     pt_table = R.T @ (pt_cam - o)
     x_top, y_top = float(pt_table[0]), float(pt_table[1])
-
-    pt_mid = np.array([[x_top, y_top, CUP_HEIGHT_MM / 2.0]], dtype=np.float64)
+    pt_mid  = np.array([[x_top, y_top, CUP_HEIGHT_MM / 2.0]], dtype=np.float64)
     proj_mid, _ = cv2.projectPoints(pt_mid, rvec, tvec, K, dist_zero)
-    cy_mid = float(proj_mid[0, 0, 1])
-
+    cy_mid  = float(proj_mid[0, 0, 1])
     pt_base = np.array([[x_top, y_top, 0.0]], dtype=np.float64)
     proj_base, _ = cv2.projectPoints(pt_base, rvec, tvec, K, dist_zero)
     cx_base = float(proj_base[0, 0, 0])
-
-    delta_y = cy_px - cy_mid
-    cy_corr = cy_px + delta_y
-    return cx_base, cy_corr
+    return cx_base, cy_px + (cy_px - cy_mid)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  [FIX-4] Validation bornes
+#  Validation bornes
 # ══════════════════════════════════════════════════════════════════════════════
 
 def is_on_table(x_mm: float, y_mm: float) -> bool:
@@ -273,54 +161,33 @@ def is_on_table(x_mm: float, y_mm: float) -> bool:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  PoseConverter — chaîne pixel → mm repère commun [FIX-H]
+#  PoseConverter
 # ══════════════════════════════════════════════════════════════════════════════
 
 class PoseConverter:
-    """
-    pixel natif undistordu → (x_mm, y_mm) repère commun.
-
-    Chaîne :
-      pixel → rayon → plan table → (x_top, y_top) repère cam_top brut
-      → H_top_to_bottom → (x_mm, y_mm) repère cam_bottom (commun)
-
-    H_top_to_bottom est OBLIGATOIRE.
-    La matrice mesurée montre une rotation ~90° + inversion, pas un simple
-    miroir Y. Le fallback de la version originale était incorrect.
-    """
     def __init__(self, pose_path: str):
-        d          = json.load(open(pose_path, "r", encoding="utf-8"))
-        self.rvec  = np.array(d["rvec"],          dtype=np.float64)
-        self.tvec  = np.array(d["tvec"],          dtype=np.float64)
-        self.K     = np.array(d["camera_matrix"], dtype=np.float64)
+        d         = json.load(open(pose_path, "r", encoding="utf-8"))
+        self.rvec = np.array(d["rvec"],          dtype=np.float64)
+        self.tvec = np.array(d["tvec"],          dtype=np.float64)
+        self.K    = np.array(d["camera_matrix"], dtype=np.float64)
         print(f"[Pose] fx={self.K[0,0]:.1f}  cx={self.K[0,2]:.1f}")
-
         h_path = pose_path.replace("camtop_table_pose.json",
                                    "H_top_to_bottom.json")
         if not os.path.isfile(h_path):
             raise FileNotFoundError(
                 f"\n[Pose] ERREUR : H_top_to_bottom.json introuvable → {h_path}\n"
-                "Ce fichier est obligatoire (la transformation top→bottom\n"
-                "n'est pas un simple miroir Y pour cette configuration).\n"
-                "Lance test_camtop_projection.py pour le générer.\n"
+                "Lance test_camtop_projection.py pour le generer.\n"
             )
         self._H = np.array(
             json.load(open(h_path))["H_top_to_bottom"], dtype=np.float32)
-        print("[Pose] H_top_to_bottom ✅")
+        print("[Pose] H_top_to_bottom OK")
 
-    def pixel_to_mm(self, u: float, v: float) \
-            -> Optional[Tuple[float, float]]:
-        """
-        Pixel (natif undistordu) → (x_mm, y_mm) repère commun.
-        Étape 1 : intersection rayon/plan → repère cam_top brut
-        Étape 2 : H_top_to_bottom → repère commun
-        """
+    def pixel_to_mm(self, u: float, v: float) -> Optional[Tuple[float, float]]:
         K_inv = np.linalg.inv(self.K)
         ray   = K_inv @ np.array([u, v, 1.0], dtype=np.float64)
         ray  /= np.linalg.norm(ray)
         R, _  = cv2.Rodrigues(self.rvec)
-        n     = R[:, 2]
-        o     = self.tvec.reshape(3)
+        n, o  = R[:, 2], self.tvec.reshape(3)
         denom = np.dot(n, ray)
         if abs(denom) < 1e-9:
             return None
@@ -329,16 +196,130 @@ class PoseConverter:
             return None
         pt_cam   = ray * t
         pt_table = R.T @ (pt_cam - o)
-        x_top    = float(pt_table[0])
-        y_top    = float(pt_table[1])
-
         pt2 = cv2.perspectiveTransform(
-            np.array([[[x_top, y_top]]], dtype=np.float32), self._H)
+            np.array([[[float(pt_table[0]), float(pt_table[1])]]], dtype=np.float32),
+            self._H)
         return float(pt2[0, 0, 0]), float(pt2[0, 0, 1])
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Détecteur tasses [FIX-1, FIX-5]
+#  Conversion proc → mm
+# ══════════════════════════════════════════════════════════════════════════════
+
+def proc_to_mm(cx_proc: float, cy_proc: float,
+               converter: PoseConverter,
+               use_3d: bool) -> Optional[Tuple[float, float]]:
+    cx_n = cx_proc * PROC_TO_NATIVE
+    cy_n = cy_proc * PROC_TO_NATIVE
+    if use_3d:
+        cx_n, cy_n = cup_base_pixel_correction(
+            cx_n, cy_n, converter.rvec, converter.tvec, converter.K)
+    mm = converter.pixel_to_mm(cx_n, cy_n)
+    if mm is None:
+        return None
+    if not is_on_table(*mm):
+        return None
+    return mm
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Utilitaires geometriques
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _center(bbox: Tuple) -> Tuple[float, float]:
+    x, y, w, h = bbox
+    return x + w / 2.0, y + h / 2.0
+
+
+def _iou(b1: Tuple, b2: Tuple) -> float:
+    x1, y1, w1, h1 = b1
+    x2, y2, w2, h2 = b2
+    ix = max(0, min(x1+w1, x2+w2) - max(x1, x2))
+    iy = max(0, min(y1+h1, y2+h2) - max(y1, y2))
+    inter = ix * iy
+    union = w1*h1 + w2*h2 - inter
+    return inter / union if union > 0 else 0.0
+
+
+def _match_score(b_tracker: Tuple, b_det: Tuple) -> float:
+    iou  = _iou(b_tracker, b_det)
+    x, y, w, h = b_tracker
+    diag = max(np.sqrt(w**2 + h**2), 1.0)
+    cx1, cy1 = _center(b_tracker)
+    cx2, cy2 = _center(b_det)
+    dist_norm = np.sqrt((cx1-cx2)**2 + (cy1-cy2)**2) / diag
+    if dist_norm > 2.0:
+        return 0.0
+    return iou + 0.4 * max(0.0, 1.0 - dist_norm)
+
+
+def _drift_ok(prev: Tuple, new: Tuple) -> bool:
+    x, y, w, h = prev
+    diag = max(np.sqrt(w**2 + h**2), 1.0)
+    cx1, cy1 = _center(prev)
+    cx2, cy2 = _center(new)
+    return np.sqrt((cx1-cx2)**2 + (cy1-cy2)**2) < MAX_DRIFT_RATIO * diag
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  TrackedCup
+# ══════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class TrackedCup:
+    cup_id:      int
+    ema:         EMAFilter
+    cv_tracker:  object
+    bbox:        Tuple[int, int, int, int]
+    pos_mm:      Optional[Tuple[float, float]] = None
+    lost_frames: int  = 0
+    active:      bool = True
+
+    def update_kcf(self, frame_proc: np.ndarray) -> bool:
+        if not self.active:
+            return False
+        ok, raw = self.cv_tracker.update(frame_proc)
+        if ok:
+            rx, ry, rw, rh = raw
+            new_bbox = (int(rx), int(ry), max(4, int(rw)), max(4, int(rh)))
+            if _drift_ok(self.bbox, new_bbox):
+                self.bbox = new_bbox
+                return True
+            self.active = False
+            return False
+        self.active = False
+        return False
+
+    def reinit_kcf(self, frame_proc: np.ndarray,
+                   bbox: Tuple[int, int, int, int]) -> bool:
+        fh, fw = frame_proc.shape[:2]
+        x, y, w, h = bbox
+        x = max(0, min(x, fw-1))
+        y = max(0, min(y, fh-1))
+        w = max(4, min(w, fw-x))
+        h = max(4, min(h, fh-y))
+        tracker = cv2.TrackerKCF_create()
+        try:
+            tracker.init(frame_proc, (x, y, w, h))
+            self.cv_tracker = tracker
+            self.bbox       = (x, y, w, h)
+            self.active     = True
+            return True
+        except Exception as e:
+            print(f"[KCF] Echec reinit cup_id={self.cup_id}: {e}")
+            self.active = False
+            return False
+
+    def update_mm(self, converter: PoseConverter, use_3d: bool) -> None:
+        cx, cy = _center(self.bbox)
+        mm = proc_to_mm(cx, cy, converter, use_3d)
+        if mm is not None:
+            xs, ys = self.ema.update(*mm)
+            self.pos_mm = (xs, ys)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Detecteur masque
 # ══════════════════════════════════════════════════════════════════════════════
 
 class CupDetector:
@@ -347,8 +328,7 @@ class CupDetector:
         self._kc = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
         self._ko = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
 
-    def detect(self, frame: np.ndarray) \
-            -> Tuple[List[Tuple[float, float, int, int]], np.ndarray]:
+    def detect(self, frame: np.ndarray):
         mask = self._mask(frame)
         return self._bboxes(frame, mask), mask
 
@@ -373,34 +353,128 @@ class CupDetector:
             if flood[y, w-1]: cv2.floodFill(flood, None, (w-1, y), 0)
         return flood
 
-    def _bboxes(self, frame, mask):
+    def _bboxes(self, frame: np.ndarray, mask: np.ndarray):
         fh, fw = frame.shape[:2]
-        cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cnts, _ = cv2.findContours(
+            mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         out = []
         for cnt in cnts:
             area = cv2.contourArea(cnt)
             if not (AREA_MIN <= area <= AREA_MAX):
                 continue
-
-            # ← AJOUT : convex hull pour résister au motion blur + anse
-            hull = cv2.convexHull(cnt)
-            hull_area  = cv2.contourArea(hull)
-            hull_perim = cv2.arcLength(hull, True)
-            if hull_perim < 1:
+            hull      = cv2.convexHull(cnt)
+            hull_area = cv2.contourArea(hull)
+            hull_peri = cv2.arcLength(hull, True)
+            if hull_peri < 1 or hull_area < 1:
                 continue
-            circ = 4 * np.pi * hull_area / hull_perim ** 2
-            if circ < CIRC_MIN:   # seuil sur hull, pas le contour brut
+            if 4 * np.pi * hull_area / hull_peri ** 2 < CIRC_MIN:
                 continue
-
             x, y, w, h = cv2.boundingRect(cnt)
-            if h > 0 and w / float(h) > ASPECT_MAX:
+            if h > 0 and not (ASPECT_MIN <= w/float(h) <= ASPECT_MAX):
                 continue
-
-            cx, cy = _base_center_from_contour(cnt, x, y, w, h)
-            bx1 = max(0, x - MARGIN);      by1 = max(0, y - MARGIN)
-            bx2 = min(fw, x + w + MARGIN); by2 = min(fh, y + h + MARGIN)
-            out.append((cx, cy, bx2 - bx1, by2 - by1))
+            x1 = max(0, x - MARGIN)
+            y1 = max(0, y - MARGIN)
+            x2 = min(fw, x + w + MARGIN)
+            y2 = min(fh, y + h + MARGIN)
+            out.append((x1, y1, x2-x1, y2-y1))
         return out
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  TrackingManager
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TrackingManager:
+    def __init__(self, converter: PoseConverter):
+        self._converter = converter
+        self._use_3d    = True
+        self._cups:     Dict[int, TrackedCup] = {}
+        self._next_id   = 0
+
+    def update_tracking(self, frame_proc: np.ndarray) -> List[TrackedCup]:
+        """KCF update chaque frame."""
+        for cup in list(self._cups.values()):
+            ok = cup.update_kcf(frame_proc)
+            if ok:
+                cup.update_mm(self._converter, self._use_3d)
+                cup.lost_frames = 0
+            else:
+                cup.lost_frames += 1
+
+        for cid in [c for c, v in self._cups.items()
+                    if v.lost_frames >= MAX_LOST_FRAMES]:
+            del self._cups[cid]
+            print(f"[Manager] Supprime cup_id={cid}")
+
+        return list(self._cups.values())
+
+    def update_detection(self, frame_proc: np.ndarray,
+                         detected: List[Tuple]) -> None:
+        """Recalage KCF depuis detection masque."""
+        if not detected:
+            return
+
+        cups      = list(self._cups.values())
+        used_dets = set()
+        used_cups = set()
+
+        if cups:
+            scores = np.zeros((len(cups), len(detected)), dtype=np.float32)
+            for i, cup in enumerate(cups):
+                for j, det in enumerate(detected):
+                    scores[i, j] = _match_score(cup.bbox, det)
+
+            for idx in np.argsort(-scores.ravel()):
+                i, j = divmod(int(idx), len(detected))
+                if i in used_cups or j in used_dets:
+                    continue
+                if scores[i, j] < MATCH_MIN_SCORE:
+                    break
+                cups[i].reinit_kcf(frame_proc, detected[j])
+                cups[i].update_mm(self._converter, self._use_3d)
+                cups[i].lost_frames = 0
+                used_cups.add(i)
+                used_dets.add(j)
+
+        for j, det in enumerate(detected):
+            if j not in used_dets:
+                self._create(frame_proc, det)
+
+    def force_reset(self, frame_proc: np.ndarray,
+                    detected: List[Tuple]) -> None:
+        self._cups.clear()
+        for det in detected:
+            self._create(frame_proc, det)
+        print(f"[Manager] Reset → {len(detected)} tasse(s)")
+
+    def _create(self, frame_proc: np.ndarray, bbox: Tuple) -> None:
+        fh, fw = frame_proc.shape[:2]
+        x, y, w, h = bbox
+        x = max(0, min(x, fw-1))
+        y = max(0, min(y, fh-1))
+        w = max(4, min(w, fw-x))
+        h = max(4, min(h, fh-y))
+        tracker = cv2.TrackerKCF_create()
+        try:
+            tracker.init(frame_proc, (x, y, w, h))
+        except Exception as e:
+            print(f"[Manager] Echec init KCF: {e}")
+            return
+        cid = self._next_id
+        self._next_id += 1
+        cup = TrackedCup(
+            cup_id=cid,
+            ema=EMAFilter(),
+            cv_tracker=tracker,
+            bbox=(x, y, w, h),
+        )
+        cup.update_mm(self._converter, self._use_3d)
+        self._cups[cid] = cup
+        print(f"[Manager] Nouveau cup_id={cid}  bbox=({x},{y},{w},{h})")
+
+    def reset(self) -> None:
+        self._cups.clear()
+        self._next_id = 0
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -412,12 +486,11 @@ def main():
         json.load(open(config_path("H_table_to_proj.json")))["H_table_to_proj"],
         dtype=np.float32)
 
-    # Lève FileNotFoundError si H_top_to_bottom.json absent [FIX-H]
     converter = PoseConverter(str(config_path("camtop_table_pose.json")))
     detector  = CupDetector()
-    tracker   = SimpleCupTracker()
+    manager   = TrackingManager(converter=converter)
 
-    # Undistort maps — résolution native (pixel_to_mm attend du natif)
+    # Undistort maps
     map1 = map2 = None
     try:
         c    = json.load(open(config_path("camera_calibration_top.json")))
@@ -444,9 +517,24 @@ def main():
         print(f"[Test] ERREUR cam {CAMERA_INDEX}")
         return
 
+    # Detection initiale sur premiere frame
+    ret, frame0 = cap.read()
+    if not ret:
+        print("[Test] Impossible de lire la premiere frame")
+        return
+    if map1 is not None:
+        frame0 = cv2.remap(frame0, map1, map2, cv2.INTER_LINEAR)
+    frame_small0 = cv2.resize(frame0, (PROCESS_W, PROCESS_H))
+    init_bboxes, _ = detector.detect(frame_small0)
+    print(f"[Test] Detection initiale : {len(init_bboxes)} tasse(s)")
+    manager.force_reset(frame_small0, init_bboxes)
+
     print("q=quitter  d=masque  +/-=seuil  r=reset  c=toggle correction 3D")
+
     show_mask         = False
     use_3d_correction = True
+    last_det_t        = time.monotonic()
+    last_mask         = None
     fps_t0            = time.monotonic()
     fps_count         = 0
     fps               = 0.0
@@ -456,60 +544,44 @@ def main():
         if not ret or frame_native is None:
             continue
 
-        # 1. Undistort natif
         if map1 is not None:
             frame_native = cv2.remap(frame_native, map1, map2, cv2.INTER_LINEAR)
 
-        # 2. Resize → proc
-        frame_small = cv2.resize(frame_native, (PROCESS_W, PROCESS_H),
-                                  interpolation=cv2.INTER_LINEAR)
+        frame_small = cv2.resize(
+            frame_native, (PROCESS_W, PROCESS_H),
+            interpolation=cv2.INTER_LINEAR)
 
-        # 3. Détection [FIX-1]
-        bboxes, mask = detector.detect(frame_small)
+        manager._use_3d = use_3d_correction
 
-        detections_mm: List[Tuple[float, float]] = []
-        debug_pts = []
+        # KCF update chaque frame
+        cups = manager.update_tracking(frame_small)
 
-        for (cx_s, cy_s, bw, bh) in bboxes:
-            # 4. proc → native  [FIX-scale]  MULTIPLY
-            cx_n = cx_s * PROC_TO_NATIVE
-            cy_n = cy_s * PROC_TO_NATIVE
+        # Recalage HSV periodique
+        now = time.monotonic()
+        if now - last_det_t >= DETECT_INTERVAL_S:
+            det_bboxes, last_mask = detector.detect(frame_small)
+            manager.update_detection(frame_small, det_bboxes)
+            cups       = list(manager._cups.values())
+            last_det_t = now
 
-            # 5. Correction 3D perspective [FIX-2]
-            if use_3d_correction:
-                cx_n, cy_n = cup_base_pixel_correction(
-                    cx_n, cy_n,
-                    converter.rvec, converter.tvec, converter.K)
-
-            # 6. pixel → mm (repère cam_top → H_top_to_bottom → repère commun)
-            mm = converter.pixel_to_mm(cx_n, cy_n)
-            if mm is None:
-                continue
-            x_mm, y_mm = mm
-
-            # 7. Validation bornes [FIX-4]
-            if not is_on_table(x_mm, y_mm):
-                continue
-
-            detections_mm.append((x_mm, y_mm))
-            debug_pts.append((cx_s, cy_s, x_mm, y_mm))
-
-        # 8. Tracking + EMA [FIX-3/6]
-        tracked = tracker.update(detections_mm)
-
-        # 9. Projection
+        # Projection
         proj_frame[:] = 255
         proj_results  = []
-        for (tid, x_smooth, y_smooth) in tracked:
-            pt  = np.array([[[x_smooth, y_smooth]]], dtype=np.float32)
+        for cup in cups:
+            if cup.pos_mm is None:
+                continue
+            x_mm, y_mm = cup.pos_mm
+            pt  = np.array([[[x_mm, y_mm]]], dtype=np.float32)
             pxy = cv2.perspectiveTransform(pt, H_proj)
             px  = int(pxy[0, 0, 0])
             py  = int(pxy[0, 0, 1])
-            proj_results.append((tid, x_smooth, y_smooth, px, py))
+            kcf_only = cup.lost_frames > 0
+            proj_results.append((cup.cup_id, x_mm, y_mm, px, py, kcf_only))
             m = RING_RADIUS + RING_THICKNESS
             if m <= px <= PROJ_W - m and m <= py <= PROJ_H - m:
+                color = (0, 180, 255) if kcf_only else RING_COLOR
                 cv2.circle(proj_frame, (px, py),
-                           RING_RADIUS, RING_COLOR, RING_THICKNESS,
+                           RING_RADIUS, color, RING_THICKNESS,
                            lineType=cv2.LINE_AA)
 
         dm.display_image_on_projector_monitor(proj_frame)
@@ -517,34 +589,49 @@ def main():
         # Preview
         preview = cv2.resize(frame_small, (960, 540))
         ps      = 960 / PROCESS_W
-        for (cx_s, cy_s, x_mm, y_mm) in debug_pts:
+
+        for cup in cups:
+            bx, by, bw, bh = cup.bbox
+            color = (0, 180, 255) if cup.lost_frames > 0 else (0, 255, 0)
+            cv2.rectangle(preview,
+                          (int(bx*ps), int(by*ps)),
+                          (int((bx+bw)*ps), int((by+bh)*ps)),
+                          color, 1)
+            cx, cy = _center(cup.bbox)
             cv2.drawMarker(preview,
-                           (int(cx_s * ps), int(cy_s * ps)),
+                           (int(cx*ps), int(cy*ps)),
                            (0, 0, 255), cv2.MARKER_CROSS, 14, 2)
-        for (tid, xs, ys, px, py) in proj_results:
+
+        for idx, (tid, xs, ys, px, py, kcf_only) in enumerate(proj_results):
+            src       = "KCF" if kcf_only else "OK"
+            color_txt = (0, 180, 255) if kcf_only else (0, 220, 80)
             cv2.putText(preview,
-                        f"T{tid}: ({xs:.0f},{ys:.0f})mm",
-                        (10, 40 + 22 * tid),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 220, 80), 1)
+                        f"T{tid}[{src}]: ({xs:.0f},{ys:.0f})mm",
+                        (10, 40 + 22 * idx),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color_txt, 1)
+
         corr_lbl = "3D:ON" if use_3d_correction else "3D:OFF"
         cv2.putText(preview,
-                    f"FPS:{fps:.1f}  det:{len(bboxes)}"
+                    f"FPS:{fps:.1f}  cups:{len(cups)}"
                     f"  seuil:{detector.v_threshold}(+/-)  {corr_lbl}(c)",
                     (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
         cv2.imshow("CamTop preview", preview)
-        if show_mask:
-            cv2.imshow("Masque", cv2.resize(mask, (960, 540)))
+
+        if show_mask and last_mask is not None:
+            cv2.imshow("Masque", cv2.resize(last_mask, (960, 540)))
 
         fps_count += 1
-        now = time.monotonic()
-        if now - fps_t0 >= 1.0:
-            fps       = fps_count / (now - fps_t0)
+        now2 = time.monotonic()
+        if now2 - fps_t0 >= 1.0:
+            fps       = fps_count / (now2 - fps_t0)
             fps_count = 0
-            fps_t0    = now
-            print(f"[Test] FPS={fps:.1f}  det={len(bboxes)}"
+            fps_t0    = now2
+            print(f"[Test] FPS={fps:.1f}  cups={len(cups)}"
                   f"  seuil={detector.v_threshold}  3D={use_3d_correction}")
-            for (tid, xs, ys, px, py) in proj_results:
-                print(f"  T{tid}  mm=({xs:.1f},{ys:.1f})  proj=({px},{py})")
+            for (tid, xs, ys, px, py, kcf_only) in proj_results:
+                src = "KCF" if kcf_only else "mask"
+                print(f"  T{tid}[{src}]  mm=({xs:.1f},{ys:.1f})"
+                      f"  proj=({px},{py})")
 
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'):
@@ -561,17 +648,19 @@ def main():
             print(f"seuil → {detector.v_threshold}")
         elif key == ord('r'):
             detector.v_threshold = V_THRESHOLD
-            tracker.reset()
+            det_bboxes, _ = detector.detect(frame_small)
+            manager.force_reset(frame_small, det_bboxes)
             print(f"Reset — seuil → {V_THRESHOLD}")
         elif key == ord('c'):
             use_3d_correction = not use_3d_correction
+            manager._use_3d   = use_3d_correction
             print(f"Correction 3D → {'ON' if use_3d_correction else 'OFF'}")
 
     cap.release()
     cv2.destroyAllWindows()
     proj_frame[:] = 0
     dm.display_image_on_projector_monitor(proj_frame)
-    print("[Test] Terminé")
+    print("[Test] Termine")
 
 
 if __name__ == "__main__":
