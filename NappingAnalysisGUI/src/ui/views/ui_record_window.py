@@ -321,6 +321,7 @@ class RecordWindow(QtWidgets.QWidget):
             dist = np.array(calib["dist_coeffs"], dtype=np.float64).reshape(4, 1)
             self.camera_manager.set_undistort(K, dist)
             self.runtime_K = self.camera_manager.K
+            self.algorithm_analysis.runtime_K = self.runtime_K
             print("✅ Undistortion fisheye activé")
         except Exception as e:
             print("❌ Erreur calibration undistort:", e)
@@ -370,7 +371,6 @@ class RecordWindow(QtWidgets.QWidget):
 
         if self.camera_manager:
             self.camera_manager.close_camera()
-            self.parent.stop_hand_tracking()
 
         if self.algorithm_thread is not None:
             try:
@@ -409,9 +409,9 @@ class RecordWindow(QtWidgets.QWidget):
 
         # APRÈS
         for entry in graph_coords:
-            marker_id, pos, *rest = entry          # rétrocompatible si state absent
-            state = rest[0] if rest else "POSEE"
+            marker_id, pos = entry[0], entry[1]
             x, y = pos
+            state = "POSEE"   # plus d'états — toujours vert
             detected_ids.add(marker_id)
             if 0 <= marker_id < len(self.checkboxes) and self.checkboxes[marker_id].isChecked():
                 self.scene.add_marker(x, y, marker_id, state=state)
