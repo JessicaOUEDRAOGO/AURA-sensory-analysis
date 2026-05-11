@@ -390,6 +390,8 @@ class TrackingManager:
         self._use_3d    = True
         self._cups:     Dict[int, TrackedCup] = {}
         self._next_id   = 0
+        self._pending: Dict[Tuple[int,int], int] = {}  # clé→nb frames vues
+        self.STABILITY_FRAMES = 8  # ~270ms à 30fps — main détectée < 270ms → ignorée
 
     def update_tracking(self, frame_proc: np.ndarray) -> List[TrackedCup]:
         """KCF update chaque frame."""
@@ -410,14 +412,21 @@ class TrackingManager:
 
     def update_detection(self, frame_proc: np.ndarray,
                          detected: List[Tuple]) -> None:
-        """Recalage KCF depuis detection masque."""
+        """
+        Recalage KCF depuis detection masque.
+        IMPORTANT : ne crée un nouveau track QUE si la détection
+        est stable (vue N fois consécutives) — évite de tracker la main.
+        """
         if not detected:
+            # Aucune détection → incrémenter compteur de stabilité à 0
+            self._pending.clear()
             return
 
         cups      = list(self._cups.values())
         used_dets = set()
         used_cups = set()
 
+        # Association greedy sur score décroissant
         if cups:
             scores = np.zeros((len(cups), len(detected)), dtype=np.float32)
             for i, cup in enumerate(cups):
@@ -436,9 +445,25 @@ class TrackingManager:
                 used_cups.add(i)
                 used_dets.add(j)
 
+        # Détections non associées → compteur de stabilité
+        current_pending_keys = set()
         for j, det in enumerate(detected):
             if j not in used_dets:
-                self._create(frame_proc, det)
+                # Clé = position arrondie à 20px près (stable entre frames)
+                cx, cy = _center(det)
+                key = (int(cx / 20), int(cy / 20))
+                current_pending_keys.add(key)
+                count = self._pending.get(key, 0) + 1
+                self._pending[key] = count
+                # Créer seulement si vu STABILITY_FRAMES fois consécutives
+                if count >= self.STABILITY_FRAMES:
+                    self._create(frame_proc, det)
+                    self._pending.pop(key, None)
+
+        # Purger les pending qui n'apparaissent plus dans cette frame
+        for key in list(self._pending.keys()):
+            if key not in current_pending_keys:
+                del self._pending[key]
 
     def force_reset(self, frame_proc: np.ndarray,
                     detected: List[Tuple]) -> None:
