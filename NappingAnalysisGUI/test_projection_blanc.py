@@ -88,7 +88,7 @@ EMA_MAX_JUMP_MM = 120.0
 BOUNDS_MARGIN_MM = 30.0
 
 # [FIX-6] Tracking temporel
-ASSOC_MAX_DIST_MM = 200.0
+ASSOC_MAX_DIST_MM = 250.0
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -125,66 +125,81 @@ class EMAFilter:
 # ══════════════════════════════════════════════════════════════════════════════
 
 class SimpleCupTracker:
+    """
+    Tracker avec tolérance aux occultations courtes.
+    Un track survit MAX_MISSING frames sans détection avant d'être supprimé.
+    """
+    MAX_MISSING = 8  # frames de tolérance (~0.3s à 27fps)
+
     def __init__(self, max_dist_mm: float = ASSOC_MAX_DIST_MM):
-        self._max_dist  = max_dist_mm
-        self._filters:  Dict[int, EMAFilter] = {}
-        self._last_pos: Dict[int, Tuple[float, float]] = {}
-        self._next_id   = 0
+        self._max_dist   = max_dist_mm
+        self._filters:   Dict[int, EMAFilter] = {}
+        self._last_pos:  Dict[int, Tuple[float, float]] = {}
+        self._missing:   Dict[int, int] = {}   # ← NOUVEAU : compteur d'absence
+        self._next_id    = 0
 
     def update(self, detections_mm: List[Tuple[float, float]]) \
             -> List[Tuple[int, float, float]]:
-        if not detections_mm:
-            self._filters.clear()
-            self._last_pos.clear()
-            return []
 
-        ids         = list(self._last_pos.keys())
-        result      = []
+        ids    = list(self._last_pos.keys())
+        result = []
         used_tracks = set()
         used_dets   = set()
 
-        if ids:
+        # Association greedy par distance minimale
+        if ids and detections_mm:
             dists = np.full((len(ids), len(detections_mm)), np.inf)
             for i, tid in enumerate(ids):
                 px, py = self._last_pos[tid]
                 for j, (dx, dy) in enumerate(detections_mm):
-                    dists[i, j] = ((px-dx)**2 + (py-dy)**2) ** 0.5
+                    dists[i, j] = ((px - dx) ** 2 + (py - dy) ** 2) ** 0.5
 
-            flat = np.argsort(dists.ravel())
-            for idx in flat:
+            for idx in np.argsort(dists.ravel()):
                 i, j = divmod(int(idx), len(detections_mm))
                 if i in used_tracks or j in used_dets:
                     continue
                 if dists[i, j] > self._max_dist:
                     break
-                tid    = ids[i]
+                tid = ids[i]
                 xs, ys = self._filters[tid].update(*detections_mm[j])
                 self._last_pos[tid] = (xs, ys)
+                self._missing[tid]  = 0          # ← reset compteur
                 result.append((tid, xs, ys))
                 used_tracks.add(i)
                 used_dets.add(j)
 
+        # Tracks non associés → incrémenter absence, garder dernière position
+        for i, tid in enumerate(ids):
+            if i not in used_tracks:
+                self._missing[tid] = self._missing.get(tid, 0) + 1
+                if self._missing[tid] <= self.MAX_MISSING:
+                    # ← SURVIVRE : republier la dernière position connue
+                    xs, ys = self._last_pos[tid]
+                    result.append((tid, xs, ys))
+                else:
+                    # Trop longtemps absent → supprimer
+                    del self._filters[tid]
+                    del self._last_pos[tid]
+                    del self._missing[tid]
+
+        # Nouvelles détections non associées → créer track
         for j, (xr, yr) in enumerate(detections_mm):
             if j not in used_dets:
                 tid = self._next_id
                 self._next_id += 1
-                f      = EMAFilter()
+                f = EMAFilter()
                 xs, ys = f.update(xr, yr)
-                self._filters[tid]   = f
-                self._last_pos[tid]  = (xs, ys)
+                self._filters[tid]  = f
+                self._last_pos[tid] = (xs, ys)
+                self._missing[tid]  = 0
                 result.append((tid, xs, ys))
-
-        seen = {r[0] for r in result}
-        for tid in list(self._filters.keys()):
-            if tid not in seen:
-                del self._filters[tid]
-                del self._last_pos[tid]
 
         return result
 
     def reset(self) -> None:
         self._filters.clear()
         self._last_pos.clear()
+        self._missing.clear()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
