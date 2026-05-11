@@ -74,7 +74,7 @@ MARGIN         = 20
 
 # Conversion
 PROC_TO_NATIVE  = CAPTURE_W / PROCESS_W   # 3.0
-CUP_HEIGHT_MM   = 90.0
+CUP_HEIGHT_MM   = 95.0
 
 # EMA
 EMA_ALPHA       = 0.35
