@@ -2,19 +2,24 @@
 """
 cam_top_thread.py
 =================
-Thread caméra du haut — KCF tracking + conversion mm exacte.
+Thread caméra du haut — KCF tracking PERMANENT sur toutes les tasses.
 
-Utilise exactement la chaîne de test_projection_blanc.py :
-  pixel proc → pixel natif → PoseConverter.pixel_to_mm()
-    → rayon/plan → H_top_to_bottom → mm repère commun
+Architecture identique à test_projection_blanc.py :
+  - KCF tourne en permanence sur toutes les tasses visibles
+  - Recalage HSV périodique (toutes les 150ms)
+  - Conversion pixel → mm via PoseConverter + H_top_to_bottom
+  - EMA sur les positions mm
 
-Architecture :
-  - Chaque frame : KCF update → position mm → CupStateBuffer
-  - Toutes les DETECT_INTERVAL_S : recalage HSV (corrige dérive KCF)
-  - Création nouveau track uniquement si KCF demandé par CupStateBuffer
-    (tasse SOULEVEE détectée par ArUco cam_bottom)
+Rôle dans le système global :
+  - Cam_bottom (ArUco) → identité des tasses + position quand POSEE
+  - Cam_top (KCF)     → position quand SOULEVEE (tracking continu)
+  - CupStateBuffer    → choisit quelle source utiliser selon l'état
 
-CupTopTracker supprimé — remplacé par TrackedCup + TrackingManager.
+Cam_top ne sait pas si une tasse est posée ou levée.
+Elle tracke tout, tout le temps. CupStateBuffer décide.
+
+Prints de debug :
+  [CamTop] T{marker_id} cam_top=({x:.0f},{y:.0f})mm  cam_bottom=({x:.0f},{y:.0f})mm
 """
 
 import cv2
@@ -44,27 +49,30 @@ BOUNDS_MARGIN_MM  = 30.0
 CUP_HEIGHT_MM     = 95.0
 
 # KCF
-DETECT_INTERVAL_S = 0.15
-MAX_LOST_FRAMES   = 20
-MATCH_MIN_SCORE   = 0.01
-MAX_DRIFT_RATIO   = 0.8
-STILL_THRESHOLD_PX = 15   # px proc — recalage accepté si détection proche
-
-# EMA
-EMA_ALPHA         = 0.35
-EMA_MAX_JUMP_MM   = 200.0
-
-# Détection masque
-V_THRESHOLD       = 110
-AREA_MIN          = 800
-AREA_MAX          = 40_000
-CIRC_MIN          = 0.15
-ASPECT_MIN        = 0.25
-ASPECT_MAX        = 3.5
-MARGIN            = 20
+DETECT_INTERVAL_S  = 0.15   # recalage HSV toutes les 150ms
+MAX_LOST_FRAMES    = 20
+MATCH_MIN_SCORE    = 0.01
+MAX_DRIFT_RATIO    = 0.8
+STILL_THRESHOLD_PX = 15     # recalage accepté si détection HSV proche du KCF
 
 # Stabilité création nouveau track (évite de tracker la main)
-STABILITY_FRAMES  = 8
+STABILITY_FRAMES   = 8
+
+# EMA
+EMA_ALPHA          = 0.35
+EMA_MAX_JUMP_MM    = 200.0
+
+# Détection masque
+V_THRESHOLD        = 110
+AREA_MIN           = 800
+AREA_MAX           = 40_000
+CIRC_MIN           = 0.15
+ASPECT_MIN         = 0.25
+ASPECT_MAX         = 3.5
+MARGIN             = 20
+
+# Debug print toutes les N secondes
+DEBUG_PRINT_INTERVAL_S = 1.0
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -101,10 +109,6 @@ class EMAFilter:
 # ══════════════════════════════════════════════════════════════════════════════
 
 class _PoseConverter:
-    """
-    pixel natif undistordu → (x_mm, y_mm) repère commun.
-    Chaîne : rayon → plan table → H_top_to_bottom → mm repère cam_bottom.
-    """
     def __init__(self, pose_path: str):
         d         = json.load(open(pose_path, "r", encoding="utf-8"))
         self.rvec = np.array(d["rvec"],          dtype=np.float64)
@@ -117,11 +121,13 @@ class _PoseConverter:
         if not os.path.isfile(h_path):
             raise FileNotFoundError(
                 f"[CamTop] H_top_to_bottom.json introuvable → {h_path}")
-        self._H = np.array(
+        self._H    = np.array(
             json.load(open(h_path))["H_top_to_bottom"], dtype=np.float32)
+        self._H_inv = np.linalg.inv(self._H.astype(np.float64))
         print("[CamTop] H_top_to_bottom OK")
 
     def pixel_to_mm(self, u: float, v: float) -> Optional[Tuple[float, float]]:
+        """Pixel natif undistordu → (x_mm, y_mm) repère commun."""
         K_inv = np.linalg.inv(self.K)
         ray   = K_inv @ np.array([u, v, 1.0], dtype=np.float64)
         ray  /= np.linalg.norm(ray)
@@ -140,6 +146,29 @@ class _PoseConverter:
             self._H)
         return float(pt2[0, 0, 0]), float(pt2[0, 0, 1])
 
+    def mm_to_pixel_proc(self, x_mm: float, y_mm: float) -> Tuple[float, float]:
+        """
+        (x_mm, y_mm) repère commun → pixel proc.
+        Inverse de pixel_to_mm — utilisé pour initialiser KCF depuis pos ArUco.
+        """
+        # Repasser en repère cam_top via H_inv
+        pt_top = cv2.perspectiveTransform(
+            np.array([[[x_mm, y_mm]]], dtype=np.float32),
+            self._H_inv.astype(np.float32))
+        x_top = float(pt_top[0, 0, 0])
+        y_top = float(pt_top[0, 0, 1])
+
+        # Projeter ce point table (Z=0) → pixel natif
+        dist_zero = np.zeros((5, 1), dtype=np.float64)
+        pt_3d = np.array([[x_top, y_top, 0.0]], dtype=np.float64)
+        px_nat, _ = cv2.projectPoints(
+            pt_3d, self.rvec, self.tvec, self.K, dist_zero)
+        cx_nat = float(px_nat[0, 0, 0])
+        cy_nat = float(px_nat[0, 0, 1])
+
+        # Natif → proc
+        return cx_nat / PROC_TO_NATIVE, cy_nat / PROC_TO_NATIVE
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  Correction perspective hauteur tasse
@@ -148,7 +177,6 @@ class _PoseConverter:
 def _cup_base_correction(cx_px: float, cy_px: float,
                           rvec: np.ndarray, tvec: np.ndarray,
                           K: np.ndarray) -> Tuple[float, float]:
-    """Corrige le décalage perspective dû à la hauteur de la tasse."""
     dist_zero = np.zeros((5, 1), dtype=np.float64)
     K_inv = np.linalg.inv(K)
     ray   = K_inv @ np.array([cx_px, cy_px, 1.0], dtype=np.float64)
@@ -176,7 +204,6 @@ def _cup_base_correction(cx_px: float, cy_px: float,
 def _proc_to_mm(cx_proc: float, cy_proc: float,
                 converter: _PoseConverter,
                 use_3d: bool = True) -> Optional[Tuple[float, float]]:
-    """Conversion proc → mm via chaîne complète."""
     cx_n = cx_proc * PROC_TO_NATIVE
     cy_n = cy_proc * PROC_TO_NATIVE
     if use_3d:
@@ -186,8 +213,7 @@ def _proc_to_mm(cx_proc: float, cy_proc: float,
     if mm is None:
         return None
     x_mm, y_mm = mm
-    lo = -BOUNDS_MARGIN_MM
-    hi = TABLE_SIZE_MM + BOUNDS_MARGIN_MM
+    lo, hi = -BOUNDS_MARGIN_MM, TABLE_SIZE_MM + BOUNDS_MARGIN_MM
     if not (lo <= x_mm <= hi and lo <= y_mm <= hi):
         return None
     return x_mm, y_mm
@@ -233,12 +259,12 @@ def _drift_ok(prev: Tuple, new: Tuple) -> bool:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  TrackedCup — une tasse trackée par KCF avec son identité ArUco
+#  TrackedCup — une tasse trackée avec son identité ArUco
 # ══════════════════════════════════════════════════════════════════════════════
 
 @dataclass
 class TrackedCup:
-    marker_id:   int                              # identité ArUco — JAMAIS changée
+    marker_id:   int      # identité ArUco — JAMAIS changée
     ema:         EMAFilter
     cv_tracker:  object
     bbox:        Tuple[int, int, int, int]
@@ -291,7 +317,7 @@ class TrackedCup:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Détecteur masque HSV (recalage périodique)
+#  Détecteur masque HSV
 # ══════════════════════════════════════════════════════════════════════════════
 
 class _CupDetector:
@@ -345,34 +371,38 @@ class _CupDetector:
             x, y, w, h = cv2.boundingRect(cnt)
             if h > 0 and not (ASPECT_MIN <= w/float(h) <= ASPECT_MAX):
                 continue
-            x1 = max(0, x - MARGIN)
-            y1 = max(0, y - MARGIN)
-            x2 = min(fw, x + w + MARGIN)
-            y2 = min(fh, y + h + MARGIN)
+            x1 = max(0, x - MARGIN);  y1 = max(0, y - MARGIN)
+            x2 = min(fw, x+w+MARGIN); y2 = min(fh, y+h+MARGIN)
             out.append((x1, y1, x2-x1, y2-y1))
         return out
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  TrackingManager — gère les TrackedCup avec identité ArUco
+#  TrackingManager — identique à test_projection_blanc
 # ══════════════════════════════════════════════════════════════════════════════
 
 class _TrackingManager:
     """
-    Gère les trackers KCF.
-    L'identité = marker_id ArUco, JAMAIS générée ici.
-    Un track est créé uniquement quand CupStateBuffer signale SOULEVEE.
+    Tracking permanent comme test_projection_blanc.
+    Différence : les tracks sont identifiés par marker_id ArUco
+    plutôt que par un ID auto-incrémenté.
+
+    Association ArUco → track :
+      - Au démarrage : détection HSV → bboxes → association par proximité
+        avec les positions ArUco connues → marker_id assigné
+      - Si ArUco inconnu → track avec ID temporaire négatif jusqu'à association
     """
 
     def __init__(self, converter: _PoseConverter):
         self._converter  = converter
+        self._detector   = _CupDetector()
         self._cups:      Dict[int, TrackedCup] = {}   # clé = marker_id
         self._pending:   Dict[Tuple[int, int], int] = {}
-        self._detector   = _CupDetector()
         self._last_det_t = 0.0
+        self._tmp_id     = -1   # IDs temporaires négatifs avant association ArUco
 
     def update_tracking(self, frame_proc: np.ndarray) -> List[TrackedCup]:
-        """KCF update chaque frame."""
+        """KCF update chaque frame — identique à test_projection_blanc."""
         for cup in list(self._cups.values()):
             ok = cup.update_kcf(frame_proc)
             if ok:
@@ -388,8 +418,13 @@ class _TrackingManager:
 
         return list(self._cups.values())
 
-    def update_detection(self, frame_proc: np.ndarray) -> None:
-        """Recalage HSV périodique — toutes les DETECT_INTERVAL_S."""
+    def update_detection(self, frame_proc: np.ndarray,
+                         known_positions: Dict[int, Tuple[float, float]]) -> None:
+        """
+        Recalage HSV périodique.
+        known_positions : {marker_id: (x_mm, y_mm)} depuis CupStateBuffer.
+        Permet d'assigner le bon marker_id aux bboxes HSV.
+        """
         now = time.monotonic()
         if now - self._last_det_t < DETECT_INTERVAL_S:
             return
@@ -397,12 +432,14 @@ class _TrackingManager:
 
         detected = self._detector.detect(frame_proc)
         if not detected:
+            self._pending.clear()
             return
 
         cups      = list(self._cups.values())
         used_dets = set()
         used_cups = set()
 
+        # ── Étape 1 : recaler les tracks existants ────────────────────
         if cups:
             scores = np.zeros((len(cups), len(detected)), dtype=np.float32)
             for i, cup in enumerate(cups):
@@ -417,7 +454,6 @@ class _TrackingManager:
                     break
                 cup = cups[i]
                 det = detected[j]
-                # Recaler seulement si immobile (évite fusion main+tasse)
                 cx_kcf, cy_kcf = _center(cup.bbox)
                 cx_det, cy_det = _center(det)
                 dist = np.sqrt((cx_kcf-cx_det)**2 + (cy_kcf-cy_det)**2)
@@ -428,37 +464,108 @@ class _TrackingManager:
                 used_cups.add(i)
                 used_dets.add(j)
 
-    def start_tracking(self, marker_id: int, pos_mm: Tuple[float, float],
-                       frame_proc: np.ndarray) -> bool:
-        """
-        Démarre le KCF pour marker_id à partir de sa dernière position mm.
-        Cherche la bbox HSV la plus proche de cette position.
-        """
-        if marker_id in self._cups:
-            return True   # déjà en cours
+        # ── Étape 2 : nouvelles détections → créer tracks ────────────
+        # Stabilité requise (évite de tracker la main)
+        current_keys = set()
+        for j, det in enumerate(detected):
+            if j in used_dets:
+                continue
+            cx, cy = _center(det)
+            key = (int(cx / 20), int(cy / 20))
+            current_keys.add(key)
+            count = self._pending.get(key, 0) + 1
+            self._pending[key] = count
+            if count >= STABILITY_FRAMES:
+                # Associer au marker_id ArUco le plus proche
+                marker_id = self._assign_marker_id(det, known_positions)
+                self._create(frame_proc, det, marker_id)
+                self._pending.pop(key, None)
 
-        # Trouver la bbox HSV la plus proche de la position ArUco
+        for key in list(self._pending.keys()):
+            if key not in current_keys:
+                del self._pending[key]
+
+    def init_from_aruco(self, frame_proc: np.ndarray,
+                        known_positions: Dict[int, Tuple[float, float]]) -> None:
+        """
+        Initialisation au démarrage depuis les positions ArUco connues.
+        Cherche la bbox HSV la plus proche de chaque tasse connue.
+        """
         detected = self._detector.detect(frame_proc)
-        best_bbox = self._find_best_bbox(pos_mm, detected, frame_proc)
-        if best_bbox is None:
-            print(f"[CamTop] Impossible d'initialiser KCF marker_id={marker_id} "
-                  f"— aucune bbox HSV proche de {pos_mm}")
-            return False
+        if not detected:
+            print("[CamTop] init_from_aruco: aucune bbox HSV détectée")
+            return
 
+        used_dets = set()
+        for marker_id, pos_mm in known_positions.items():
+            if marker_id in self._cups:
+                continue  # déjà tracké
+
+            # Projeter pos_mm → pixel proc
+            cx_ref, cy_ref = self._converter.mm_to_pixel_proc(*pos_mm)
+
+            # Bbox HSV la plus proche
+            best_j    = None
+            best_dist = float('inf')
+            for j, det in enumerate(detected):
+                if j in used_dets:
+                    continue
+                cx_det, cy_det = _center(det)
+                d = np.sqrt((cx_det-cx_ref)**2 + (cy_det-cy_ref)**2)
+                if d < best_dist:
+                    best_dist = d
+                    best_j    = j
+
+            # Tolérance large — 200px proc (~200mm sur la table)
+            if best_j is not None and best_dist < 200.0:
+                self._create(frame_proc, detected[best_j], marker_id)
+                used_dets.add(best_j)
+                print(f"[CamTop] Init KCF marker_id={marker_id} "
+                      f"dist={best_dist:.0f}px bbox={detected[best_j]}")
+            else:
+                print(f"[CamTop] Init KCF marker_id={marker_id} "
+                      f"— bbox trop loin ({best_dist:.0f}px > 200px)")
+
+    def _assign_marker_id(self, bbox: Tuple,
+                          known_positions: Dict[int, Tuple[float, float]]) -> int:
+        """
+        Assigne le marker_id ArUco le plus proche à une bbox HSV.
+        Retourne un ID temporaire négatif si aucun ArUco proche.
+        """
+        cx_proc, cy_proc = _center(bbox)
+        best_id   = None
+        best_dist = float('inf')
+        for marker_id, pos_mm in known_positions.items():
+            if marker_id in self._cups:
+                continue
+            cx_ref, cy_ref = self._converter.mm_to_pixel_proc(*pos_mm)
+            d = np.sqrt((cx_proc-cx_ref)**2 + (cy_proc-cy_ref)**2)
+            if d < best_dist:
+                best_dist = d
+                best_id   = marker_id
+
+        if best_id is not None and best_dist < 200.0:
+            return best_id
+
+        # Aucun ArUco connu proche → ID temporaire
+        tid = self._tmp_id
+        self._tmp_id -= 1
+        return tid
+
+    def _create(self, frame_proc: np.ndarray,
+                bbox: Tuple, marker_id: int) -> None:
         fh, fw = frame_proc.shape[:2]
-        x, y, w, h = best_bbox
+        x, y, w, h = bbox
         x = max(0, min(x, fw-1))
         y = max(0, min(y, fh-1))
         w = max(4, min(w, fw-x))
         h = max(4, min(h, fh-y))
-
         tracker = cv2.TrackerKCF_create()
         try:
             tracker.init(frame_proc, (x, y, w, h))
         except Exception as e:
             print(f"[CamTop] Echec init KCF marker_id={marker_id}: {e}")
-            return False
-
+            return
         cup = TrackedCup(
             marker_id=marker_id,
             ema=EMAFilter(),
@@ -467,48 +574,11 @@ class _TrackingManager:
         )
         cup.update_mm(self._converter)
         self._cups[marker_id] = cup
-        print(f"[CamTop] KCF démarré marker_id={marker_id}  bbox=({x},{y},{w},{h})")
-        return True
+        print(f"[CamTop] KCF créé marker_id={marker_id} bbox=({x},{y},{w},{h})")
 
-    def stop_tracking(self, marker_id: int) -> None:
-        """Arrête le KCF pour marker_id (tasse reposée)."""
-        if marker_id in self._cups:
-            del self._cups[marker_id]
-            print(f"[CamTop] KCF arrêté marker_id={marker_id}")
-
-    def get_pos_mm(self, marker_id: int) -> Optional[Tuple[float, float]]:
-        cup = self._cups.get(marker_id)
-        return cup.pos_mm if cup else None
-
-    def _find_best_bbox(self, pos_mm: Tuple[float, float],
-                        detected: List[Tuple],
-                        frame_proc: np.ndarray) -> Optional[Tuple]:
-        """
-        Trouve la bbox HSV la plus proche de pos_mm.
-        Convertit pos_mm → pixel proc pour comparer.
-        """
-        if not detected:
-            return None
-
-        # Approximation pos_mm → pixel proc via centre frame
-        # (on cherche juste la bbox la plus proche, pas besoin de précision)
-        fh, fw = frame_proc.shape[:2]
-        # Utiliser la conversion inverse : chercher la bbox dont le centre
-        # converti en mm est le plus proche de pos_mm
-        best_bbox = None
-        best_dist = float('inf')
-        for bbox in detected:
-            cx_proc, cy_proc = _center(bbox)
-            mm = _proc_to_mm(cx_proc, cy_proc, self._converter)
-            if mm is None:
-                continue
-            d = np.sqrt((mm[0]-pos_mm[0])**2 + (mm[1]-pos_mm[1])**2)
-            if d < best_dist:
-                best_dist = d
-                best_bbox = bbox
-
-        # Tolérance : 150mm max entre position ArUco et bbox HSV
-        return best_bbox if best_dist < 150.0 else None
+    def get_all_pos_mm(self) -> Dict[int, Tuple[float, float]]:
+        return {mid: cup.pos_mm for mid, cup in self._cups.items()
+                if cup.pos_mm is not None}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -517,11 +587,11 @@ class _TrackingManager:
 
 class CamTopThread(QThread):
     """
-    Thread caméra du haut.
+    Thread caméra du haut — tracking KCF permanent.
 
     Signaux :
       fps_signal(float)
-      pos_signal(int, float, float)  : (marker_id, x_mm, y_mm)
+      pos_signal(int, float, float) : (marker_id, x_mm, y_mm)
     """
 
     fps_signal = pyqtSignal(float)
@@ -552,12 +622,13 @@ class CamTopThread(QThread):
         self._converter = _PoseConverter(pose_path)
         self._manager   = _TrackingManager(self._converter)
 
-        # Undistort maps
         self._map1 = self._map2 = None
         self._load_undistort()
 
-        self._fps_count = 0
-        self._fps_t0    = 0.0
+        self._fps_count  = 0
+        self._fps_t0     = 0.0
+        self._debug_t0   = 0.0
+        self._initialized = False   # première init depuis ArUco faite?
 
     def _load_undistort(self) -> None:
         try:
@@ -576,6 +647,7 @@ class CamTopThread(QThread):
         self.running    = True
         self._fps_count = 0
         self._fps_t0    = time.monotonic()
+        self._debug_t0  = time.monotonic()
         print(f"[CamTop] Thread démarré — cam={self.camera_index}")
 
         cap = cv2.VideoCapture(self.camera_index, cv2.CAP_DSHOW)
@@ -593,26 +665,33 @@ class CamTopThread(QThread):
             if not ret or frame_native is None:
                 continue
 
-            # 1. Undistort natif
             if self._map1 is not None:
                 frame_native = cv2.remap(
                     frame_native, self._map1, self._map2, cv2.INTER_LINEAR)
 
-            # 2. Resize proc
             frame_proc = cv2.resize(
                 frame_native, (PROCESS_W, PROCESS_H),
                 interpolation=cv2.INTER_LINEAR)
 
-            # 3. Synchroniser avec CupStateBuffer
-            self._sync_with_state_buffer(frame_proc)
+            # Positions ArUco connues depuis CupStateBuffer
+            all_cups       = self.cup_state_buffer.get_all()
+            known_positions = {
+                mid: (c["last_pos"][0], c["last_pos"][1])
+                for mid, c in all_cups.items()
+            }
 
-            # 4. KCF update chaque frame
+            # Initialisation au démarrage dès qu'ArUco détecte des tasses
+            if not self._initialized and known_positions:
+                self._manager.init_from_aruco(frame_proc, known_positions)
+                self._initialized = True
+
+            # KCF update chaque frame
             cups = self._manager.update_tracking(frame_proc)
 
-            # 5. Recalage HSV périodique
-            self._manager.update_detection(frame_proc)
+            # Recalage HSV périodique
+            self._manager.update_detection(frame_proc, known_positions)
 
-            # 6. Publier positions dans CupStateBuffer
+            # Publier positions dans CupStateBuffer
             for cup in cups:
                 if cup.pos_mm is not None:
                     self.cup_state_buffer.update_from_top(
@@ -620,19 +699,35 @@ class CamTopThread(QThread):
                     self.pos_signal.emit(
                         cup.marker_id, cup.pos_mm[0], cup.pos_mm[1])
 
-            # 7. Preview debug
+            # Preview
             if self.show_preview:
                 self._draw_preview(frame_proc, cups)
 
-            # FPS
+            # FPS + debug print
             self._fps_count += 1
             now = time.monotonic()
             if now - self._fps_t0 >= 1.0:
                 fps = self._fps_count / (now - self._fps_t0)
                 self.fps_signal.emit(fps)
-                print(f"[CamTop] FPS={fps:.1f}  tracks={len(cups)}")
                 self._fps_count = 0
                 self._fps_t0    = now
+
+                # Print positions cam_top vs cam_bottom
+                top_pos  = self._manager.get_all_pos_mm()
+                bot_cups = self.cup_state_buffer.get_all()
+
+                print(f"[CamTop] FPS={fps:.1f}  tracks={len(cups)}")
+                all_ids = set(top_pos.keys()) | set(bot_cups.keys())
+                for mid in sorted(all_ids):
+                    t_pos = top_pos.get(mid)
+                    b_pos = bot_cups.get(mid, {}).get("last_pos")
+                    state = bot_cups.get(mid, {}).get("state", "?")
+                    t_str = (f"({t_pos[0]:.0f},{t_pos[1]:.0f})mm"
+                             if t_pos else "N/A")
+                    b_str = (f"({b_pos[0]:.0f},{b_pos[1]:.0f})mm"
+                             if b_pos else "N/A")
+                    print(f"  #{mid}[{state}]  "
+                          f"cam_top={t_str}  cam_bottom={b_str}")
 
         cap.release()
         if self.show_preview:
@@ -641,30 +736,6 @@ class CamTopThread(QThread):
 
     def stop(self) -> None:
         self.running = False
-
-    def _sync_with_state_buffer(self, frame_proc: np.ndarray) -> None:
-        """
-        Synchronise les trackers KCF avec les états ArUco du CupStateBuffer.
-        - Tasse SOULEVEE et pas encore trackée → démarrer KCF
-        - Tasse POSEE et encore trackée → arrêter KCF
-        """
-        all_cups = self.cup_state_buffer.get_all()
-        active_ids = set(self._manager._cups.keys())
-
-        for marker_id, cup in all_cups.items():
-            state = cup.get("state", "POSEE")
-
-            if state == "SOULEVEE" and marker_id not in active_ids:
-                # ArUco dit soulevée → démarrer KCF avec dernière pos connue
-                last_pos = cup.get("last_aruco_pos", cup["last_pos"])
-                self._manager.start_tracking(
-                    marker_id,
-                    (last_pos[0], last_pos[1]),
-                    frame_proc)
-
-            elif state == "POSEE" and marker_id in active_ids:
-                # ArUco dit reposée → arrêter KCF
-                self._manager.stop_tracking(marker_id)
 
     def _draw_preview(self, frame_proc: np.ndarray,
                       cups: List[TrackedCup]) -> None:
@@ -682,8 +753,8 @@ class CamTopThread(QThread):
                            (0, 0, 255), cv2.MARKER_CROSS, 14, 2)
             if cup.pos_mm:
                 cv2.putText(preview,
-                            f"#{cup.marker_id} ({cup.pos_mm[0]:.0f},"
-                            f"{cup.pos_mm[1]:.0f})mm",
+                            f"#{cup.marker_id} "
+                            f"({cup.pos_mm[0]:.0f},{cup.pos_mm[1]:.0f})mm",
                             (int(bx*ps), max(20, int(by*ps)-5)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1)
         cv2.imshow("CamTop Preview", preview)
