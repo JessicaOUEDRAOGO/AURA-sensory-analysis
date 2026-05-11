@@ -410,15 +410,11 @@ class TrackingManager:
 
         return list(self._cups.values())
 
-    def update_detection(self, frame_proc: np.ndarray,
-                         detected: List[Tuple]) -> None:
-        """
-        Recalage KCF depuis detection masque.
-        IMPORTANT : ne crée un nouveau track QUE si la détection
-        est stable (vue N fois consécutives) — évite de tracker la main.
-        """
+    STABILITY_FRAMES  = 8    # frames pour créer un nouveau track
+    RECALIB_MIN_STILL = 5    # frames immobiles avant d'accepter un recalage
+
+    def update_detection(self, frame_proc, detected):
         if not detected:
-            # Aucune détection → incrémenter compteur de stabilité à 0
             self._pending.clear()
             return
 
@@ -426,7 +422,6 @@ class TrackingManager:
         used_dets = set()
         used_cups = set()
 
-        # Association greedy sur score décroissant
         if cups:
             scores = np.zeros((len(cups), len(detected)), dtype=np.float32)
             for i, cup in enumerate(cups):
@@ -439,28 +434,42 @@ class TrackingManager:
                     continue
                 if scores[i, j] < MATCH_MIN_SCORE:
                     break
-                cups[i].reinit_kcf(frame_proc, detected[j])
-                cups[i].update_mm(self._converter, self._use_3d)
-                cups[i].lost_frames = 0
+
+                cup = cups[i]
+                det = detected[j]
+
+                # ── NOUVEAU : recaler KCF seulement si la tasse est immobile ──
+                # Si le centre du track KCF actuel et le centre de la détection
+                # HSV sont proches → tasse posée → recalage OK
+                # Si ils sont loin → tasse en mouvement (main+tasse fusionnés)
+                # → on garde KCF tel quel, pas de recalage
+                cx_kcf, cy_kcf = _center(cup.bbox)
+                cx_det, cy_det = _center(det)
+                dist = np.sqrt((cx_kcf - cx_det)**2 + (cy_kcf - cy_det)**2)
+
+                # Seuil : si la détection HSV a bougé de plus de 15px
+                # par rapport au KCF → probablement fusion main+tasse → skip
+                if dist < 15:
+                    cup.reinit_kcf(frame_proc, det)
+                    cup.update_mm(self._converter, self._use_3d)
+                    cup.lost_frames = 0
+
                 used_cups.add(i)
                 used_dets.add(j)
 
-        # Détections non associées → compteur de stabilité
+        # Nouvelles détections → stabilité requise
         current_pending_keys = set()
         for j, det in enumerate(detected):
             if j not in used_dets:
-                # Clé = position arrondie à 20px près (stable entre frames)
                 cx, cy = _center(det)
                 key = (int(cx / 20), int(cy / 20))
                 current_pending_keys.add(key)
                 count = self._pending.get(key, 0) + 1
                 self._pending[key] = count
-                # Créer seulement si vu STABILITY_FRAMES fois consécutives
                 if count >= self.STABILITY_FRAMES:
                     self._create(frame_proc, det)
                     self._pending.pop(key, None)
 
-        # Purger les pending qui n'apparaissent plus dans cette frame
         for key in list(self._pending.keys()):
             if key not in current_pending_keys:
                 del self._pending[key]
