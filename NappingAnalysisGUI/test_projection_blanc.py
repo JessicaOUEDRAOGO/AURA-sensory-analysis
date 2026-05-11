@@ -68,7 +68,7 @@ RING_COLOR     = (0, 200, 0)
 V_THRESHOLD    = 110
 AREA_MIN       = 800
 AREA_MAX       = 25_000
-CIRC_MIN       = 0.30        # [FIX-5] était 0.20
+CIRC_MIN       = 0.15        # [FIX-5] était 0.20
 ASPECT_MAX     = 3.5
 MARGIN         = 20
 
@@ -81,14 +81,14 @@ CUP_BASE_FACTOR     = 0.88   # fallback : base ≈ y + h × FACTOR
 FIT_ELLIPSE_MIN_PTS = 8
 
 # [FIX-3] EMA
-EMA_ALPHA       = 0.40
+EMA_ALPHA       = 0.25
 EMA_MAX_JUMP_MM = 120.0
 
 # [FIX-4] Bornes
 BOUNDS_MARGIN_MM = 30.0
 
 # [FIX-6] Tracking temporel
-ASSOC_MAX_DIST_MM = 150.0
+ASSOC_MAX_DIST_MM = 200.0
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -191,28 +191,20 @@ class SimpleCupTracker:
 #  [FIX-1] Centre BASE de la tasse
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _base_center_from_contour(cnt: np.ndarray,
-                               x: int, y: int, w: int, h: int) \
-        -> Tuple[float, float]:
+def _base_center_from_contour(cnt, x, y, w, h):
     """
-    fitEllipse sur les points du contour dans la moitié inférieure
-    de la bbox → centre de l'ellipse de base de la tasse.
-    Fallback : centroïde X + cy = y + h × CUP_BASE_FACTOR.
+    Utilise le centroïde des moments sur le contour complet.
+    Vue du dessus : le centroïde M00 est bien le centre XY de la tasse.
+    fitEllipse sur moitié inférieure était biaisé (bord en perspective ≠ base).
     """
-    M  = cv2.moments(cnt)
-    cx = M["m10"] / M["m00"] if M["m00"] > 1 else x + w / 2.0
-
-    pts_low = cnt[cnt[:, 0, 1] >= y + h * 0.55]
-    if len(pts_low) >= FIT_ELLIPSE_MIN_PTS:
-        try:
-            (ex, ey), _, _ = cv2.fitEllipse(pts_low)
-            if (x - MARGIN <= ex <= x + w + MARGIN and
-                    y + h * 0.4 <= ey <= y + h + MARGIN):
-                return float(ex), float(ey)
-        except cv2.error:
-            pass
-
-    return float(cx), float(y + h * CUP_BASE_FACTOR)
+    M = cv2.moments(cnt)
+    if M["m00"] > 1:
+        cx = M["m10"] / M["m00"]
+        cy = M["m01"] / M["m00"]
+    else:
+        cx = x + w / 2.0
+        cy = y + h / 2.0
+    return float(cx), float(cy)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -366,24 +358,29 @@ class CupDetector:
             if flood[y, w-1]: cv2.floodFill(flood, None, (w-1, y), 0)
         return flood
 
-    def _bboxes(self, frame: np.ndarray, mask: np.ndarray) \
-            -> List[Tuple[float, float, int, int]]:
+    def _bboxes(self, frame, mask):
         fh, fw = frame.shape[:2]
-        cnts, _ = cv2.findContours(
-            mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         out = []
         for cnt in cnts:
             area = cv2.contourArea(cnt)
             if not (AREA_MIN <= area <= AREA_MAX):
                 continue
-            perim = cv2.arcLength(cnt, True)
-            if perim < 1:
+
+            # ← AJOUT : convex hull pour résister au motion blur + anse
+            hull = cv2.convexHull(cnt)
+            hull_area  = cv2.contourArea(hull)
+            hull_perim = cv2.arcLength(hull, True)
+            if hull_perim < 1:
                 continue
-            if 4 * np.pi * area / perim ** 2 < CIRC_MIN:
+            circ = 4 * np.pi * hull_area / hull_perim ** 2
+            if circ < CIRC_MIN:   # seuil sur hull, pas le contour brut
                 continue
+
             x, y, w, h = cv2.boundingRect(cnt)
             if h > 0 and w / float(h) > ASPECT_MAX:
                 continue
+
             cx, cy = _base_center_from_contour(cnt, x, y, w, h)
             bx1 = max(0, x - MARGIN);      by1 = max(0, y - MARGIN)
             bx2 = min(fw, x + w + MARGIN); by2 = min(fh, y + h + MARGIN)
