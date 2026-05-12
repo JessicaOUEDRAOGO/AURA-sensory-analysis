@@ -33,7 +33,7 @@ from src.core.projection.display_manager import DisplayManager
 
 
 # Importer nos deux nouveaux modules
-from cup_identity_manager import CupIdentityManager, CupState
+from src.core.cup_tracking.cup_identity_manager import CupIdentityManager, CupState
 
 
 # ══════════════════════════════════════════════════════════════════════════════

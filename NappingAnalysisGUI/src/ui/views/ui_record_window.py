@@ -23,7 +23,7 @@ from src.core.utils.paths import gui_path, asset_path
 from src.ui.controllers.key_handler import KeyHandler
 from src.ui.widgets.graphics_scene import GraphicsScene
 from src.core.vision.camera_manager import CameraManager
-from src.app.runtime_v1 import Algorithm_Analysis
+from src.core.cup_tracking.cup_tracking_pipeline import Algorithm_Analysis
 
 
 class RecordWindow(QtWidgets.QWidget):
