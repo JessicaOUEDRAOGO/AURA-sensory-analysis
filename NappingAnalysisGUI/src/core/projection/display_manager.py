@@ -26,6 +26,7 @@ class DisplayManager:
         self.label = label
         self.projector_screen_id = int(projector_screen_id)
         self._projector_window_name = "Projector"
+        self._window_initialized = False   # fenêtre créée une seule fois
 
     # ======================================================================
     # Moniteur cible
@@ -130,6 +131,26 @@ class DisplayManager:
         return img
 
     # ======================================================================
+    # Initialisation fenêtre projecteur (une seule fois)
+    # ======================================================================
+    def _ensure_window(self, monitor) -> None:
+        """
+        Crée, positionne et passe en plein écran la fenêtre projecteur.
+        N'est exécutée qu'une seule fois grâce au flag _window_initialized.
+        Appels répétés à chaque frame = source du cercle fantôme et du flicker.
+        """
+        if self._window_initialized:
+            return
+        cv2.namedWindow(self._projector_window_name, cv2.WINDOW_NORMAL)
+        cv2.moveWindow(self._projector_window_name, int(monitor.x), int(monitor.y))
+        cv2.setWindowProperty(
+            self._projector_window_name,
+            cv2.WND_PROP_FULLSCREEN,
+            cv2.WINDOW_FULLSCREEN
+        )
+        self._window_initialized = True
+
+    # ======================================================================
     # Projection réelle
     # ======================================================================
     def display_image_on_projector_monitor(self, image_to_display: np.ndarray, screen_id: int = None):
@@ -139,6 +160,10 @@ class DisplayManager:
         Hypothèse de travail :
         - l'image reçue est déjà dans le bon repère projecteur
         - si sa taille diffère de la résolution écran, elle est redimensionnée
+
+        Note : cv2.waitKey() est intentionnellement absent ici.
+        Il doit être appelé une seule fois par frame dans la boucle principale
+        du pipeline (cup_tracking_pipeline.py), pas dans cette méthode.
         """
         try:
             img = self._validate_image(image_to_display)
@@ -156,15 +181,8 @@ class DisplayManager:
         if img.shape[1] != target_w or img.shape[0] != target_h:
             img = cv2.resize(img, (target_w, target_h), interpolation=cv2.INTER_AREA)
 
-        cv2.namedWindow(self._projector_window_name, cv2.WINDOW_NORMAL)
-        cv2.moveWindow(self._projector_window_name, int(monitor.x), int(monitor.y))
-        cv2.setWindowProperty(
-            self._projector_window_name,
-            cv2.WND_PROP_FULLSCREEN,
-            cv2.WINDOW_FULLSCREEN
-        )
+        self._ensure_window(monitor)
         cv2.imshow(self._projector_window_name, img)
-        cv2.waitKey(1)
 
     # ======================================================================
     # Fermeture
@@ -175,5 +193,6 @@ class DisplayManager:
 
         try:
             cv2.destroyWindow(self._projector_window_name)
+            self._window_initialized = False   # reset pour permettre réouverture propre
         except Exception:
             pass

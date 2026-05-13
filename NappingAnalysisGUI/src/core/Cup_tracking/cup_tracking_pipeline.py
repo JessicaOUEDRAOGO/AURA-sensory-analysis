@@ -454,12 +454,12 @@ class CupTrackingPipeline(QObject):
         self._identity_manager = CupIdentityManager()
 
         # Threads / objets créés dans _prepare_threads()
-        self._cam_bottom:     Optional[CamBottomThread] = None
-        self._cam_bot_manager: Optional[CameraManager]  = None
-        self._converter:      Optional[_PoseConverter]  = None
-        self._detector:       Optional[_CupDetector]    = None
-        self._manager:        Optional[_TrackingManager] = None
-        self._H_proj:         Optional[np.ndarray]      = None
+        self._cam_bottom:      Optional[CamBottomThread] = None
+        self._cam_bot_manager: Optional[CameraManager]   = None
+        self._converter:       Optional[_PoseConverter]  = None
+        self._detector:        Optional[_CupDetector]    = None
+        self._manager:         Optional[_TrackingManager] = None
+        self._H_proj:          Optional[np.ndarray]      = None
         self._map1 = self._map2 = None
         self._threads_ready = False
 
@@ -605,10 +605,11 @@ class CupTrackingPipeline(QObject):
         # Frame projecteur pré-allouée
         proj_frame = np.ones((PROJ_H, PROJ_W, 3), dtype=np.uint8) * 255
 
-        last_det_t = time.monotonic()
-        fps_t0     = time.monotonic()
-        fps_count  = 0
-        fps        = 0.0
+        last_det_t     = time.monotonic()
+        fps_t0         = time.monotonic()
+        fps_count      = 0
+        fps            = 0.0
+        signal_counter = 0   # ← CORRECTION 1 : compteur pour throttler data_signal
 
         print("[Pipeline] Boucle démarrée")
 
@@ -656,7 +657,7 @@ class CupTrackingPipeline(QObject):
                 label = labels.get(cup.cup_id, f"?#{cup.cup_id}")
 
                 # Aruco ID pour data_signal (marker_id ArUco ou cup_id si inconnu)
-                ident = self._identity_manager.get_identity(cup.cup_id)
+                ident  = self._identity_manager.get_identity(cup.cup_id)
                 out_id = ident.aruco_id if ident else cup.cup_id
 
                 m = RING_RADIUS + RING_THICKNESS + 30
@@ -674,13 +675,25 @@ class CupTrackingPipeline(QObject):
 
                 data_out.append((out_id, [x_mm, y_mm]))
 
+            # ── Affichage projecteur ──────────────────────────────────────
             self.display_manager.display_image_on_projector_monitor(proj_frame)
-            self.data_signal.emit({"data": data_out})
+
+            # ── Signal UI throttlé (~10 fps) ──────────────────────────────
+            # CORRECTION 2 : on n'émet data_signal qu'une frame sur 3
+            # pour ne pas saturer le thread Qt principal et éviter les saccades
+            signal_counter += 1
+            if signal_counter % 3 == 0:
+                self.data_signal.emit({"data": data_out})
             self._save_to_buffer(data_out)
 
             # ── Preview optionnel ─────────────────────────────────────────
             if self.show_preview:
                 self._draw_preview(frame_small, cups, labels)
+
+            # ── waitKey unique par frame ──────────────────────────────────
+            # CORRECTION 3 : un seul cv2.waitKey par frame, ici en fin de boucle.
+            # Il ne doit plus exister dans DisplayManager ni dans _draw_preview.
+            cv2.waitKey(1)
 
             # ── FPS ───────────────────────────────────────────────────────
             fps_count += 1
@@ -700,6 +713,7 @@ class CupTrackingPipeline(QObject):
             cv2.destroyWindow("Pipeline Preview")
         proj_frame[:] = 0
         self.display_manager.display_image_on_projector_monitor(proj_frame)
+        cv2.waitKey(1)   # flush final après l'écran noir
         self._save_csv()
         print("[Pipeline] Terminé")
         self.finished_signal.emit()
@@ -728,7 +742,7 @@ class CupTrackingPipeline(QObject):
                         (int(bx*ps), max(20, int(by*ps)-6)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
         cv2.imshow("Pipeline Preview", preview)
-        cv2.waitKey(1)
+        # PAS de waitKey ici — géré par la boucle principale (correction 3)
 
     # ── CSV ───────────────────────────────────────────────────────────────────
 
