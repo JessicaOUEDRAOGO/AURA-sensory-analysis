@@ -47,6 +47,7 @@ from src.core.projection.display_manager import DisplayManager
 from src.core.vision.camera_manager import CameraManager
 from src.core.cup_tracking.cam_bottom_thread import CamBottomThread
 from src.core.cup_tracking.cup_identity_manager import CupIdentityManager, CupState
+from src.core.cup_tracking.video_writer_thread import VideoWriterThread
 from src.core.config.app_config import CAMERA_WIDTH, CAMERA_HEIGHT, CAMERA_FPS
 
 
@@ -92,7 +93,10 @@ COLOR_AIRBORNE     = (0, 160, 255)
 COLOR_LOST         = (0, 0, 220)
 COLOR_UNKNOWN      = (180, 180, 180)
 
-
+# Constantes pour les noms de session d'enregistrement vidéo
+HT_RECORD_W   = 960    # largeur vidéo hand_tracking                       
+HT_RECORD_H   = 540    # hauteur vidéo hand_tracking                      
+HT_RECORD_FPS = 30.0   # fps cible (même si cam_top tourne plus vite)      
 # ══════════════════════════════════════════════════════════════════════════════
 #  Utilitaires géométriques — identiques à test_projection_identite.py
 # ══════════════════════════════════════════════════════════════════════════════
@@ -473,6 +477,28 @@ class CupTrackingPipeline(QObject):
         self.output_csv  = os.path.join(output_dir, f"{output_name}_{timestamp}.csv")
         self.data_buffer = []
 
+        # ── Enregistrement vidéo hand_tracking ──────────────────────────    
+        self._video_writer: VideoWriterThread | None = None
+        self._ht_record_enabled: bool = self.is_enabled("hand_tracking")
+
+        if self._ht_record_enabled:
+            ht_dir = os.path.join(
+                str(data_path("sessions", "hand_tracking_on"))
+            )
+            os.makedirs(ht_dir, exist_ok=True)
+            timestamp_ht = datetime.now().strftime("%Y%m%d_%H%M%S")
+            ht_filename  = f"{output_name}_{timestamp_ht}.mp4"
+            ht_path      = os.path.join(ht_dir, ht_filename)
+            self._video_writer = VideoWriterThread(
+                output_path=ht_path,
+                width=HT_RECORD_W,
+                height=HT_RECORD_H,
+                fps=HT_RECORD_FPS,
+            )
+            print(f"[Pipeline] Hand-tracking record activé → {ht_path}")
+        else:
+            print("[Pipeline] Hand-tracking record désactivé")
+
         print("[Pipeline] Initialisé")
 
     # ── Compatibilité RecordWindow ────────────────────────────────────────────
@@ -569,8 +595,11 @@ class CupTrackingPipeline(QObject):
 
         self.running = True
 
-        # Démarrer cam_bottom
-        self._cam_bottom.start()
+        if self._video_writer is not None:
+            self._video_writer.start()
+
+        # Démarrer cam_bottom en parallèle de l'ouverture cam_top (gain temps)
+        self._cam_bottom.start()  
 
         # Attendre la première détection ArUco (3s max)
         t_wait = time.monotonic()
@@ -625,6 +654,14 @@ class CupTrackingPipeline(QObject):
             frame_small = cv2.resize(
                 frame_native, (PROCESS_W, PROCESS_H),
                 interpolation=cv2.INTER_LINEAR)
+
+            # Enregistrement hand_tracking — frame native → queue async      
+            # On passe frame_native (1920×1080) ; le VideoWriterThread
+            # se charge du resize 960×540 dans son propre thread.
+            # Aucune copie ici — push_frame est non bloquant.
+            if self._video_writer is not None:
+                self._video_writer.push_frame(frame_native)
+
 
             # KCF update chaque frame
             cups = self._manager.update_tracking(frame_small)
@@ -715,6 +752,15 @@ class CupTrackingPipeline(QObject):
         self.display_manager.display_image_on_projector_monitor(proj_frame)
         cv2.waitKey(1)   # flush final après l'écran noir
         self._save_csv()
+        print("[Pipeline] Terminé")
+        
+        # Arrêt propre du writer vidéo (vide la queue avant de fermer)       # ← AJOUTÉ
+        if self._video_writer is not None:
+            print("[Pipeline] Arrêt VideoWriter...")
+            self._video_writer.stop()
+            self._video_writer = None
+
+        self._save_csv()           # ← inchangé
         print("[Pipeline] Terminé")
         self.finished_signal.emit()
 
