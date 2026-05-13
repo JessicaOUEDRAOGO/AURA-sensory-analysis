@@ -129,7 +129,12 @@ class CameraManager:
     # FERMETURE CAMERA
     # --------------------------------------------------
     def close_camera(self):
-        if self.cap is not None:
-            self.cap.release()
-            self.cap = None
-            print("Caméra fermée.")
+        if self.cap is None:          # 1. déjà None → on sort
+            return
+        try:
+            if self.cap.isOpened():   # 2. vérifie que le handle est encore valide
+                self.cap.release()
+        except Exception as e:        # 3. absorbe l'erreur OpenCV au lieu de planter
+            print(...)
+        finally:
+            self.cap = None           # 4. toujours remis à None même en cas d'erreur
