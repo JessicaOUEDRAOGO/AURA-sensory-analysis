@@ -23,11 +23,17 @@ import argparse
 import sys
 from pathlib import Path
 
+import matplotlib
+matplotlib.use("QtAgg")
+
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
-from matplotlib.widgets import Button
 import numpy as np
 import pandas as pd
+
+from matplotlib.backends.backend_qtagg import NavigationToolbar2QT
+from PyQt6.QtWidgets import QLabel, QComboBox, QVBoxLayout
+from PyQt6.QtCore import Qt
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -94,8 +100,6 @@ def compute_stats(sub: pd.DataFrame) -> dict:
         "n_frames":       len(sub),
         "dist_totale_mm": float(np.sum(dist)),
         "dist_max_mm":    float(np.max(dist)) if len(dist) else 0.0,
-        "x_range":        (float(sub["x"].min()), float(sub["x"].max())),
-        "y_range":        (float(sub["y"].min()), float(sub["y"].max())),
     }
 
 
@@ -110,105 +114,16 @@ CUP_COLORS = [
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Tracé principal
-# ──────────────────────────────────────────────────────────────────────────────
-
-def plot_trajectories(
-    cups:         dict,
-    title:        str  = "Trajectoire tasse(s)",
-    downsample:   int  = 1,
-    use_colormap: bool = True,
-    output_path:  str  = None,
-):
-    cup_ids = list(cups.keys())
-    n_cups  = len(cup_ids)
-
-    # ── Mode sauvegarde directe ───────────────────────────────────────────────
-    if output_path:
-        for k, (cup_id, sub) in enumerate(cups.items()):
-            fig, ax = plt.subplots(figsize=(10, 8))
-            fig.patch.set_facecolor("#1A1A2E")
-            _draw(fig, ax, cup_id, k, sub, downsample, use_colormap, title)
-            plt.tight_layout()
-            out = output_path if n_cups == 1 else output_path.replace(".", f"_cup{cup_id}.")
-            plt.savefig(out, dpi=150, bbox_inches="tight",
-                        facecolor=fig.get_facecolor())
-            print(f"[OK] Image sauvegardée → {out}")
-            plt.close(fig)
-        return
-
-    # ── Mode interactif ───────────────────────────────────────────────────────
-    bottom_margin = 0.10 if n_cups > 1 else 0.02
-
-    fig = plt.figure(figsize=(10, 8))
-    fig.patch.set_facecolor("#1A1A2E")
-
-    # L'axe principal occupe toute la zone au-dessus des boutons
-    ax = fig.add_axes([0.08, bottom_margin + 0.02, 0.82, 0.88])
-
-    state = {"active_idx": 0}
-
-    # Paramètres des boutons
-    btn_w   = min(0.12, 0.9 / max(n_cups, 1))
-    btn_gap = 0.01
-    total_w = n_cups * btn_w + (n_cups - 1) * btn_gap
-    x_start = (1.0 - total_w) / 2
-
-    def make_buttons():
-        """Crée les axes boutons et retourne la liste des objets Button."""
-        btns = []
-        for i, cup_id in enumerate(cup_ids):
-            x_pos  = x_start + i * (btn_w + btn_gap)
-            btn_ax = fig.add_axes([x_pos, 0.01, btn_w, 0.05])
-            color  = "#2255AA" if i == state["active_idx"] else "#0F3460"
-            btn    = Button(btn_ax, f"Cup #{cup_id}",
-                            color=color, hovercolor="#2255AA")
-            btn.label.set_color("white")
-            btn.label.set_fontsize(9)
-            btns.append(btn)
-        return btns
-
-    # Dessin initial
-    _draw(fig, ax, cup_ids[0], 0, cups[cup_ids[0]], downsample, use_colormap, title)
-
-    if n_cups > 1:
-        btn_list = make_buttons()
-
-        def on_click(event, idx, cid):
-            state["active_idx"] = idx
-
-            # Supprimer les anciennes colorbars UNIQUEMENT
-            # (les axes boutons sont identifiés par leur position y < 0.10)
-            to_remove = [a for a in fig.axes
-                         if a is not ax and a.get_position().y0 > 0.09]
-            for a in to_remove:
-                a.remove()
-
-            _draw(fig, ax, cid, idx, cups[cid], downsample, use_colormap, title)
-
-            # Mettre à jour la couleur des boutons
-            for j, b in enumerate(btn_list):
-                b.ax.set_facecolor("#2255AA" if j == idx else "#0F3460")
-                b.color      = "#2255AA" if j == idx else "#0F3460"
-                b.hovercolor = "#2255AA"
-
-            fig.canvas.draw_idle()
-
-        for i, cup_id in enumerate(cup_ids):
-            btn_list[i].on_clicked(
-                lambda event, idx=i, cid=cup_id: on_click(event, idx, cid)
-            )
-
-    plt.show()
-
-
-# ──────────────────────────────────────────────────────────────────────────────
 #  Dessin d'une tasse dans un axe donné
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _draw(fig, ax, cup_id, cup_index, sub, downsample, use_colormap, title):
-    """Efface l'axe et dessine la trajectoire de la tasse."""
     ax.clear()
+
+    # Supprimer les anciennes colorbars (axes avec y0 > 0.09 et différent de ax)
+    for extra in [a for a in fig.axes if a is not ax]:
+        extra.remove()
+
     ax.set_facecolor("#16213E")
 
     color_base = CUP_COLORS[cup_index % len(CUP_COLORS)]
@@ -224,7 +139,7 @@ def _draw(fig, ax, cup_id, cup_index, sub, downsample, use_colormap, title):
         return
 
     if use_colormap and n > 1:
-        cmap = plt.colormaps["plasma"]   # API moderne, pas de warning
+        cmap = plt.colormaps["plasma"]
         norm = mcolors.Normalize(vmin=0, vmax=n - 1)
 
         for i in range(n - 1):
@@ -274,6 +189,151 @@ def _draw(fig, ax, cup_id, cup_index, sub, downsample, use_colormap, title):
     if not use_colormap:
         ax.legend(loc="lower right", fontsize=8,
                   facecolor="#0F3460", edgecolor="#3A3A5C", labelcolor="white")
+
+    fig.canvas.draw_idle()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  Toolbar personnalisée avec menu déroulant de sélection de tasse
+# ──────────────────────────────────────────────────────────────────────────────
+
+class TrajectoryToolbar(NavigationToolbar2QT):
+    def __init__(self, canvas, parent, cups, fig, ax,
+                 downsample, use_colormap, title):
+        super().__init__(canvas, parent)
+        self._cups        = cups
+        self._fig         = fig
+        self._ax          = ax
+        self._downsample  = downsample
+        self._use_colormap = use_colormap
+        self._title       = title
+        self._cup_ids     = list(cups.keys())
+
+        if len(self._cup_ids) > 1:
+            self._add_cup_selector()
+
+    def _add_cup_selector(self):
+        # Séparateur visuel
+        self.addSeparator()
+
+        # Label
+        lbl = QLabel("  Tasse : ")
+        lbl.setStyleSheet("color: white; font-size: 12px;")
+        self.addWidget(lbl)
+
+        # Menu déroulant
+        self._combo = QComboBox()
+        self._combo.setStyleSheet("""
+            QComboBox {
+                background-color: #0F3460;
+                color: white;
+                border: 1px solid #2255AA;
+                border-radius: 4px;
+                padding: 3px 8px;
+                font-size: 12px;
+                min-width: 90px;
+            }
+            QComboBox::drop-down {
+                border: none;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #0F3460;
+                color: white;
+                selection-background-color: #2255AA;
+            }
+        """)
+
+        for cup_id in self._cup_ids:
+            self._combo.addItem(f"Cup #{cup_id}", userData=cup_id)
+
+        self._combo.currentIndexChanged.connect(self._on_cup_changed)
+        self.addWidget(self._combo)
+
+    def _on_cup_changed(self, index):
+        cup_id    = self._cup_ids[index]
+        cup_index = index
+        _draw(
+            fig          = self._fig,
+            ax           = self._ax,
+            cup_id       = cup_id,
+            cup_index    = cup_index,
+            sub          = self._cups[cup_id],
+            downsample   = self._downsample,
+            use_colormap = self._use_colormap,
+            title        = self._title,
+        )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  Tracé principal
+# ──────────────────────────────────────────────────────────────────────────────
+
+def plot_trajectories(
+    cups:         dict,
+    title:        str  = "Trajectoire tasse(s)",
+    downsample:   int  = 1,
+    use_colormap: bool = True,
+    output_path:  str  = None,
+):
+    cup_ids = list(cups.keys())
+    n_cups  = len(cup_ids)
+
+    # ── Mode sauvegarde directe ───────────────────────────────────────────────
+    if output_path:
+        for k, (cup_id, sub) in enumerate(cups.items()):
+            fig, ax = plt.subplots(figsize=(10, 8))
+            fig.patch.set_facecolor("#1A1A2E")
+            _draw(fig, ax, cup_id, k, sub, downsample, use_colormap, title)
+            plt.tight_layout()
+            out = output_path if n_cups == 1 else output_path.replace(".", f"_cup{cup_id}.")
+            plt.savefig(out, dpi=150, bbox_inches="tight",
+                        facecolor=fig.get_facecolor())
+            print(f"[OK] Image sauvegardée → {out}")
+            plt.close(fig)
+        return
+
+    # ── Mode interactif ───────────────────────────────────────────────────────
+    fig, ax = plt.subplots(figsize=(10, 8))
+    fig.patch.set_facecolor("#1A1A2E")
+
+    # Dessin initial : première tasse
+    _draw(fig, ax, cup_ids[0], 0, cups[cup_ids[0]], downsample, use_colormap, title)
+
+    # Remplacer la toolbar standard par notre toolbar personnalisée
+    manager = fig.canvas.manager
+    if hasattr(manager, "toolbar") and manager.toolbar is not None:
+        manager.toolbar.hide()
+
+    win    = manager.window
+    canvas = fig.canvas
+
+    toolbar = TrajectoryToolbar(
+        canvas       = canvas,
+        parent       = win,
+        cups         = cups,
+        fig          = fig,
+        ax           = ax,
+        downsample   = downsample,
+        use_colormap = use_colormap,
+        title        = title,
+    )
+
+    # Insérer la toolbar en haut de la fenêtre Qt
+    layout = win.layout()
+    if hasattr(layout, "insertWidget"):
+        layout.insertWidget(0, toolbar)
+    else:
+        from PyQt6.QtWidgets import QVBoxLayout, QWidget
+        container = QWidget()
+        vbox = QVBoxLayout(container)
+        vbox.setContentsMargins(0, 0, 0, 0)
+        vbox.setSpacing(0)
+        vbox.addWidget(toolbar)
+        vbox.addWidget(canvas)
+        win.setCentralWidget(container)
+
+    plt.tight_layout()
+    plt.show()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
