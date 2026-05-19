@@ -8,15 +8,15 @@ Basée sur test_projection_identite.py (stable 15+ min, thread principal).
 
 Fonctionnalités :
   - Tracking KCF (cam_top) + ArUco (cam_bottom) + identité stable
-  - Projection cercles colorés sur projecteur
-  - Grille mathématique 700×700 projetée en fond (dessinée une seule fois)
+  - Projecteur : fond blanc + cercles colorés (identique test_projection_identite.py)
+  - Fenêtre grille 700×700 à l'écran : points rouges = positions tasses, axes -10/10
   - Export CSV coordonnées x,y par tasse, flush toutes les 200 frames
   - Enregistrement vidéo cam_top via VideoWriterThread (non bloquant)
   - Saisie participant / protocole au démarrage via input()
 
 TOUCHES :
   q=quitter  r=reset trackers  +/-=seuil détection
-  c=toggle correction 3D  i=debug identités  v=toggle vidéo info
+  c=toggle correction 3D  i=debug identités
 """
 
 import cv2
@@ -61,14 +61,14 @@ PROJ_SCREEN_ID = 1
 RING_RADIUS    = 120
 RING_THICKNESS = 10
 
-# Grille projetée
+# Grille fenêtre PC — axes en unités "index" comme RecordWindow
 GRID_X_MIN  = -10.0
 GRID_X_MAX  =  10.0
 GRID_Y_MIN  = -10.0
 GRID_Y_MAX  =  10.0
 GRID_X_LEG  = "x"
 GRID_Y_LEG  = "y"
-GRID_SIZE   = 700
+GRID_SIZE   = 700   # pixels — image carrée 700×700
 
 # Couleurs état identité
 COLOR_MATCHED  = (0, 220, 0)
@@ -97,7 +97,7 @@ EMA_ALPHA       = 0.35
 EMA_MAX_JUMP_MM = 200.0
 
 # CSV
-CSV_FLUSH_EVERY = 200   # flush toutes les ~9 s à 22 fps
+CSV_FLUSH_EVERY = 200
 
 # Vidéo
 VIDEO_W   = 960
@@ -343,8 +343,8 @@ class CupDetector:
 
 class TrackingManager:
     def __init__(self, converter, identity_manager: CupIdentityManager):
-        self._conv  = converter
-        self._im    = identity_manager
+        self._conv   = converter
+        self._im     = identity_manager
         self._use_3d = True
         self._cups:   Dict[int, TrackedCup] = {}
         self._pending: Dict[tuple, int]     = {}
@@ -425,17 +425,90 @@ class TrackingManager:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  Grille fenêtre PC
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _build_grid_background() -> np.ndarray:
+    """
+    Construit le fond de grille 700×700 une seule fois.
+    Utilise DrawUtils.draw_math_grid_on_image — même rendu que RecordWindow.
+    """
+    base = np.ones((GRID_SIZE, GRID_SIZE, 3), dtype=np.uint8) * 255
+    return DrawUtils.draw_math_grid_on_image(
+        base,
+        GRID_X_MIN, GRID_X_MAX,
+        GRID_Y_MIN, GRID_Y_MAX,
+        GRID_X_LEG, GRID_Y_LEG,
+        GRID_SIZE,
+        color=(200, 200, 200),
+    )
+
+
+def _mm_to_grid_px(x_mm: float, y_mm: float) -> Tuple[int, int]:
+    """
+    Convertit une position en mm (espace table 0-597)
+    vers un pixel dans la grille 700×700 (espace index -10/+10).
+
+    Même logique que GraphicsScene.pixel_to_index_x/y inversée :
+      index = px / (grid_xmax - grid_xmin) * (x_max - x_min) + x_min
+    Ici on fait l'inverse :
+      px = (index - x_min) / (x_max - x_min) * GRID_SIZE
+    Et index = mm / TABLE_SIZE_MM * (x_max - x_min) + x_min
+    """
+    x_idx = (x_mm / TABLE_SIZE_MM) * (GRID_X_MAX - GRID_X_MIN) + GRID_X_MIN
+    y_idx = (y_mm / TABLE_SIZE_MM) * (GRID_Y_MAX - GRID_Y_MIN) + GRID_Y_MIN
+
+    px = int((x_idx - GRID_X_MIN) / (GRID_X_MAX - GRID_X_MIN) * GRID_SIZE)
+    py = int((y_idx - GRID_Y_MIN) / (GRID_Y_MAX - GRID_Y_MIN) * GRID_SIZE)
+    return px, py
+
+
+def _draw_grid_frame(
+    grid_bg: np.ndarray,
+    cups: list,
+    labels: dict,
+    identity_manager: CupIdentityManager,
+) -> np.ndarray:
+    """
+    Copie le fond de grille et dessine les points rouges des tasses.
+    Retourne l'image résultante — ne modifie pas grid_bg.
+    """
+    vis = grid_bg.copy()
+
+    for cup in cups:
+        if cup.pos_mm is None:
+            continue
+        x_mm, y_mm = cup.pos_mm
+        px, py = _mm_to_grid_px(x_mm, y_mm)
+
+        if not (0 <= px < GRID_SIZE and 0 <= py < GRID_SIZE):
+            continue
+
+        # Point rouge plein — identique à GraphicsScene.add_marker
+        cv2.circle(vis, (px, py), 10, (0, 0, 255), -1)
+
+        # Label ArUco à côté
+        label = labels.get(cup.cup_id, f"?#{cup.cup_id}")
+        cv2.putText(vis, label, (px + 13, py + 13),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 2,
+                    cv2.LINE_AA)
+
+    return vis
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  CSV
 # ══════════════════════════════════════════════════════════════════════════════
 
 class CsvWriter:
     def __init__(self, output_path: str):
-        self.output_path    = output_path
-        self._buffer: list  = []
+        self.output_path     = output_path
+        self._buffer: list   = []
         self._header_written = False
-        self._frame_index   = 0
+        self._frame_index    = 0
 
     def push(self, data_out: list):
+        """data_out : liste de (cup_id, x_mm, y_mm)"""
         self._frame_index += 1
         row = {
             "frame":     self._frame_index,
@@ -471,12 +544,11 @@ def main():
     print("  Napping Lite — pipeline autonome")
     print("=" * 60)
 
-    # ── Saisie participant ────────────────────────────────────────────────────
     protocol_name  = input("Nom du protocole  : ").strip() or "PROTO_TEST"
     participant_id = input("ID participant    : ").strip() or "P001"
 
-    timestamp  = datetime.now().strftime("%Y%m%d_%H%M%S")
-    basename   = f"{protocol_name}_{participant_id}_{timestamp}"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    basename  = f"{protocol_name}_{participant_id}_{timestamp}"
 
     out_dir = str(data_path("sessions", "lite"))
     os.makedirs(out_dir, exist_ok=True)
@@ -484,11 +556,10 @@ def main():
     csv_path   = os.path.join(out_dir, f"{basename}.csv")
     video_path = os.path.join(out_dir, f"{basename}.mp4")
 
-    print(f"\nSortie CSV   : {csv_path}")
-    print(f"Sortie vidéo : {video_path}")
-    print()
+    print(f"\nCSV   → {csv_path}")
+    print(f"Vidéo → {video_path}\n")
 
-    # ── Chargement config ─────────────────────────────────────────────────────
+    # ── Config ───────────────────────────────────────────────────────────────
     H_proj = np.array(
         json.load(open(config_path("H_table_to_proj.json")))["H_table_to_proj"],
         dtype=np.float32)
@@ -499,30 +570,24 @@ def main():
     manager          = TrackingManager(converter=converter, identity_manager=identity_manager)
     csv_writer       = CsvWriter(csv_path)
 
-    # ── VideoWriterThread ─────────────────────────────────────────────────────
+    # ── VideoWriter ──────────────────────────────────────────────────────────
     video_writer = VideoWriterThread(
-        output_path=video_path,
-        width=VIDEO_W,
-        height=VIDEO_H,
-        fps=VIDEO_FPS,
-    )
+        output_path=video_path, width=VIDEO_W, height=VIDEO_H, fps=VIDEO_FPS)
     video_writer.start()
 
-    # ── CamBottom ─────────────────────────────────────────────────────────────
+    # ── CamBottom ────────────────────────────────────────────────────────────
     cam_bot_manager = CameraManager(
         camera_index=CAM_BOT_INDEX,
-        width=CAMERA_WIDTH, height=CAMERA_HEIGHT, fps=CAMERA_FPS,
-    )
+        width=CAMERA_WIDTH, height=CAMERA_HEIGHT, fps=CAMERA_FPS)
     cam_bot_manager.open_camera()
     cam_bot = CamBottomThreadCore(
         camera_manager=cam_bot_manager,
         pose_path=str(config_path("cambottom_table_pose.json")),
         identity_manager=identity_manager,
-        show_preview=False,
-    )
+        show_preview=False)
     cam_bot.start()
 
-    # ── Undistort cam_top — maps recalculées pour PROCESS_W×PROCESS_H ────────
+    # ── Undistort cam_top — maps pour PROCESS_W×PROCESS_H ───────────────────
     map1 = map2 = None
     try:
         c    = json.load(open(config_path("camera_calibration_top.json")))
@@ -541,25 +606,15 @@ def main():
     except FileNotFoundError:
         print("[Main] Pas de camera_calibration_top.json — frames brutes")
 
-    # ── Projecteur ────────────────────────────────────────────────────────────
+    # ── Projecteur — fond blanc (identique test_projection_identite.py) ──────
     dm = DisplayManager(projector_screen_id=PROJ_SCREEN_ID)
+    proj_frame = np.ones((PROJ_H, PROJ_W, 3), dtype=np.uint8) * 255
 
-    # Fond avec grille — calculé UNE SEULE FOIS
-    proj_background = np.ones((PROJ_H, PROJ_W, 3), dtype=np.uint8) * 255
-    proj_background = DrawUtils.draw_math_grid_on_image(
-        proj_background,
-        GRID_X_MIN, GRID_X_MAX,
-        GRID_Y_MIN, GRID_Y_MAX,
-        GRID_X_LEG, GRID_Y_LEG,
-        GRID_SIZE,
-        color=(200, 200, 200),
-    )
-    print("[Main] Grille projecteur calculée")
+    # ── Grille fenêtre PC — calculée UNE SEULE FOIS ──────────────────────────
+    grid_bg = _build_grid_background()
+    print("[Main] Grille PC calculée")
 
-    # Frame projecteur de travail — réutilisée chaque itération
-    proj_frame = proj_background.copy()
-
-    # ── CamTop ────────────────────────────────────────────────────────────────
+    # ── CamTop ───────────────────────────────────────────────────────────────
     cap = cv2.VideoCapture(CAM_TOP_INDEX, cv2.CAP_DSHOW)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH,  CAPTURE_W)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAPTURE_H)
@@ -570,7 +625,7 @@ def main():
         cam_bot.stop(); video_writer.stop(); return
 
     # ── Attente cam_bottom ────────────────────────────────────────────────────
-    print("[Main] Attente détection initiale cam_bottom (3s max)…")
+    print("[Main] Attente cam_bottom (3s max)…")
     t_wait = time.monotonic()
     while time.monotonic() - t_wait < 3.0:
         if cam_bot.get_aruco_positions(): break
@@ -581,7 +636,6 @@ def main():
     if not ret:
         print("[Main] Impossible de lire frame0")
         cam_bot.stop(); video_writer.stop(); return
-
     small0 = cv2.resize(frame0, (PROCESS_W, PROCESS_H), interpolation=cv2.INTER_LINEAR)
     if map1 is not None:
         small0 = cv2.remap(small0, map1, map2, cv2.INTER_LINEAR)
@@ -590,7 +644,7 @@ def main():
     print(f"[Main] Détection initiale : {len(init_bboxes)} tasse(s)")
     manager.force_reset(small0, init_bboxes)
 
-    print("\nDémarrage — q=quitter  r=reset  +/-=seuil  c=3D  i=debug\n")
+    print("\nq=quitter  r=reset  +/-=seuil  c=3D  i=debug\n")
 
     use_3d_correction = True
     last_det_t        = time.monotonic()
@@ -599,7 +653,9 @@ def main():
     fps               = 0.0
     frame_count       = 0
 
-    # ── Boucle principale ─────────────────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════════════════════
+    #  Boucle principale
+    # ══════════════════════════════════════════════════════════════════════════
     while True:
         ret, frame_native = cap.read()
         if not ret or frame_native is None:
@@ -611,7 +667,7 @@ def main():
         if map1 is not None:
             frame_small = cv2.remap(frame_small, map1, map2, cv2.INTER_LINEAR)
 
-        # Vidéo — frame native envoyée avant del (non bloquant)
+        # Vidéo native — push avant del (non bloquant)
         video_writer.push_frame(frame_native)
         del frame_native
 
@@ -635,11 +691,10 @@ def main():
 
         labels = identity_manager.get_labels()
 
-        # ── Construction frame projecteur (grille + cercles) ─────────────────
-        # Recopier le fond avec grille — pas de recalcul
-        np.copyto(proj_frame, proj_background)
-
+        # ── Projecteur : fond blanc + cercles ────────────────────────────────
+        proj_frame[:] = 255
         data_out = []
+
         for cup in cups:
             if cup.pos_mm is None: continue
             x_mm, y_mm = cup.pos_mm
@@ -670,13 +725,17 @@ def main():
 
             data_out.append((out_id, x_mm, y_mm))
 
-        # Affichage projecteur
         dm.display_image_on_projector_monitor(proj_frame)
 
-        # CSV
+        # ── CSV ───────────────────────────────────────────────────────────────
         csv_writer.push(data_out)
 
-        # Preview cam_top
+        # ── Fenêtre grille PC — points rouges ─────────────────────────────────
+        grid_vis = _draw_grid_frame(grid_bg, cups, labels, identity_manager)
+        cv2.imshow("Napping — Grille", grid_vis)
+        del grid_vis
+
+        # ── Preview cam_top ───────────────────────────────────────────────────
         preview = cv2.resize(frame_small, (960, 540))
         ps = 960 / PROCESS_W
         for cup in cups:
@@ -698,10 +757,9 @@ def main():
                     f"FPS:{fps:.1f}  cups:{len(cups)}"
                     f"  seuil:{detector.v_threshold}"
                     f"  3D:{'ON' if use_3d_correction else 'OFF'}"
-                    f"  {participant_id}/{protocol_name}",
+                    f"  {participant_id}",
                     (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255,255,0), 1)
-
-        cv2.imshow("Napping Lite — CamTop", preview)
+        cv2.imshow("Napping — CamTop", preview)
 
         # FPS
         fps_count += 1
@@ -709,8 +767,7 @@ def main():
         if now2 - fps_t0 >= 1.0:
             fps       = fps_count / (now2 - fps_t0)
             fps_count = 0; fps_t0 = now2
-            print(f"[Main] FPS={fps:.1f}  cups={len(cups)}"
-                  f"  frames={frame_count}")
+            print(f"[Main] FPS={fps:.1f}  cups={len(cups)}  frames={frame_count}")
 
         key = cv2.waitKey(1) & 0xFF
         del preview
@@ -737,22 +794,17 @@ def main():
 
     # ── Nettoyage ─────────────────────────────────────────────────────────────
     print("\n[Main] Arrêt...")
-
     cam_bot.stop()
     cam_bot.wait(2000)
     cam_bot_manager.close_camera()
     cap.release()
-
-    video_writer.stop()   # vide la queue avant fermeture
-    csv_writer.close()    # flush final
-
+    video_writer.stop()
+    csv_writer.close()
     cv2.destroyAllWindows()
-
     proj_frame[:] = 0
     dm.display_image_on_projector_monitor(proj_frame)
     cv2.waitKey(1)
-
-    print(f"[Main] Session terminée — {frame_count} frames")
+    print(f"[Main] Terminé — {frame_count} frames")
     print(f"  CSV   : {csv_path}")
     print(f"  Vidéo : {video_path}")
 
