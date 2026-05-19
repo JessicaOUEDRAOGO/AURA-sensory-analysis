@@ -4,15 +4,15 @@ cup_tracking_pipeline.py
 =========================
 Pipeline complet de tracking des tasses.
 
-Corrections v3 :
-  - Suppression de _ProjectorThread (causait saccades et conflit _stop)
-    → affichage projecteur synchrone dans la boucle, comme avant
-  - Fix fuite RAM : flush CSV périodique (CSV_FLUSH_EVERY frames)
-  - Fix purge identités stale (PURGE_EVERY_FRAMES)
-  - cv2.waitKey(1) unique en fin de boucle, comme dans la version originale
-  - Ordre de nettoyage correct à l'arrêt (_save_csv appelé une seule fois)
+v4 — corrections sur base étapes 1+2 :
+  - _HsvDetectorThread : détection HSV dans thread séparé (supprime chutes FPS)
+  - gc.collect() contrôlé toutes les PURGE_EVERY_FRAMES frames
+  - del frame_small en fin de boucle (libération explicite)
+  - Constantes resserrées pour sessions 15 min
+  - stop() : reset identity_manager + gc.collect() entre participants
 """
 
+import gc
 import cv2
 import json
 import numpy as np
@@ -82,11 +82,10 @@ HT_RECORD_H        = 540
 HT_RECORD_FPS      = 30.0
 
 # ── Optimisation longue durée ─────────────────────────────────────────────────
-# Flush CSV toutes les N frames pour vider le buffer RAM (~30 s à 16 fps)
-CSV_FLUSH_EVERY    = 500
-# Purge des identités LOST stale toutes les N frames
-PURGE_EVERY_FRAMES = 300
-PURGE_MAX_AGE_S    = 60.0
+# Resserrés pour tenir 15 min par participant sans accumulation RAM
+CSV_FLUSH_EVERY    = 200    # flush toutes les ~9 s à 22 fps
+PURGE_EVERY_FRAMES = 150    # purge ArUco fantômes toutes les ~7 s
+PURGE_MAX_AGE_S    = 20.0   # tag non vu depuis 20 s → stale
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -328,13 +327,11 @@ class _TrackingManager:
             else:
                 cup.lost_frames += 1
 
-        # Supprimer les trackers perdus
         for cid in [c for c,v in self._cups.items()
                     if v.lost_frames >= MAX_LOST_FRAMES]:
             del self._cups[cid]
             print(f"[Pipeline] KCF perdu cup#{cid} → supprimé")
 
-        # Nettoyer les liaisons orphelines dans l'identity manager
         active_ids = set(self._cups.keys())
         for tracker_id in list(self._identity_manager._tracker_to_aruco.keys()):
             if tracker_id not in active_ids:
@@ -409,13 +406,61 @@ class _TrackingManager:
         self._cups[cid] = cup
         print(f"[Pipeline] Nouveau cup#{cid}  bbox=({x},{y},{w},{h})")
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  _HsvDetectorThread — détection HSV asynchrone
+#  Déporte la morphologie dans un thread séparé.
+#  La boucle KCF n'est plus bloquée lors des détections lourdes.
+# ══════════════════════════════════════════════════════════════════════════════
+
+class _HsvDetectorThread(threading.Thread):
+
+    def __init__(self, detector: _CupDetector):
+        super().__init__(name="_HsvDetectorThread", daemon=True)
+        self._detector = detector
+        self._input_q  = queue.Queue(maxsize=1)
+        self._output_q = queue.Queue(maxsize=1)
+        self._running  = False
+
+    def run(self) -> None:
+        self._running = True
+        while self._running:
+            try:
+                frame = self._input_q.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            bboxes, _ = self._detector.detect(frame)
+            if self._output_q.full():
+                try: self._output_q.get_nowait()
+                except queue.Empty: pass
+            self._output_q.put(bboxes)
+
+    def submit(self, frame: np.ndarray) -> None:
+        """Soumet une frame — non bloquant, écrase la précédente si non consommée."""
+        if self._input_q.full():
+            try: self._input_q.get_nowait()
+            except queue.Empty: pass
+        self._input_q.put_nowait(frame)
+
+    def get_result(self) -> Optional[list]:
+        """Retourne le dernier résultat disponible, ou None si pas encore prêt."""
+        try: return self._output_q.get_nowait()
+        except queue.Empty: return None
+
+    def stop(self) -> None:
+        self._running = False
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  _CamTopReaderThread — lecture cam_top dédiée (étape 2)
+# ══════════════════════════════════════════════════════════════════════════════
+
 class _CamTopReaderThread(threading.Thread):
-    """Thread dédié à la lecture cam_top — évite le blocage DSHOW dans la boucle principale."""
 
     def __init__(self, cap: cv2.VideoCapture):
         super().__init__(name="_CamTopReaderThread", daemon=True)
-        self._cap   = cap
-        self._queue = queue.Queue(maxsize=1)
+        self._cap     = cap
+        self._queue   = queue.Queue(maxsize=1)
         self._running = False
 
     def run(self) -> None:
@@ -425,23 +470,18 @@ class _CamTopReaderThread(threading.Thread):
             if not ret or frame is None:
                 time.sleep(0.002)
                 continue
-            # maxsize=1 : on jette l'ancienne frame si pas encore consommée
             if self._queue.full():
-                try:
-                    self._queue.get_nowait()
-                except queue.Empty:
-                    pass
+                try: self._queue.get_nowait()
+                except queue.Empty: pass
             self._queue.put(frame)
 
-    def get_frame(self, timeout: float = 0.05):
-        """Retourne la frame la plus récente, ou None si timeout."""
-        try:
-            return self._queue.get(timeout=timeout)
-        except queue.Empty:
-            return None
+    def get_frame(self, timeout: float = 0.05) -> Optional[np.ndarray]:
+        try: return self._queue.get(timeout=timeout)
+        except queue.Empty: return None
 
     def stop(self) -> None:
         self._running = False
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  CupTrackingPipeline — remplace Algorithm_Analysis
@@ -488,17 +528,18 @@ class CupTrackingPipeline(QObject):
 
         self._identity_manager = CupIdentityManager()
 
-        self._cam_bottom:      Optional[CamBottomThread]  = None
-        self._cam_bot_manager: Optional[CameraManager]    = None
-        self._converter:       Optional[_PoseConverter]   = None
-        self._detector:        Optional[_CupDetector]     = None
-        self._manager:         Optional[_TrackingManager] = None
-        self._H_proj:          Optional[np.ndarray]       = None
+        self._cam_bottom:      Optional[CamBottomThread]     = None
+        self._cam_bot_manager: Optional[CameraManager]       = None
+        self._converter:       Optional[_PoseConverter]      = None
+        self._detector:        Optional[_CupDetector]        = None
+        self._manager:         Optional[_TrackingManager]    = None
+        self._H_proj:          Optional[np.ndarray]          = None
         self._map1 = self._map2 = None
-        self._cam_top_reader: Optional[_CamTopReaderThread] = None
+        self._cam_top_reader:  Optional[_CamTopReaderThread] = None
+        self._hsv_thread:      Optional[_HsvDetectorThread]  = None
         self._threads_ready = False
 
-        # CSV — flush périodique pour éviter la fuite RAM
+        # CSV
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         if output_dir is None:
             os.makedirs(data_path(), exist_ok=True)
@@ -568,14 +609,13 @@ class CupTrackingPipeline(QObject):
             c    = json.load(open(config_path("camera_calibration_top.json")))
             Kr   = np.array(c["camera_matrix"], dtype=np.float64)
             dist = np.array(c["dist_coeffs"],   dtype=np.float64)
-            sx = PROCESS_W / CAPTURE_W   # 640/1920
-            sy = PROCESS_H / CAPTURE_H   # 360/1080
+            sx = PROCESS_W / CAPTURE_W
+            sy = PROCESS_H / CAPTURE_H
             Kr_small = Kr.copy()
-            Kr_small[0, 0] *= sx   # fx
-            Kr_small[1, 1] *= sy   # fy
-            Kr_small[0, 2] *= sx   # cx
-            Kr_small[1, 2] *= sy   # cy
-
+            Kr_small[0, 0] *= sx
+            Kr_small[1, 1] *= sy
+            Kr_small[0, 2] *= sx
+            Kr_small[1, 2] *= sy
             nK_small, _ = cv2.getOptimalNewCameraMatrix(
                 Kr_small, dist, (PROCESS_W, PROCESS_H), 1, (PROCESS_W, PROCESS_H))
             self._map1, self._map2 = cv2.initUndistortRectifyMap(
@@ -609,8 +649,9 @@ class CupTrackingPipeline(QObject):
         if self.runtime_K is not None:
             self._cam_bottom.set_camera_matrix(self.runtime_K)
 
-        self._detector = _CupDetector()
-        self._manager  = _TrackingManager(
+        self._detector   = _CupDetector()
+        self._hsv_thread = _HsvDetectorThread(self._detector)
+        self._manager    = _TrackingManager(
             conv=self._converter,
             identity_manager=self._identity_manager,
         )
@@ -652,7 +693,8 @@ class CupTrackingPipeline(QObject):
 
         self._cam_top_reader = _CamTopReaderThread(cap)
         self._cam_top_reader.start()
-        time.sleep(0.1)  # laisse le thread remplir sa queue une première fois
+        self._hsv_thread.start()
+        time.sleep(0.1)
 
         frame0 = self._cam_top_reader.get_frame(timeout=1.0)
         if frame0 is not None:
@@ -665,8 +707,6 @@ class CupTrackingPipeline(QObject):
             print(f"[Pipeline] Détection initiale : {len(init_bboxes)} tasse(s)")
             self._manager.force_reset(small0, init_bboxes)
 
-        # Frame projecteur pré-allouée — réutilisée pour éviter des allocations
-        # répétées (source de GC pressure sur longue durée)
         proj_frame = np.ones((PROJ_H, PROJ_W, 3), dtype=np.uint8) * 255
 
         last_det_t     = time.monotonic()
@@ -677,10 +717,12 @@ class CupTrackingPipeline(QObject):
         print("[Pipeline] Boucle démarrée")
 
         while self.running:
+
             frame_native = self._cam_top_reader.get_frame(timeout=0.05)
             if frame_native is None:
                 continue
 
+            # Resize D'ABORD, remap ENSUITE sur 640×360
             frame_small = cv2.resize(
                 frame_native, (PROCESS_W, PROCESS_H),
                 interpolation=cv2.INTER_LINEAR)
@@ -695,21 +737,23 @@ class CupTrackingPipeline(QObject):
             # KCF update chaque frame
             cups = self._manager.update_tracking(frame_small)
 
-            # Purge périodique des identités stale
-            # _frame_index est incrémenté dans _save_to_buffer, décalé de 1
-            # pour éviter la purge inutile à la frame 0.
+            # Purge périodique + GC contrôlé par petites doses
             if self._frame_index > 0 and self._frame_index % PURGE_EVERY_FRAMES == 0:
                 self._identity_manager.purge_stale_identities(PURGE_MAX_AGE_S)
+                gc.collect()
 
-            # Recalage HSV périodique
+            # HSV : soumettre au thread asynchrone
             now = time.monotonic()
             if now - last_det_t >= DETECT_INTERVAL_S:
-                det_bboxes, _ = self._detector.detect(frame_small)
-                self._manager.update_detection(frame_small, det_bboxes)
-                cups       = list(self._manager._cups.values())
+                self._hsv_thread.submit(frame_small.copy())
                 last_det_t = now
 
-            # Labels d'identité
+            # Récupérer le dernier résultat HSV (non bloquant)
+            det_bboxes = self._hsv_thread.get_result()
+            if det_bboxes is not None:
+                self._manager.update_detection(frame_small, det_bboxes)
+                cups = list(self._manager._cups.values())
+
             labels = self._identity_manager.get_labels()
 
             # ── Projection ────────────────────────────────────────────────
@@ -746,25 +790,26 @@ class CupTrackingPipeline(QObject):
 
                 data_out.append((out_id, [x_mm, y_mm]))
 
-            # ── Affichage projecteur — synchrone, identique à la version originale
+            # Affichage projecteur — synchrone dans le QThread, identique étapes 1+2
             self.display_manager.display_image_on_projector_monitor(proj_frame)
 
-            # ── Signal UI throttlé (1 frame sur 3)
+            # Signal data UI throttlé (1 frame sur 3)
             signal_counter += 1
             if signal_counter % 3 == 0:
                 self.data_signal.emit({"data": data_out})
 
-            # Sauvegarde CSV avec flush périodique automatique
+            # CSV flush périodique
             self._save_to_buffer(data_out)
 
-            # ── Preview optionnel
             if self.show_preview:
                 self._draw_preview(frame_small, cups, labels)
 
-            # ── waitKey unique en fin de boucle — identique à la version originale
+            # waitKey dans le QThread — identique étapes 1+2, ne pas bouger
             cv2.waitKey(1)
 
-            # ── FPS
+            # Libération explicite frame_small en fin d'itération
+            del frame_small
+
             fps_count += 1
             now2 = time.monotonic()
             if now2 - fps_t0 >= 1.0:
@@ -772,13 +817,19 @@ class CupTrackingPipeline(QObject):
                 fps_count = 0; fps_t0 = now2
                 print(f"[Pipeline] FPS={fps_val:.1f}  cups={len(cups)}")
 
-        
+        # ── Nettoyage — ordre strict ───────────────────────────────────────
+        print("[Pipeline] Arrêt...")
+
         if self._cam_top_reader is not None:
             self._cam_top_reader.stop()
             self._cam_top_reader.join(timeout=2.0)
             self._cam_top_reader = None
-        # ── Nettoyage — ordre strict, _save_csv appelé une seule fois ────────
-        print("[Pipeline] Arrêt...")
+
+        if self._hsv_thread is not None:
+            self._hsv_thread.stop()
+            self._hsv_thread.join(timeout=2.0)
+            self._hsv_thread = None
+
         cap.release()
 
         self._cam_bottom.stop()
@@ -788,18 +839,15 @@ class CupTrackingPipeline(QObject):
         if self.show_preview:
             cv2.destroyWindow("Pipeline Preview")
 
-        # Écran noir sur le projecteur
         proj_frame[:] = 0
         self.display_manager.display_image_on_projector_monitor(proj_frame)
         cv2.waitKey(1)
 
-        # Arrêt writer vidéo (vide sa queue avant de fermer)
         if self._video_writer is not None:
             print("[Pipeline] Arrêt VideoWriter...")
             self._video_writer.stop()
             self._video_writer = None
 
-        # Flush CSV final — une seule fois
         self._save_csv()
 
         print("[Pipeline] Terminé")
@@ -808,6 +856,8 @@ class CupTrackingPipeline(QObject):
     def stop(self) -> None:
         print("[Pipeline] STOP demandé")
         self.running = False
+        self._identity_manager.reset()
+        gc.collect()
 
     # ── Preview ──────────────────────────────────────────────────────────────
 
@@ -829,7 +879,6 @@ class CupTrackingPipeline(QObject):
                         (int(bx*ps), max(20, int(by*ps)-6)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
         cv2.imshow("Pipeline Preview", preview)
-        # Pas de waitKey ici — géré en fin de boucle principale
 
     # ── CSV ───────────────────────────────────────────────────────────────────
 
@@ -844,12 +893,10 @@ class CupTrackingPipeline(QObject):
             frame_data[f"ID_{out_id}_y"] = float(pos[1])
         self.data_buffer.append(frame_data)
 
-        # Flush automatique toutes les CSV_FLUSH_EVERY frames
         if len(self.data_buffer) >= CSV_FLUSH_EVERY:
             self._flush_csv()
 
     def _flush_csv(self) -> None:
-        """Écrit le buffer en mode append puis le vide — libère la RAM."""
         if not self.data_buffer:
             return
         df = pd.DataFrame(self.data_buffer)
@@ -860,7 +907,6 @@ class CupTrackingPipeline(QObject):
         print(f"[Pipeline] CSV flush → {self._frame_index} frames écrites")
 
     def _save_csv(self) -> None:
-        """Flush final à l'arrêt — appelé une seule fois."""
         self._flush_csv()
         print(f"[Pipeline] CSV final → {self.output_csv}")
 
