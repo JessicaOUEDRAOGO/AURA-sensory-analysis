@@ -4,31 +4,27 @@ cup_identity_manager.py
 ========================
 Gestionnaire d'identité des tasses.
 
-Responsabilité unique : faire correspondre les IDs ArUco (cam_bottom)
-aux trackers visuels KCF (cam_top) et conserver l'identité pendant
-les phases de mouvement où la cam_bottom perd le tag.
+Fix v3 — cercles fantômes :
+  Le cycle rapide AIRBORNE↔MATCHED visible dans les logs est causé par
+  _try_confirm_repose() qui confirmait une repose sur un seul tag vu
+  pendant une seule frame ArUco. Or les tags scintillent naturellement
+  (détectés/perdus alternativement à ~22 fps). La solution : n'accepter
+  la repose que si le tag est vu REPOSE_CONF_FRAMES fois consécutives
+  à distance < REPOSE_DIST_MM du tracker. Le compteur est réinitialisé
+  si le tag disparaît ou si la distance dépasse le seuil.
 
-ÉTATS D'UNE TASSE :
-  MATCHED   → tag ArUco visible + tracker KCF actif + identité confirmée
-  AIRBORNE  → tag ArUco perdu (tasse levée), tracker KCF conserve l'identité
-  LOST      → tracker KCF perdu ET tag ArUco absent → identité inconnue
-  PENDING   → tag ArUco visible mais pas encore associé à un tracker
+  Avant (version précédente) :
+    tag vu 1 frame → MATCHED immédiat → tag perdu 1 frame → AIRBORNE
+    → tag vu 1 frame → MATCHED → ... (10+ cycles par seconde)
 
-MACHINE D'ÉTATS :
-  MATCHED  ──[tag disparu]──► AIRBORNE  ──[tag réapparu + même zone]──► MATCHED
-                                         ──[tag réapparu + mauvaise zone]──► MATCHED (correction ID)
-                                         ──[tracker KCF perdu]──────────► LOST
-  PENDING  ──[match position < seuil]──► MATCHED
+  Après :
+    tag doit être vu REPOSE_CONF_FRAMES=3 frames consécutives et stables
+    avant que la repose soit confirmée → les scintillements ArUco normaux
+    ne déclenchent plus de faux MATCHED.
 
-THREAD SAFETY :
-  update_aruco() est appelé depuis CamBottomThread (thread séparé).
-  update_trackers() est appelé depuis CamTopThread (thread principal).
-  Un verrou RLock protège toutes les structures internes.
-
-PARAMETRES CLÉS :
-  MATCH_DIST_MM   : distance max (mm) pour associer un tag ArUco à un tracker
-  REPOSE_DIST_MM  : distance max pour valider la repose d'une tasse
-  TAG_LOST_DELAY  : frames sans tag avant de passer en mode AIRBORNE
+Ajout :
+  purge_stale_identities() — appelée par CupTrackingPipeline toutes les
+  PURGE_EVERY_FRAMES frames pour éviter l'accumulation sur longue session.
 """
 
 import threading
@@ -44,11 +40,15 @@ import numpy as np
 #  Paramètres
 # ──────────────────────────────────────────────────────────────────────────────
 
-MATCH_DIST_MM   = 60.0    # Distance max pour le match initial tag ↔ tracker
-REPOSE_DIST_MM  = 80.0    # Distance max pour valider la repose
-TAG_LOST_DELAY  = 6       # Frames sans tag avant de passer AIRBORNE
-TAG_FOUND_CONF  = 3       # Frames consécutives avec tag pour confirmer présence
-ORPHAN_TTL_S    = 5.0     # Durée (s) avant suppression d'une identité orpheline
+MATCH_DIST_MM      = 60.0
+REPOSE_DIST_MM     = 40.0
+TAG_LOST_DELAY     = 15
+TAG_FOUND_CONF     = 5
+ORPHAN_TTL_S       = 5.0
+
+# Nombre de frames consécutives où le tag doit être visible et stable
+# avant de confirmer une repose (anti-scintillement ArUco)
+REPOSE_CONF_FRAMES = 3
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -56,10 +56,10 @@ ORPHAN_TTL_S    = 5.0     # Durée (s) avant suppression d'une identité orpheli
 # ──────────────────────────────────────────────────────────────────────────────
 
 class CupState(Enum):
-    MATCHED  = auto()   # tag visible + tracker actif, identité certaine
-    AIRBORNE = auto()   # tasse levée, tag non visible, KCF conserve l'ID
-    LOST     = auto()   # tracker perdu ET tag absent
-    PENDING  = auto()   # tag visible mais tracker non encore associé
+    MATCHED  = auto()
+    AIRBORNE = auto()
+    LOST     = auto()
+    PENDING  = auto()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -68,16 +68,20 @@ class CupState(Enum):
 
 @dataclass
 class CupIdentity:
-    aruco_id:       int
-    tracker_id:     Optional[int]          = None   # cup_id dans TrackingManager
-    state:          CupState               = CupState.PENDING
-    pos_mm:         Optional[Tuple[float, float]] = None   # dernière pos connue
-    tag_last_seen:  float                  = field(default_factory=time.monotonic)
-    tag_lost_count: int                    = 0      # frames consécutives sans tag
-    tag_conf_count: int                    = 0      # frames consécutives avec tag
-    created_at:     float                  = field(default_factory=time.monotonic)
-    # Historique pour détection de mouvement
-    airborne_origin: Optional[Tuple[float, float]] = None  # pos au décollage
+    aruco_id:        int
+    tracker_id:      Optional[int]                = None
+    state:           CupState                     = CupState.PENDING
+    pos_mm:          Optional[Tuple[float, float]] = None
+    tag_last_seen:   float = field(default_factory=time.monotonic)
+    tag_lost_count:  int   = 0
+    tag_conf_count:  int   = 0
+    created_at:      float = field(default_factory=time.monotonic)
+    airborne_origin: Optional[Tuple[float, float]] = None
+
+    # Compteur de confirmation de repose (anti-scintillement)
+    # Incrémenté à chaque frame où le tag est vu proche du tracker,
+    # remis à 0 si le tag disparaît ou s'éloigne.
+    repose_conf_count: int = 0
 
     @property
     def label(self) -> str:
@@ -104,34 +108,31 @@ class CupIdentityManager:
         # Pour afficher :
         labels = manager.get_labels()
         # → {tracker_id: "Cup#1", ...}
+
+        # Toutes les ~300 frames :
+        manager.purge_stale_identities(max_age_s=60.0)
     """
 
     def __init__(
         self,
-        match_dist_mm:  float = MATCH_DIST_MM,
-        repose_dist_mm: float = REPOSE_DIST_MM,
-        tag_lost_delay: int   = TAG_LOST_DELAY,
-        tag_found_conf: int   = TAG_FOUND_CONF,
+        match_dist_mm:    float = MATCH_DIST_MM,
+        repose_dist_mm:   float = REPOSE_DIST_MM,
+        tag_lost_delay:   int   = TAG_LOST_DELAY,
+        tag_found_conf:   int   = TAG_FOUND_CONF,
+        repose_conf_frames: int = REPOSE_CONF_FRAMES,
     ):
         self._lock = threading.RLock()
 
-        self._match_dist  = match_dist_mm
-        self._repose_dist = repose_dist_mm
-        self._lost_delay  = tag_lost_delay
-        self._found_conf  = tag_found_conf
+        self._match_dist        = match_dist_mm
+        self._repose_dist       = repose_dist_mm
+        self._lost_delay        = tag_lost_delay
+        self._found_conf        = tag_found_conf
+        self._repose_conf_frames = repose_conf_frames
 
-        # aruco_id → CupIdentity
-        self._identities: Dict[int, CupIdentity] = {}
-
-        # tracker_id → aruco_id  (lookup rapide)
-        self._tracker_to_aruco: Dict[int, int] = {}
-
-        # Dernières positions ArUco brutes (depuis cam_bottom)
-        self._last_aruco: Dict[int, Tuple[float, float]] = {}
-
-        # Dernières positions trackers (depuis cam_top)
-        self._last_trackers: Dict[int, Tuple[float, float]] = {}
-
+        self._identities:       Dict[int, CupIdentity]        = {}
+        self._tracker_to_aruco: Dict[int, int]                = {}
+        self._last_aruco:       Dict[int, Tuple[float, float]] = {}
+        self._last_trackers:    Dict[int, Tuple[float, float]] = {}
         self._frame_count = 0
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -139,10 +140,6 @@ class CupIdentityManager:
     # ──────────────────────────────────────────────────────────────────────────
 
     def update_aruco(self, aruco_positions: Dict[int, Tuple[float, float]]) -> None:
-        """
-        Appelé par CamBottomThread à chaque frame.
-        aruco_positions : {aruco_id: (x_mm, y_mm)}
-        """
         with self._lock:
             self._last_aruco = dict(aruco_positions)
             self._process_aruco_frame(aruco_positions)
@@ -151,29 +148,20 @@ class CupIdentityManager:
         self,
         tracker_positions: Dict[int, Tuple[float, float]],
     ) -> None:
-        """
-        Appelé par CamTopThread / TrackingManager à chaque frame.
-        tracker_positions : {tracker_id: (x_mm, y_mm)}
-        """
         with self._lock:
             self._last_trackers = dict(tracker_positions)
             self._frame_count  += 1
             self._process_tracker_frame(tracker_positions)
 
     def get_labels(self) -> Dict[int, str]:
-        """
-        Retourne {tracker_id: label} pour l'affichage.
-        Un tracker sans identité reçoit le label "Cup#?".
-        """
         with self._lock:
-            result = {}
-            for aruco_id, ident in self._identities.items():
-                if ident.tracker_id is not None:
-                    result[ident.tracker_id] = ident.label
-            return result
+            return {
+                ident.tracker_id: ident.label
+                for ident in self._identities.values()
+                if ident.tracker_id is not None
+            }
 
     def get_identity(self, tracker_id: int) -> Optional[CupIdentity]:
-        """Retourne l'identité associée à un tracker_id, ou None."""
         with self._lock:
             aruco_id = self._tracker_to_aruco.get(tracker_id)
             if aruco_id is None:
@@ -181,7 +169,6 @@ class CupIdentityManager:
             return self._identities.get(aruco_id)
 
     def get_all_identities(self) -> Dict[int, CupIdentity]:
-        """Retourne une copie du dict {aruco_id: CupIdentity}."""
         with self._lock:
             return dict(self._identities)
 
@@ -190,7 +177,6 @@ class CupIdentityManager:
         return ident.state if ident else None
 
     def reset(self) -> None:
-        """Remet tout à zéro."""
         with self._lock:
             self._identities.clear()
             self._tracker_to_aruco.clear()
@@ -198,6 +184,24 @@ class CupIdentityManager:
             self._last_trackers.clear()
             self._frame_count = 0
         print("[IdentityManager] Reset complet")
+
+    def purge_stale_identities(self, max_age_s: float = 60.0) -> None:
+        """
+        Supprime les identités LOST sans tracker depuis plus de max_age_s secondes.
+        Appelée périodiquement par CupTrackingPipeline pour éviter l'accumulation
+        de fantômes sur des sessions longues.
+        """
+        now = time.monotonic()
+        with self._lock:
+            to_delete = [
+                aid for aid, ident in self._identities.items()
+                if ident.state == CupState.LOST
+                and ident.tracker_id is None
+                and (now - ident.tag_last_seen) > max_age_s
+            ]
+            for aid in to_delete:
+                del self._identities[aid]
+                print(f"[Identity] Purge identité stale ArUco#{aid}")
 
     # ──────────────────────────────────────────────────────────────────────────
     #  Logique interne — traitement ArUco
@@ -209,48 +213,45 @@ class CupIdentityManager:
     ) -> None:
         now = time.monotonic()
 
-        # 1. Mettre à jour les identités existantes
         for aruco_id, ident in list(self._identities.items()):
             if aruco_id in aruco_positions:
                 pos = aruco_positions[aruco_id]
-                ident.pos_mm          = pos
-                ident.tag_last_seen   = now
-                ident.tag_lost_count  = 0
-                ident.tag_conf_count  = min(
+                ident.pos_mm         = pos
+                ident.tag_last_seen  = now
+                ident.tag_lost_count = 0
+                ident.tag_conf_count = min(
                     ident.tag_conf_count + 1, self._found_conf + 1)
 
                 if ident.state == CupState.AIRBORNE:
                     # Tag retrouvé → tentative de confirmation de repose
+                    # (avec compteur anti-scintillement)
                     self._try_confirm_repose(ident, pos)
                 elif ident.state == CupState.LOST:
                     if ident.tag_conf_count >= self._found_conf:
                         ident.state = CupState.PENDING
+                        ident.repose_conf_count = 0
                         print(f"[Identity] {ident.label} : LOST → PENDING "
                               f"(tag retrouvé à {pos[0]:.0f},{pos[1]:.0f}mm)")
-                elif ident.state == CupState.MATCHED:
-                    pass  # normal, pas de changement d'état
-
             else:
                 # Tag absent cette frame
                 ident.tag_lost_count += 1
                 ident.tag_conf_count  = 0
+                # Réinitialiser le compteur de repose si le tag disparaît
+                if ident.state == CupState.AIRBORNE:
+                    ident.repose_conf_count = 0
 
                 if (ident.state == CupState.MATCHED
                         and ident.tag_lost_count >= self._lost_delay):
-                    ident.state          = CupState.AIRBORNE
+                    ident.state           = CupState.AIRBORNE
                     ident.airborne_origin = ident.pos_mm
+                    ident.repose_conf_count = 0
                     print(f"[Identity] {ident.label} → AIRBORNE "
                           f"(origine {ident.airborne_origin})")
 
-        # 2. Créer de nouvelles identités pour les nouveaux tags
         for aruco_id, pos in aruco_positions.items():
             if aruco_id not in self._identities:
-                ident = CupIdentity(
-                    aruco_id=aruco_id,
-                    pos_mm=pos,
-                    state=CupState.PENDING,
-                )
-                self._identities[aruco_id] = ident
+                self._identities[aruco_id] = CupIdentity(
+                    aruco_id=aruco_id, pos_mm=pos, state=CupState.PENDING)
                 print(f"[Identity] Nouveau tag ArUco #{aruco_id} "
                       f"à ({pos[0]:.0f},{pos[1]:.0f})mm")
 
@@ -262,7 +263,6 @@ class CupIdentityManager:
         self,
         tracker_positions: Dict[int, Tuple[float, float]],
     ) -> None:
-        # Supprimer les associations dont le tracker a disparu
         for aruco_id, ident in self._identities.items():
             if (ident.tracker_id is not None
                     and ident.tracker_id not in tracker_positions):
@@ -274,22 +274,15 @@ class CupIdentityManager:
                     print(f"[Identity] {ident.label} → LOST "
                           f"(tracker {old_tid} disparu)")
 
-        # Associer les trackers PENDING aux identités PENDING
         self._match_pending(tracker_positions)
 
     def _match_pending(
         self,
         tracker_positions: Dict[int, Tuple[float, float]],
     ) -> None:
-        """
-        Associe les identités PENDING aux trackers non encore liés.
-        Stratégie greedy sur la distance mm.
-        """
-        # Trackers déjà liés
         bound_trackers = set(self._tracker_to_aruco.keys())
         free_trackers  = {tid: pos for tid, pos in tracker_positions.items()
                           if tid not in bound_trackers}
-
         if not free_trackers:
             return
 
@@ -297,13 +290,11 @@ class CupIdentityManager:
                    if ident.state == CupState.PENDING
                    and ident.pos_mm is not None
                    and ident.tracker_id is None]
-
         if not pending:
             return
 
-        # Matrice distances
-        tid_list    = list(free_trackers.keys())
-        ident_list  = pending
+        tid_list   = list(free_trackers.keys())
+        ident_list = pending
 
         dist_matrix = np.full((len(ident_list), len(tid_list)), np.inf)
         for i, ident in enumerate(ident_list):
@@ -312,7 +303,6 @@ class CupIdentityManager:
                 tx, ty = free_trackers[tid]
                 dist_matrix[i, j] = np.sqrt((ix-tx)**2 + (iy-ty)**2)
 
-        # Greedy : meilleur score en premier
         used_i, used_j = set(), set()
         while True:
             mask = np.full(dist_matrix.shape, np.inf)
@@ -329,16 +319,16 @@ class CupIdentityManager:
             used_j.add(j)
 
     def _bind(self, ident: CupIdentity, tracker_id: int) -> None:
-        ident.tracker_id = tracker_id
-        ident.state      = CupState.MATCHED
+        ident.tracker_id       = tracker_id
+        ident.state            = CupState.MATCHED
+        ident.repose_conf_count = 0
         self._tracker_to_aruco[tracker_id] = ident.aruco_id
         pos_str = (f"({ident.pos_mm[0]:.0f},{ident.pos_mm[1]:.0f})mm"
                    if ident.pos_mm else "?")
-        print(f"[Identity] MATCH : {ident.label} ↔ tracker#{tracker_id} "
-              f"@ {pos_str}")
+        print(f"[Identity] MATCH : {ident.label} ↔ tracker#{tracker_id} @ {pos_str}")
 
     # ──────────────────────────────────────────────────────────────────────────
-    #  Confirmation de repose
+    #  Confirmation de repose — avec compteur anti-scintillement
     # ──────────────────────────────────────────────────────────────────────────
 
     def _try_confirm_repose(
@@ -348,9 +338,15 @@ class CupIdentityManager:
     ) -> None:
         """
         Appelé quand un tag AIRBORNE réapparaît.
-        Cherche le tracker le plus proche pour confirmer la repose.
+        Cherche le tracker le plus proche. Si la distance est inférieure à
+        REPOSE_DIST_MM, incrémente repose_conf_count. La repose n'est confirmée
+        que lorsque repose_conf_count atteint REPOSE_CONF_FRAMES.
+
+        Cela évite le cycle AIRBORNE↔MATCHED rapide causé par le scintillement
+        naturel des tags ArUco (détectés/perdus alternativement à ~22 fps).
         """
         if not self._last_trackers:
+            ident.repose_conf_count = 0
             return
 
         best_tid  = None
@@ -362,8 +358,19 @@ class CupIdentityManager:
                 best_tid  = tid
 
         if best_tid is None or best_dist > self._repose_dist:
-            # Tag apparu loin de tout tracker → on attend
+            # Tag trop loin ou pas de tracker → réinitialiser le compteur
+            ident.repose_conf_count = 0
             return
+
+        # Le tag est proche du tracker → incrémenter le compteur
+        ident.repose_conf_count += 1
+
+        if ident.repose_conf_count < self._repose_conf_frames:
+            # Pas encore assez de frames consécutives stables → attendre
+            return
+
+        # Compteur atteint — confirmer la repose
+        ident.repose_conf_count = 0
 
         # ── Cas 1 : ce tracker était déjà lié à cette identité ───────────────
         if best_tid == ident.tracker_id:
@@ -377,16 +384,16 @@ class CupIdentityManager:
         if other_aruco is not None and other_aruco != ident.aruco_id:
             other_ident = self._identities.get(other_aruco)
             print(f"[Identity] ⚠ Conflit repose : {ident.label} "
-                  f"↔ tracker#{best_tid} (anciennement {other_ident.label if other_ident else '?'})"
+                  f"↔ tracker#{best_tid} "
+                  f"(anciennement {other_ident.label if other_ident else '?'})"
                   f" — correction ID appliquée")
-            # On libère l'autre identité de ce tracker
             if other_ident is not None:
-                other_ident.tracker_id = None
-                other_ident.state      = CupState.LOST
+                other_ident.tracker_id      = None
+                other_ident.state           = CupState.LOST
+                other_ident.repose_conf_count = 0
             self._tracker_to_aruco.pop(best_tid, None)
 
         # ── Liaison du tracker à cette identité ──────────────────────────────
-        # Libérer l'ancien tracker si nécessaire
         if ident.tracker_id is not None:
             self._tracker_to_aruco.pop(ident.tracker_id, None)
 
@@ -404,6 +411,7 @@ class CupIdentityManager:
                        if ident.pos_mm else "None")
                 lines.append(
                     f"  ArUco#{aid:2d} → tracker={ident.tracker_id!s:>4}  "
-                    f"state={ident.state.name:<10}  pos={pos}mm"
+                    f"state={ident.state.name:<10}  pos={pos}mm  "
+                    f"repose_conf={ident.repose_conf_count}"
                 )
             return "\n".join(lines)

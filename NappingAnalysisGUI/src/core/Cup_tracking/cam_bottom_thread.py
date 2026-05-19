@@ -46,6 +46,7 @@ class CamBottomThread(QThread):
         pose_path: str,
         identity_manager=None,        # CupIdentityManager (optionnel)
         calibration_tag_ids: set = None,
+        valid_cup_ids: set = None,    # ← IDs ArUco autorisés (None = liste blanche {6,8})
         show_preview: bool = False,
         parent=None,
     ):
@@ -54,6 +55,7 @@ class CamBottomThread(QThread):
         self.pose_path           = pose_path
         self.identity_manager    = identity_manager
         self.calibration_tag_ids = calibration_tag_ids or set(CALIBRATION_TAG_IDS)
+        self.valid_cup_ids       = valid_cup_ids if valid_cup_ids is not None else {6, 8}
         self.show_preview        = show_preview
         self.running             = False
 
@@ -139,7 +141,8 @@ class CamBottomThread(QThread):
             return {}
 
         valid = [i for i in range(len(ids))
-                 if int(ids[i][0]) not in self.calibration_tag_ids]
+                 if int(ids[i][0]) not in self.calibration_tag_ids
+                 and (not self.valid_cup_ids or int(ids[i][0]) in self.valid_cup_ids)]
         if not valid:
             return {}
 
