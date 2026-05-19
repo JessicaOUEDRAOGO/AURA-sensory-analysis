@@ -107,7 +107,9 @@ VIDEO_FPS = 30.0
 # Purge identity manager
 PURGE_EVERY_FRAMES = 300
 PURGE_MAX_AGE_S    = 20.0
-
+# IDs ArUco des tasses utilisées dans la session
+# À adapter selon le protocole
+ARUCO_CUP_IDS = [6, 8]
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  Utilitaires géométriques
@@ -501,39 +503,55 @@ def _draw_grid_frame(
 #  CSV
 # ══════════════════════════════════════════════════════════════════════════════
 
+import csv
+
 class CsvWriter:
-    def __init__(self, output_path: str):
-        self.output_path     = output_path
-        self._buffer: list   = []
-        self._header_written = False
-        self._frame_index    = 0
+    def __init__(self, output_path: str, cup_ids: list):
+        self._frame_index = 0
+        self._buffer: list = []
+
+        # Colonnes fixes dès le départ — tous les IDs connus
+        self._fieldnames = ['frame', 'timestamp']
+        for cid in cup_ids:
+            self._fieldnames.append(f'ID_{cid}_x')
+            self._fieldnames.append(f'ID_{cid}_y')
+
+        self._file   = open(output_path, 'w', newline='', encoding='utf-8')
+        self._writer = csv.DictWriter(
+            self._file,
+            fieldnames=self._fieldnames,
+            extrasaction='ignore',
+            restval='',   # cellule vide si la tasse n'est pas détectée ce frame
+        )
+        self._writer.writeheader()
+        self._file.flush()
+        print(f"[CSV] créé — colonnes : {self._fieldnames}")
 
     def push(self, data_out: list):
-        """data_out : liste de (cup_id, x_mm, y_mm)"""
         self._frame_index += 1
         row = {
-            "frame":     self._frame_index,
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+            'frame':     self._frame_index,
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3],
         }
         for cup_id, x_mm, y_mm in data_out:
-            row[f"ID_{cup_id}_x"] = round(float(x_mm), 2)
-            row[f"ID_{cup_id}_y"] = round(float(y_mm), 2)
+            row[f'ID_{cup_id}_x'] = round(float(x_mm), 2)
+            row[f'ID_{cup_id}_y'] = round(float(y_mm), 2)
         self._buffer.append(row)
         if len(self._buffer) >= CSV_FLUSH_EVERY:
             self.flush()
 
     def flush(self):
-        if not self._buffer: return
-        df = pd.DataFrame(self._buffer)
-        write_header = not self._header_written and not os.path.exists(self.output_path)
-        df.to_csv(self.output_path, mode='a', index=False, header=write_header)
-        self._header_written = True
+        if not self._buffer:
+            return
+        self._writer.writerows(self._buffer)
+        self._file.flush()
         self._buffer.clear()
         print(f"[CSV] flush → {self._frame_index} frames")
 
     def close(self):
         self.flush()
-        print(f"[CSV] fermé → {self.output_path}")
+        self._file.close()
+        print(f"[CSV] fermé → {self._frame_index} frames total")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -569,7 +587,7 @@ def main():
     identity_manager = CupIdentityManager()
     detector         = CupDetector()
     manager          = TrackingManager(converter=converter, identity_manager=identity_manager)
-    csv_writer       = CsvWriter(csv_path)
+    csv_writer = CsvWriter(csv_path, cup_ids=ARUCO_CUP_IDS)
 
     # ── VideoWriter ──────────────────────────────────────────────────────────
     video_writer = VideoWriterThread(
