@@ -18,6 +18,7 @@ import json
 import numpy as np
 import os
 import time
+import queue
 import threading
 import pandas as pd
 from dataclasses import dataclass
@@ -408,6 +409,39 @@ class _TrackingManager:
         self._cups[cid] = cup
         print(f"[Pipeline] Nouveau cup#{cid}  bbox=({x},{y},{w},{h})")
 
+class _CamTopReaderThread(threading.Thread):
+    """Thread dédié à la lecture cam_top — évite le blocage DSHOW dans la boucle principale."""
+
+    def __init__(self, cap: cv2.VideoCapture):
+        super().__init__(name="_CamTopReaderThread", daemon=True)
+        self._cap   = cap
+        self._queue = queue.Queue(maxsize=1)
+        self._running = False
+
+    def run(self) -> None:
+        self._running = True
+        while self._running:
+            ret, frame = self._cap.read()
+            if not ret or frame is None:
+                time.sleep(0.002)
+                continue
+            # maxsize=1 : on jette l'ancienne frame si pas encore consommée
+            if self._queue.full():
+                try:
+                    self._queue.get_nowait()
+                except queue.Empty:
+                    pass
+            self._queue.put(frame)
+
+    def get_frame(self, timeout: float = 0.05):
+        """Retourne la frame la plus récente, ou None si timeout."""
+        try:
+            return self._queue.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
+    def stop(self) -> None:
+        self._running = False
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  CupTrackingPipeline — remplace Algorithm_Analysis
@@ -461,6 +495,7 @@ class CupTrackingPipeline(QObject):
         self._manager:         Optional[_TrackingManager] = None
         self._H_proj:          Optional[np.ndarray]       = None
         self._map1 = self._map2 = None
+        self._cam_top_reader: Optional[_CamTopReaderThread] = None
         self._threads_ready = False
 
         # CSV — flush périodique pour éviter la fuite RAM
@@ -615,8 +650,12 @@ class CupTrackingPipeline(QObject):
             self._cam_bottom.stop()
             self.finished_signal.emit(); return
 
-        ret, frame0 = cap.read()
-        if ret and frame0 is not None:
+        self._cam_top_reader = _CamTopReaderThread(cap)
+        self._cam_top_reader.start()
+        time.sleep(0.1)  # laisse le thread remplir sa queue une première fois
+
+        frame0 = self._cam_top_reader.get_frame(timeout=1.0)
+        if frame0 is not None:
             small0 = cv2.resize(frame0, (PROCESS_W, PROCESS_H),
                                 interpolation=cv2.INTER_LINEAR)
             if self._map1 is not None:
@@ -638,9 +677,9 @@ class CupTrackingPipeline(QObject):
         print("[Pipeline] Boucle démarrée")
 
         while self.running:
-            ret, frame_native = cap.read()
-            if not ret or frame_native is None:
-                time.sleep(0.005); continue
+            frame_native = self._cam_top_reader.get_frame(timeout=0.05)
+            if frame_native is None:
+                continue
 
             frame_small = cv2.resize(
                 frame_native, (PROCESS_W, PROCESS_H),
@@ -733,9 +772,13 @@ class CupTrackingPipeline(QObject):
                 fps_count = 0; fps_t0 = now2
                 print(f"[Pipeline] FPS={fps_val:.1f}  cups={len(cups)}")
 
+        
+        if self._cam_top_reader is not None:
+            self._cam_top_reader.stop()
+            self._cam_top_reader.join(timeout=2.0)
+            self._cam_top_reader = None
         # ── Nettoyage — ordre strict, _save_csv appelé une seule fois ────────
         print("[Pipeline] Arrêt...")
-
         cap.release()
 
         self._cam_bottom.stop()
