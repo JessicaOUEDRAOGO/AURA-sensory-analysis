@@ -515,7 +515,6 @@ def _build_grid_background() -> np.ndarray:
 
     return img
 
-
 def _mm_to_grid_px(x_mm: float, y_mm: float) -> Tuple[int, int]:
     """
     Convertit une position en mm (espace table 0-597)
@@ -822,7 +821,7 @@ def main():
 
         # ── Fenêtre grille PC — points rouges ─────────────────────────────────
         grid_vis = _draw_grid_frame(grid_bg, cups, labels, identity_manager)
-        cv2.imshow("Napping — Grille", grid_vis)
+        cv2.imshow("Napping Grille", grid_vis)
         del grid_vis
 
         # ── Preview cam_top ───────────────────────────────────────────────────
@@ -849,7 +848,7 @@ def main():
                     f"  3D:{'ON' if use_3d_correction else 'OFF'}"
                     f"  {participant_id}",
                     (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255,255,0), 1)
-        cv2.imshow("Napping — CamTop", preview)
+        cv2.imshow(" CamTop", preview)
 
         # FPS
         fps_count += 1
