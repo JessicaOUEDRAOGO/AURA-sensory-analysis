@@ -432,18 +432,88 @@ class TrackingManager:
 
 def _build_grid_background() -> np.ndarray:
     """
-    Construit le fond de grille 700×700 une seule fois.
-    Utilise DrawUtils.draw_math_grid_on_image — même rendu que RecordWindow.
+    Grille 700×700 fidèle à GraphicsScene :
+    traits fins gris clair, axes noirs, graduations décimales.
     """
-    base = np.ones((GRID_SIZE, GRID_SIZE, 3), dtype=np.uint8) * 255
-    return DrawUtils.draw_math_grid_on_image(
-        base,
-        GRID_X_MIN, GRID_X_MAX,
-        GRID_Y_MIN, GRID_Y_MAX,
-        GRID_X_LEG, GRID_Y_LEG,
-        GRID_SIZE,
-        color=(200, 200, 200),
-    )
+    SIZE = GRID_SIZE
+    img  = np.ones((SIZE, SIZE, 3), dtype=np.uint8) * 255
+
+    X_MIN, X_MAX = GRID_X_MIN, GRID_X_MAX
+    Y_MIN, Y_MAX = GRID_Y_MIN, GRID_Y_MAX
+
+    def px_x(v): return int((v - X_MIN) / (X_MAX - X_MIN) * SIZE)
+    def px_y(v): return int((v - Y_MIN) / (Y_MAX - Y_MIN) * SIZE)
+
+    # Pas de grille — identique à GraphicsScene.calculate_grid_spacing
+    def spacing(delta):
+        s = delta / 40
+        if s <= 0: return 1.0
+        p = 10 ** int(np.floor(np.log10(s)))
+        r = s / p
+        if r < 2: return 2 * p
+        if r < 5: return 5 * p
+        return 10 * p
+
+    sx = spacing(X_MAX - X_MIN)
+    sy = spacing(Y_MAX - Y_MIN)
+
+    # Lignes verticales — gris très clair, épaisseur 1
+    x = np.ceil(X_MIN / sx) * sx
+    while x <= X_MAX + 1e-9:
+        cv2.line(img, (px_x(x), px_y(Y_MIN)), (px_x(x), px_y(Y_MAX)),
+                 (211, 211, 211), 1, cv2.LINE_AA)
+        x = round(x + sx, 10)
+
+    # Lignes horizontales
+    y = np.ceil(Y_MIN / sy) * sy
+    while y <= Y_MAX + 1e-9:
+        cv2.line(img, (px_x(X_MIN), px_y(y)), (px_x(X_MAX), px_y(y)),
+                 (211, 211, 211), 1, cv2.LINE_AA)
+        y = round(y + sy, 10)
+
+    # Axes principaux — noirs, épaisseur 2
+    cv2.line(img, (px_x(X_MIN), px_y(0)), (px_x(X_MAX), px_y(0)),
+             (0, 0, 0), 2, cv2.LINE_AA)
+    cv2.line(img, (px_x(0), px_y(Y_MIN)), (px_x(0), px_y(Y_MAX)),
+             (0, 0, 0), 2, cv2.LINE_AA)
+
+    font       = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 0.38
+    thickness  = 1
+    color_txt  = (0, 0, 0)
+
+    # Graduations axe X — format décimal comme GraphicsScene (1.0, 2.0...)
+    x = np.ceil(X_MIN / sx) * sx
+    while x <= X_MAX + 1e-9:
+        xr = round(x, 8)
+        if abs(xr) > 1e-6:
+            label = f"{xr:g}.0" if xr == int(xr) else f"{xr:g}"
+            tw, th = cv2.getTextSize(label, font, font_scale, thickness)[0]
+            cv2.putText(img, label,
+                        (px_x(xr) + 3, px_y(0) + th + 4),
+                        font, font_scale, color_txt, thickness, cv2.LINE_AA)
+        x = round(x + sx, 10)
+
+    # Graduations axe Y
+    y = np.ceil(Y_MIN / sy) * sy
+    while y <= Y_MAX + 1e-9:
+        yr = round(y, 8)
+        if abs(yr) > 1e-6:
+            label = f"{yr:g}.0" if yr == int(yr) else f"{yr:g}"
+            cv2.putText(img, label,
+                        (px_x(0) + 5, px_y(yr) - 3),
+                        font, font_scale, color_txt, thickness, cv2.LINE_AA)
+        y = round(y + sy, 10)
+
+    # Légendes axes
+    cv2.putText(img, GRID_X_LEG,
+                (px_x(X_MAX) - 20, px_y(0) - 8),
+                font, font_scale, color_txt, thickness, cv2.LINE_AA)
+    cv2.putText(img, GRID_Y_LEG,
+                (px_x(0) - 16, px_y(Y_MAX) + 14),
+                font, font_scale, color_txt, thickness, cv2.LINE_AA)
+
+    return img
 
 
 def _mm_to_grid_px(x_mm: float, y_mm: float) -> Tuple[int, int]:
