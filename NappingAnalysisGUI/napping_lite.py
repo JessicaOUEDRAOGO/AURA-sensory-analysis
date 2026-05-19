@@ -469,29 +469,30 @@ def _draw_grid_frame(
     labels: dict,
     identity_manager: CupIdentityManager,
 ) -> np.ndarray:
-    """
-    Copie le fond de grille et dessine les points rouges des tasses.
-    Retourne l'image résultante — ne modifie pas grid_bg.
-    """
     vis = grid_bg.copy()
 
     for cup in cups:
         if cup.pos_mm is None:
             continue
+        ident = identity_manager.get_identity(cup.cup_id)
+        if ident is None:
+            continue
+
         x_mm, y_mm = cup.pos_mm
         px, py = _mm_to_grid_px(x_mm, y_mm)
 
         if not (0 <= px < GRID_SIZE and 0 <= py < GRID_SIZE):
             continue
 
-        # Point rouge plein — identique à GraphicsScene.add_marker
-        cv2.circle(vis, (px, py), 10, (0, 0, 255), -1)
+        # Point rouge plein — rayon 6, propre
+        cv2.circle(vis, (px, py), 6, (0, 0, 255), -1, lineType=cv2.LINE_AA)
 
-        # Label ArUco à côté
-        label = labels.get(cup.cup_id, f"?#{cup.cup_id}")
-        cv2.putText(vis, label, (px + 13, py + 13),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 2,
-                    cv2.LINE_AA)
+        # Label — juste le numéro ArUco, sans "Cup#"
+        label = str(ident.aruco_id)
+        cv2.putText(vis, label,
+                    (px + 9, py + 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45,
+                    (0, 0, 200), 1, cv2.LINE_AA)
 
     return vis
 
@@ -706,15 +707,14 @@ def main():
             state = identity_manager.get_state(cup.cup_id)
             color = _identity_color(state)
             label = labels.get(cup.cup_id, f"?#{cup.cup_id}")
+            ident = identity_manager.get_identity(cup.cup_id)
 
-            ident  = identity_manager.get_identity(cup.cup_id)
-            out_id = ident.aruco_id if ident else cup.cup_id
-
+            # ── Projecteur — toujours affiché ─────────────────────────────
             m = RING_RADIUS + RING_THICKNESS + 30
             if m <= px <= PROJ_W - m and m <= py <= PROJ_H - m:
                 cv2.circle(proj_frame, (px, py),
-                           RING_RADIUS, color, RING_THICKNESS,
-                           lineType=cv2.LINE_AA)
+                        RING_RADIUS, color, RING_THICKNESS,
+                        lineType=cv2.LINE_AA)
                 txt_size, _ = cv2.getTextSize(
                     label, cv2.FONT_HERSHEY_SIMPLEX, 2.5, 5)
                 tx = px - txt_size[0]//2
@@ -723,7 +723,9 @@ def main():
                             cv2.FONT_HERSHEY_SIMPLEX, 2.5, color, 5,
                             cv2.LINE_AA)
 
-            data_out.append((out_id, x_mm, y_mm))
+            # ── CSV — uniquement si identité ArUco confirmée ───────────────
+            if ident is not None:
+                data_out.append((ident.aruco_id, x_mm, y_mm))
 
         dm.display_image_on_projector_monitor(proj_frame)
 
