@@ -27,6 +27,7 @@ class DisplayManager:
         self.projector_screen_id = int(projector_screen_id)
         self._projector_window_name = "Projector"
         self._window_initialized = False   # fenêtre créée une seule fois
+        self._cached_monitor = None
 
     # ======================================================================
     # Moniteur cible
@@ -171,7 +172,9 @@ class DisplayManager:
             print(str(e))
             return
 
-        monitor = self._get_target_monitor(screen_id)
+        if self._cached_monitor is None or screen_id is not None:
+            self._cached_monitor = self._get_target_monitor(screen_id)
+        monitor = self._cached_monitor
 
         img = self._prepare_for_projection(img)
 

@@ -675,9 +675,11 @@ def main():
             fps       = fps_count / (now2 - fps_t0)
             fps_count = 0
             fps_t0    = now2
-        del frame_small
+        
         # ── Touches ──────────────────────────────────────────────────────────
         key = cv2.waitKey(1) & 0xFF
+        del preview
+        
         if key == ord('q'):
             break
         elif key == ord('d'):
