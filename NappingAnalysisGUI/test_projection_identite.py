@@ -494,10 +494,15 @@ def main():
         c    = json.load(open(config_path("camera_calibration_top.json")))
         K_r  = np.array(c["camera_matrix"], dtype=np.float64)
         dist = np.array(c["dist_coeffs"],   dtype=np.float64)
+        sx = PROCESS_W / CAPTURE_W
+        sy = PROCESS_H / CAPTURE_H
+        K_small = K_r.copy()
+        K_small[0, 0] *= sx; K_small[1, 1] *= sy
+        K_small[0, 2] *= sx; K_small[1, 2] *= sy
         nK, _ = cv2.getOptimalNewCameraMatrix(
-            K_r, dist, (CAPTURE_W, CAPTURE_H), 1, (CAPTURE_W, CAPTURE_H))
+            K_small, dist, (PROCESS_W, PROCESS_H), 1, (PROCESS_W, PROCESS_H))
         map1, map2 = cv2.initUndistortRectifyMap(
-            K_r, dist, None, nK, (CAPTURE_W, CAPTURE_H), cv2.CV_16SC2)
+            K_small, dist, None, nK, (PROCESS_W, PROCESS_H), cv2.CV_16SC2)
         print("[Main] Undistort OK")
     except FileNotFoundError:
         print("[Main] Pas de camera_calibration_top.json — frames brutes")
@@ -530,9 +535,10 @@ def main():
     if not ret:
         print("[Main] Impossible de lire frame0")
         cam_bot.stop(); return
+    frame_small0 = cv2.resize(frame0, (PROCESS_W, PROCESS_H), interpolation=cv2.INTER_LINEAR)
     if map1 is not None:
-        frame0 = cv2.remap(frame0, map1, map2, cv2.INTER_LINEAR)
-    frame_small0 = cv2.resize(frame0, (PROCESS_W, PROCESS_H))
+        frame_small0 = cv2.remap(frame_small0, map1, map2, cv2.INTER_LINEAR)
+    del frame0
     init_bboxes, _ = detector.detect(frame_small0)
     print(f"[Main] Détection initiale : {len(init_bboxes)} tasse(s)")
     manager.force_reset(frame_small0, init_bboxes)
@@ -546,17 +552,17 @@ def main():
     fps_t0            = time.monotonic()
     fps_count         = 0
     fps               = 0.0
-
+    frame_count       = 0
     while True:
         ret, frame_native = cap.read()
         if not ret or frame_native is None:
             continue
 
-        if map1 is not None:
-            frame_native = cv2.remap(frame_native, map1, map2, cv2.INTER_LINEAR)
-
         frame_small = cv2.resize(
             frame_native, (PROCESS_W, PROCESS_H), interpolation=cv2.INTER_LINEAR)
+        if map1 is not None:
+            frame_small = cv2.remap(frame_small, map1, map2, cv2.INTER_LINEAR)
+        del frame_native
 
         manager._use_3d = use_3d_correction
 
@@ -570,6 +576,9 @@ def main():
             manager.update_detection(frame_small, det_bboxes)
             cups       = list(manager._cups.values())
             last_det_t = now
+        frame_count += 1
+        if frame_count % 300 == 0:
+            identity_manager.purge_stale_identities(20.0)
 
         # Récupérer les labels d'identité
         labels = identity_manager.get_labels()   # {tracker_id: "Cup#N"}
@@ -666,7 +675,7 @@ def main():
             fps       = fps_count / (now2 - fps_t0)
             fps_count = 0
             fps_t0    = now2
-
+        del frame_small
         # ── Touches ──────────────────────────────────────────────────────────
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'):
