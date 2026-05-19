@@ -533,11 +533,19 @@ class CupTrackingPipeline(QObject):
             c    = json.load(open(config_path("camera_calibration_top.json")))
             Kr   = np.array(c["camera_matrix"], dtype=np.float64)
             dist = np.array(c["dist_coeffs"],   dtype=np.float64)
-            nK, _ = cv2.getOptimalNewCameraMatrix(
-                Kr, dist, (CAPTURE_W, CAPTURE_H), 1, (CAPTURE_W, CAPTURE_H))
+            sx = PROCESS_W / CAPTURE_W   # 640/1920
+            sy = PROCESS_H / CAPTURE_H   # 360/1080
+            Kr_small = Kr.copy()
+            Kr_small[0, 0] *= sx   # fx
+            Kr_small[1, 1] *= sy   # fy
+            Kr_small[0, 2] *= sx   # cx
+            Kr_small[1, 2] *= sy   # cy
+
+            nK_small, _ = cv2.getOptimalNewCameraMatrix(
+                Kr_small, dist, (PROCESS_W, PROCESS_H), 1, (PROCESS_W, PROCESS_H))
             self._map1, self._map2 = cv2.initUndistortRectifyMap(
-                Kr, dist, None, nK, (CAPTURE_W, CAPTURE_H), cv2.CV_16SC2)
-            print("[Pipeline] Undistort cam_top OK")
+                Kr_small, dist, None, nK_small, (PROCESS_W, PROCESS_H), cv2.CV_16SC2)
+            print(f"[Pipeline] Undistort cam_top OK — maps {PROCESS_W}×{PROCESS_H}")
         except FileNotFoundError:
             print("[Pipeline] Pas de camera_calibration_top.json — frames brutes")
 
@@ -609,9 +617,11 @@ class CupTrackingPipeline(QObject):
 
         ret, frame0 = cap.read()
         if ret and frame0 is not None:
+            small0 = cv2.resize(frame0, (PROCESS_W, PROCESS_H),
+                                interpolation=cv2.INTER_LINEAR)
             if self._map1 is not None:
-                frame0 = cv2.remap(frame0, self._map1, self._map2, cv2.INTER_LINEAR)
-            small0 = cv2.resize(frame0, (PROCESS_W, PROCESS_H))
+                small0 = cv2.remap(small0, self._map1, self._map2, cv2.INTER_LINEAR)
+            del frame0
             init_bboxes, _ = self._detector.detect(small0)
             print(f"[Pipeline] Détection initiale : {len(init_bboxes)} tasse(s)")
             self._manager.force_reset(small0, init_bboxes)
@@ -632,17 +642,16 @@ class CupTrackingPipeline(QObject):
             if not ret or frame_native is None:
                 time.sleep(0.005); continue
 
-            if self._map1 is not None:
-                frame_native = cv2.remap(
-                    frame_native, self._map1, self._map2, cv2.INTER_LINEAR)
-
             frame_small = cv2.resize(
                 frame_native, (PROCESS_W, PROCESS_H),
                 interpolation=cv2.INTER_LINEAR)
+            if self._map1 is not None:
+                frame_small = cv2.remap(
+                    frame_small, self._map1, self._map2, cv2.INTER_LINEAR)
 
-            # Enregistrement vidéo (non bloquant)
             if self._video_writer is not None:
                 self._video_writer.push_frame(frame_native)
+            del frame_native
 
             # KCF update chaque frame
             cups = self._manager.update_tracking(frame_small)
