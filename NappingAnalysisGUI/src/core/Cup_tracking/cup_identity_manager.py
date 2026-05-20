@@ -22,6 +22,15 @@ Fix v3 — cercles fantômes :
     avant que la repose soit confirmée → les scintillements ArUco normaux
     ne déclenchent plus de faux MATCHED.
 
+Ajout v4 — export enrichi :
+  - get_raw_aruco_positions()   : positions brutes cam_bottom ce frame
+  - get_raw_tracker_positions() : positions brutes trackers KCF ce frame
+  - get_tracker_positions_by_aruco() : positions trackers indexées par aruco_id
+    (retourne None si le tracker n'est pas encore matchéà un tag)
+  - get_association_log()       : historique complet des liaisons tracker↔tag
+    pour export JSON en fin de session
+  Ces méthodes sont thread-safe et n'altèrent aucune logique interne.
+
 Ajout :
   purge_stale_identities() — appelée par CupTrackingPipeline toutes les
   PURGE_EVERY_FRAMES frames pour éviter l'accumulation sur longue session.
@@ -31,7 +40,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -89,6 +98,20 @@ class CupIdentity:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+#  Enregistrement des associations — pour export JSON
+# ──────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class AssociationEvent:
+    """Un événement de liaison ou déliaison tracker↔tag."""
+    aruco_id:   int
+    tracker_id: int
+    event:      str   # "bind" ou "unbind"
+    timestamp:  float = field(default_factory=time.monotonic)
+    frame:      int   = 0
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 #  Manager principal
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -109,8 +132,16 @@ class CupIdentityManager:
         labels = manager.get_labels()
         # → {tracker_id: "Cup#1", ...}
 
+        # Export CSV — positions brutes de chaque source :
+        aruco_pos   = manager.get_raw_aruco_positions()
+        tracker_pos = manager.get_raw_tracker_positions()
+        by_aruco    = manager.get_tracker_positions_by_aruco()
+
         # Toutes les ~300 frames :
         manager.purge_stale_identities(max_age_s=60.0)
+
+        # En fin de session :
+        log = manager.get_association_log()
     """
 
     def __init__(
@@ -135,8 +166,11 @@ class CupIdentityManager:
         self._last_trackers:    Dict[int, Tuple[float, float]] = {}
         self._frame_count = 0
 
+        # Historique des associations pour export JSON
+        self._association_log: List[AssociationEvent] = []
+
     # ──────────────────────────────────────────────────────────────────────────
-    #  Interface publique
+    #  Interface publique — mise à jour
     # ──────────────────────────────────────────────────────────────────────────
 
     def update_aruco(self, aruco_positions: Dict[int, Tuple[float, float]]) -> None:
@@ -152,6 +186,10 @@ class CupIdentityManager:
             self._last_trackers = dict(tracker_positions)
             self._frame_count  += 1
             self._process_tracker_frame(tracker_positions)
+
+    # ──────────────────────────────────────────────────────────────────────────
+    #  Interface publique — lecture (logique existante)
+    # ──────────────────────────────────────────────────────────────────────────
 
     def get_labels(self) -> Dict[int, str]:
         with self._lock:
@@ -176,6 +214,104 @@ class CupIdentityManager:
         ident = self.get_identity(tracker_id)
         return ident.state if ident else None
 
+    # ──────────────────────────────────────────────────────────────────────────
+    #  Interface publique — positions brutes pour CSV enrichi (NOUVEAU)
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def get_raw_aruco_positions(self) -> Dict[int, Tuple[float, float]]:
+        """
+        Retourne les positions ArUco brutes de la dernière frame cam_bottom,
+        indexées par aruco_id.
+
+        Utilisé pour alimenter les colonnes ID_X_x_bottom / ID_X_y_bottom du CSV.
+        Retourne une copie thread-safe — ne pas modifier le dict retourné.
+        """
+        with self._lock:
+            return dict(self._last_aruco)
+
+    def get_raw_tracker_positions(self) -> Dict[int, Tuple[float, float]]:
+        """
+        Retourne les positions de tous les trackers KCF actifs de la dernière
+        frame cam_top, indexées par tracker_id interne.
+
+        Utilisé pour les colonnes ID_X_x_tracker / ID_X_y_tracker du CSV,
+        APRÈS résolution tracker_id → aruco_id via get_tracker_positions_by_aruco().
+        """
+        with self._lock:
+            return dict(self._last_trackers)
+
+    def get_tracker_positions_by_aruco(self) -> Dict[int, Tuple[float, float]]:
+        """
+        Retourne les positions des trackers KCF indexées par aruco_id.
+
+        Ne retourne que les trackers actuellement liés à un tag ArUco connu.
+        Les trackers sans identité (pas encore matchés) sont ignorés ici — leurs
+        coordonnées apparaîtront quand même dans les colonnes _tracker dès qu'un
+        match est établi.
+
+        Exemple de retour :
+            {6: (234.5, 178.2), 8: (401.0, 320.7)}
+        """
+        with self._lock:
+            result: Dict[int, Tuple[float, float]] = {}
+            for tracker_id, pos in self._last_trackers.items():
+                aruco_id = self._tracker_to_aruco.get(tracker_id)
+                if aruco_id is not None:
+                    result[aruco_id] = pos
+            return result
+
+    def get_association_log(self) -> List[dict]:
+        """
+        Retourne l'historique complet des liaisons tracker↔tag sous forme
+        de liste de dicts sérialisables en JSON.
+
+        Format de chaque entrée :
+            {
+                "aruco_id":   6,
+                "tracker_id": 2,
+                "event":      "bind",      # ou "unbind"
+                "timestamp":  1718123456.789,
+                "frame":      1234
+            }
+
+        Appelé une seule fois en fin de session pour écrire associations.json.
+        """
+        with self._lock:
+            return [
+                {
+                    "aruco_id":   ev.aruco_id,
+                    "tracker_id": ev.tracker_id,
+                    "event":      ev.event,
+                    "timestamp":  round(ev.timestamp, 3),
+                    "frame":      ev.frame,
+                }
+                for ev in self._association_log
+            ]
+
+    def get_tracker_history_by_aruco(self) -> Dict[int, List[int]]:
+        """
+        Retourne, pour chaque aruco_id, la liste de tous les tracker_id
+        qui lui ont été associés durant la session (sans doublons, en ordre
+        chronologique).
+
+        Format :
+            {6: [0, 3, 5], 8: [1, 4]}
+
+        Utilisé pour construire le résumé compact dans associations.json.
+        """
+        with self._lock:
+            history: Dict[int, List[int]] = {}
+            for ev in self._association_log:
+                if ev.event == "bind":
+                    lst = history.setdefault(ev.aruco_id, [])
+                    if ev.tracker_id not in lst:
+                        lst.append(ev.tracker_id)
+            return history
+
+    # ──────────────────────────────────────────────────────────────────────────
+    #  Reset et purge
+    # ──────────────────────────────────────────────────────────────────────────
+
     def reset(self) -> None:
         with self._lock:
             self._identities.clear()
@@ -183,6 +319,7 @@ class CupIdentityManager:
             self._last_aruco.clear()
             self._last_trackers.clear()
             self._frame_count = 0
+            # On ne vide PAS _association_log pour garder l'historique complet
         print("[IdentityManager] Reset complet")
 
     def purge_stale_identities(self, max_age_s: float = 60.0) -> None:
@@ -204,7 +341,7 @@ class CupIdentityManager:
                 print(f"[Identity] Purge identité stale ArUco#{aid}")
 
     # ──────────────────────────────────────────────────────────────────────────
-    #  Logique interne — traitement ArUco
+    #  Logique interne — traitement ArUco (inchangée)
     # ──────────────────────────────────────────────────────────────────────────
 
     def _process_aruco_frame(
@@ -223,8 +360,6 @@ class CupIdentityManager:
                     ident.tag_conf_count + 1, self._found_conf + 1)
 
                 if ident.state == CupState.AIRBORNE:
-                    # Tag retrouvé → tentative de confirmation de repose
-                    # (avec compteur anti-scintillement)
                     self._try_confirm_repose(ident, pos)
                 elif ident.state == CupState.LOST:
                     if ident.tag_conf_count >= self._found_conf:
@@ -233,10 +368,8 @@ class CupIdentityManager:
                         print(f"[Identity] {ident.label} : LOST → PENDING "
                               f"(tag retrouvé à {pos[0]:.0f},{pos[1]:.0f}mm)")
             else:
-                # Tag absent cette frame
                 ident.tag_lost_count += 1
                 ident.tag_conf_count  = 0
-                # Réinitialiser le compteur de repose si le tag disparaît
                 if ident.state == CupState.AIRBORNE:
                     ident.repose_conf_count = 0
 
@@ -256,7 +389,7 @@ class CupIdentityManager:
                       f"à ({pos[0]:.0f},{pos[1]:.0f})mm")
 
     # ──────────────────────────────────────────────────────────────────────────
-    #  Logique interne — traitement trackers
+    #  Logique interne — traitement trackers (inchangée)
     # ──────────────────────────────────────────────────────────────────────────
 
     def _process_tracker_frame(
@@ -271,6 +404,13 @@ class CupIdentityManager:
                 ident.tracker_id = None
                 if ident.state == CupState.MATCHED:
                     ident.state = CupState.LOST
+                    # Log déliaison
+                    self._association_log.append(AssociationEvent(
+                        aruco_id=aruco_id,
+                        tracker_id=old_tid,
+                        event="unbind",
+                        frame=self._frame_count,
+                    ))
                     print(f"[Identity] {ident.label} → LOST "
                           f"(tracker {old_tid} disparu)")
 
@@ -325,10 +465,17 @@ class CupIdentityManager:
         self._tracker_to_aruco[tracker_id] = ident.aruco_id
         pos_str = (f"({ident.pos_mm[0]:.0f},{ident.pos_mm[1]:.0f})mm"
                    if ident.pos_mm else "?")
+        # Log liaison
+        self._association_log.append(AssociationEvent(
+            aruco_id=ident.aruco_id,
+            tracker_id=tracker_id,
+            event="bind",
+            frame=self._frame_count,
+        ))
         print(f"[Identity] MATCH : {ident.label} ↔ tracker#{tracker_id} @ {pos_str}")
 
     # ──────────────────────────────────────────────────────────────────────────
-    #  Confirmation de repose — avec compteur anti-scintillement
+    #  Confirmation de repose — avec compteur anti-scintillement (inchangée)
     # ──────────────────────────────────────────────────────────────────────────
 
     def _try_confirm_repose(
@@ -336,15 +483,6 @@ class CupIdentityManager:
         ident: CupIdentity,
         tag_pos: Tuple[float, float],
     ) -> None:
-        """
-        Appelé quand un tag AIRBORNE réapparaît.
-        Cherche le tracker le plus proche. Si la distance est inférieure à
-        REPOSE_DIST_MM, incrémente repose_conf_count. La repose n'est confirmée
-        que lorsque repose_conf_count atteint REPOSE_CONF_FRAMES.
-
-        Cela évite le cycle AIRBORNE↔MATCHED rapide causé par le scintillement
-        naturel des tags ArUco (détectés/perdus alternativement à ~22 fps).
-        """
         if not self._last_trackers:
             ident.repose_conf_count = 0
             return
@@ -358,28 +496,22 @@ class CupIdentityManager:
                 best_tid  = tid
 
         if best_tid is None or best_dist > self._repose_dist:
-            # Tag trop loin ou pas de tracker → réinitialiser le compteur
             ident.repose_conf_count = 0
             return
 
-        # Le tag est proche du tracker → incrémenter le compteur
         ident.repose_conf_count += 1
 
         if ident.repose_conf_count < self._repose_conf_frames:
-            # Pas encore assez de frames consécutives stables → attendre
             return
 
-        # Compteur atteint — confirmer la repose
         ident.repose_conf_count = 0
 
-        # ── Cas 1 : ce tracker était déjà lié à cette identité ───────────────
         if best_tid == ident.tracker_id:
             ident.state = CupState.MATCHED
             print(f"[Identity] {ident.label} → MATCHED "
                   f"(repose confirmée, tracker#{best_tid}, dist={best_dist:.0f}mm)")
             return
 
-        # ── Cas 2 : ce tracker appartient à une autre identité ───────────────
         other_aruco = self._tracker_to_aruco.get(best_tid)
         if other_aruco is not None and other_aruco != ident.aruco_id:
             other_ident = self._identities.get(other_aruco)
@@ -391,16 +523,22 @@ class CupIdentityManager:
                 other_ident.tracker_id      = None
                 other_ident.state           = CupState.LOST
                 other_ident.repose_conf_count = 0
+                # Log déliaison suite à conflit
+                self._association_log.append(AssociationEvent(
+                    aruco_id=other_aruco,
+                    tracker_id=best_tid,
+                    event="unbind",
+                    frame=self._frame_count,
+                ))
             self._tracker_to_aruco.pop(best_tid, None)
 
-        # ── Liaison du tracker à cette identité ──────────────────────────────
         if ident.tracker_id is not None:
             self._tracker_to_aruco.pop(ident.tracker_id, None)
 
         self._bind(ident, best_tid)
 
     # ──────────────────────────────────────────────────────────────────────────
-    #  Debug
+    #  Debug (inchangé)
     # ──────────────────────────────────────────────────────────────────────────
 
     def debug_summary(self) -> str:

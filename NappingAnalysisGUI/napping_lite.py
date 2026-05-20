@@ -10,20 +10,34 @@ Fonctionnalités :
   - Tracking KCF (cam_top) + ArUco (cam_bottom) + identité stable
   - Projecteur : fond blanc + cercles colorés (identique test_projection_identite.py)
   - Fenêtre grille 700×700 à l'écran : points rouges = positions tasses, axes -10/10
-  - Export CSV coordonnées x,y par tasse, flush toutes les 200 frames
+  - Export CSV enrichi — 3 sources de coordonnées par tasse :
+      · cam_top (pos_mm EMA-lissée, via tracker KCF + PoseConverter)
+      · tracker  (position brute du tracker KCF, avant EMA et avant match)
+      · cam_bottom (position brute ArUco, frame par frame)
+  - Export JSON associations.json :
+      · pour chaque aruco_id : liste des tracker_id successifs + log bind/unbind
   - Enregistrement vidéo cam_top via VideoWriterThread (non bloquant)
   - Saisie participant / protocole au démarrage via input()
+
+COLONNES CSV :
+  frame, timestamp,
+  ID_{id}_x_camtop, ID_{id}_y_camtop,   ← position EMA lissée (cam_top)
+  ID_{id}_x_tracker, ID_{id}_y_tracker,  ← position brute tracker KCF
+  ID_{id}_x_bottom, ID_{id}_y_bottom     ← position brute ArUco (cam_bottom)
+
+  Chaque groupe est répété pour chaque tag dans ARUCO_CUP_IDS.
+  Cellule vide si la source n'a pas de donnée ce frame.
 
 TOUCHES :
   q=quitter  r=reset trackers  +/-=seuil détection
   c=toggle correction 3D  i=debug identités
 """
 
+import csv
 import cv2
 import json
 import numpy as np
 import os
-import pandas as pd
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -111,8 +125,9 @@ PURGE_MAX_AGE_S    = 20.0
 # À adapter selon le protocole
 ARUCO_CUP_IDS = [6, 8]
 
+
 # ══════════════════════════════════════════════════════════════════════════════
-#  Utilitaires géométriques
+#  Utilitaires géométriques  (inchangés)
 # ══════════════════════════════════════════════════════════════════════════════
 
 class EMAFilter:
@@ -197,7 +212,7 @@ def _identity_color(state: Optional[CupState]) -> tuple:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  PoseConverter
+#  PoseConverter  (inchangé)
 # ══════════════════════════════════════════════════════════════════════════════
 
 class PoseConverter:
@@ -243,7 +258,7 @@ def _proc_to_mm(cx_p, cy_p, converter, use_3d):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  TrackedCup
+#  TrackedCup  (inchangé sauf update_mm qui renvoie aussi la pos brute)
 # ══════════════════════════════════════════════════════════════════════════════
 
 @dataclass
@@ -252,7 +267,8 @@ class TrackedCup:
     ema:         EMAFilter
     cv_tracker:  object
     bbox:        tuple
-    pos_mm:      Optional[Tuple[float, float]] = None
+    pos_mm:      Optional[Tuple[float, float]] = None   # EMA-lissée → colonnes _camtop
+    pos_mm_raw:  Optional[Tuple[float, float]] = None   # brute      → colonnes _tracker
     lost_frames: int  = 0
     active:      bool = True
 
@@ -281,15 +297,22 @@ class TrackedCup:
             self.active=False; return False
 
     def update_mm(self, converter, use_3d):
+        """
+        Calcule pos_mm_raw (brute, non lissée) et pos_mm (EMA-lissée).
+
+        pos_mm_raw → colonnes ID_X_x_tracker / ID_X_y_tracker dans le CSV.
+        pos_mm     → colonnes ID_X_x_camtop  / ID_X_y_camtop  dans le CSV.
+        """
         cx, cy = _center(self.bbox)
         mm = _proc_to_mm(cx, cy, converter, use_3d)
         if mm is not None:
+            self.pos_mm_raw = mm                      # ← brute
             xs, ys = self.ema.update(*mm)
-            self.pos_mm = (xs, ys)
+            self.pos_mm = (xs, ys)                    # ← EMA-lissée
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  CupDetector
+#  CupDetector  (inchangé)
 # ══════════════════════════════════════════════════════════════════════════════
 
 class CupDetector:
@@ -340,7 +363,7 @@ class CupDetector:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  TrackingManager
+#  TrackingManager  (inchangé)
 # ══════════════════════════════════════════════════════════════════════════════
 
 class TrackingManager:
@@ -427,14 +450,10 @@ class TrackingManager:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Grille fenêtre PC
+#  Grille fenêtre PC  (inchangée)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _build_grid_background() -> np.ndarray:
-    """
-    Grille 700×700 fidèle à GraphicsScene :
-    traits fins gris clair, axes noirs, graduations décimales.
-    """
     SIZE = GRID_SIZE
     img  = np.ones((SIZE, SIZE, 3), dtype=np.uint8) * 255
 
@@ -444,7 +463,6 @@ def _build_grid_background() -> np.ndarray:
     def px_x(v): return int((v - X_MIN) / (X_MAX - X_MIN) * SIZE)
     def px_y(v): return int((v - Y_MIN) / (Y_MAX - Y_MIN) * SIZE)
 
-    # Pas de grille — identique à GraphicsScene.calculate_grid_spacing
     def spacing(delta):
         s = delta / 40
         if s <= 0: return 1.0
@@ -457,21 +475,18 @@ def _build_grid_background() -> np.ndarray:
     sx = spacing(X_MAX - X_MIN)
     sy = spacing(Y_MAX - Y_MIN)
 
-    # Lignes verticales — gris très clair, épaisseur 1
     x = np.ceil(X_MIN / sx) * sx
     while x <= X_MAX + 1e-9:
         cv2.line(img, (px_x(x), px_y(Y_MIN)), (px_x(x), px_y(Y_MAX)),
                  (211, 211, 211), 1, cv2.LINE_AA)
         x = round(x + sx, 10)
 
-    # Lignes horizontales
     y = np.ceil(Y_MIN / sy) * sy
     while y <= Y_MAX + 1e-9:
         cv2.line(img, (px_x(X_MIN), px_y(y)), (px_x(X_MAX), px_y(y)),
                  (211, 211, 211), 1, cv2.LINE_AA)
         y = round(y + sy, 10)
 
-    # Axes principaux — noirs, épaisseur 2
     cv2.line(img, (px_x(X_MIN), px_y(0)), (px_x(X_MAX), px_y(0)),
              (0, 0, 0), 2, cv2.LINE_AA)
     cv2.line(img, (px_x(0), px_y(Y_MIN)), (px_x(0), px_y(Y_MAX)),
@@ -482,7 +497,6 @@ def _build_grid_background() -> np.ndarray:
     thickness  = 1
     color_txt  = (0, 0, 0)
 
-    # Graduations axe X — format décimal comme GraphicsScene (1.0, 2.0...)
     x = np.ceil(X_MIN / sx) * sx
     while x <= X_MAX + 1e-9:
         xr = round(x, 8)
@@ -494,7 +508,6 @@ def _build_grid_background() -> np.ndarray:
                         font, font_scale, color_txt, thickness, cv2.LINE_AA)
         x = round(x + sx, 10)
 
-    # Graduations axe Y
     y = np.ceil(Y_MIN / sy) * sy
     while y <= Y_MAX + 1e-9:
         yr = round(y, 8)
@@ -505,7 +518,6 @@ def _build_grid_background() -> np.ndarray:
                         font, font_scale, color_txt, thickness, cv2.LINE_AA)
         y = round(y + sy, 10)
 
-    # Légendes axes
     cv2.putText(img, GRID_X_LEG,
                 (px_x(X_MAX) - 20, px_y(0) - 8),
                 font, font_scale, color_txt, thickness, cv2.LINE_AA)
@@ -515,20 +527,10 @@ def _build_grid_background() -> np.ndarray:
 
     return img
 
-def _mm_to_grid_px(x_mm: float, y_mm: float) -> Tuple[int, int]:
-    """
-    Convertit une position en mm (espace table 0-597)
-    vers un pixel dans la grille 700×700 (espace index -10/+10).
 
-    Même logique que GraphicsScene.pixel_to_index_x/y inversée :
-      index = px / (grid_xmax - grid_xmin) * (x_max - x_min) + x_min
-    Ici on fait l'inverse :
-      px = (index - x_min) / (x_max - x_min) * GRID_SIZE
-    Et index = mm / TABLE_SIZE_MM * (x_max - x_min) + x_min
-    """
+def _mm_to_grid_px(x_mm: float, y_mm: float) -> Tuple[int, int]:
     x_idx = (x_mm / TABLE_SIZE_MM) * (GRID_X_MAX - GRID_X_MIN) + GRID_X_MIN
     y_idx = (y_mm / TABLE_SIZE_MM) * (GRID_Y_MAX - GRID_Y_MIN) + GRID_Y_MIN
-
     px = int((x_idx - GRID_X_MIN) / (GRID_X_MAX - GRID_X_MIN) * GRID_SIZE)
     py = int((y_idx - GRID_Y_MIN) / (GRID_Y_MAX - GRID_Y_MIN) * GRID_SIZE)
     return px, py
@@ -555,10 +557,8 @@ def _draw_grid_frame(
         if not (0 <= px < GRID_SIZE and 0 <= py < GRID_SIZE):
             continue
 
-        # Point rouge plein — rayon 6, propre
         cv2.circle(vis, (px, py), 6, (0, 0, 255), -1, lineType=cv2.LINE_AA)
 
-        # Label — juste le numéro ArUco, sans "Cup#"
         label = str(ident.aruco_id)
         cv2.putText(vis, label,
                     (px + 9, py + 5),
@@ -569,42 +569,80 @@ def _draw_grid_frame(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  CSV
+#  CSV enrichi — 3 sources de coordonnées par tag
 # ══════════════════════════════════════════════════════════════════════════════
 
-import csv
-
 class CsvWriter:
+    """
+    Écrit le CSV enrichi avec 3 sources de coordonnées par tasse.
+
+    Colonnes :
+        frame, timestamp,
+        ID_{id}_x_camtop, ID_{id}_y_camtop,     ← EMA-lissée via cam_top
+        ID_{id}_x_tracker, ID_{id}_y_tracker,    ← brute KCF (avant EMA)
+        ID_{id}_x_bottom, ID_{id}_y_bottom       ← brute ArUco cam_bottom
+
+    Toutes les tasses listées dans cup_ids sont présentes dès la première
+    ligne — cellule vide si la source n'a pas de donnée ce frame.
+    Flush tous les CSV_FLUSH_EVERY frames.
+    """
+
     def __init__(self, output_path: str, cup_ids: list):
         self._frame_index = 0
         self._buffer: list = []
 
-        # Colonnes fixes dès le départ — tous les IDs connus
         self._fieldnames = ['frame', 'timestamp']
         for cid in cup_ids:
-            self._fieldnames.append(f'ID_{cid}_x')
-            self._fieldnames.append(f'ID_{cid}_y')
+            self._fieldnames += [
+                f'ID_{cid}_x_camtop',  f'ID_{cid}_y_camtop',
+                f'ID_{cid}_x_tracker', f'ID_{cid}_y_tracker',
+                f'ID_{cid}_x_bottom',  f'ID_{cid}_y_bottom',
+            ]
 
         self._file   = open(output_path, 'w', newline='', encoding='utf-8')
         self._writer = csv.DictWriter(
             self._file,
             fieldnames=self._fieldnames,
             extrasaction='ignore',
-            restval='',   # cellule vide si la tasse n'est pas détectée ce frame
+            restval='',
         )
         self._writer.writeheader()
         self._file.flush()
-        print(f"[CSV] créé — colonnes : {self._fieldnames}")
+        print(f"[CSV] créé — {len(cup_ids)} tasse(s) × 3 sources")
+        print(f"[CSV] colonnes : {self._fieldnames}")
 
-    def push(self, data_out: list):
+    def push(
+        self,
+        camtop_by_aruco:  Dict[int, Tuple[float, float]],
+        tracker_by_aruco: Dict[int, Tuple[float, float]],
+        bottom_by_aruco:  Dict[int, Tuple[float, float]],
+    ) -> None:
+        """
+        Ajoute une ligne au buffer.
+
+        Paramètres (tous indexés par aruco_id) :
+          camtop_by_aruco  — pos_mm EMA-lissée  (colonnes _camtop)
+          tracker_by_aruco — pos_mm_raw brute   (colonnes _tracker)
+          bottom_by_aruco  — positions ArUco cam_bottom (colonnes _bottom)
+        """
         self._frame_index += 1
-        row = {
+        row: dict = {
             'frame':     self._frame_index,
             'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3],
         }
-        for cup_id, x_mm, y_mm in data_out:
-            row[f'ID_{cup_id}_x'] = round(float(x_mm), 2)
-            row[f'ID_{cup_id}_y'] = round(float(y_mm), 2)
+
+        for aruco_id, (x, y) in camtop_by_aruco.items():
+            row[f'ID_{aruco_id}_x_camtop'] = round(float(x), 2)
+            row[f'ID_{aruco_id}_y_camtop'] = round(float(y), 2)
+
+        for aruco_id, (x, y) in tracker_by_aruco.items():
+            row[f'ID_{aruco_id}_x_tracker'] = round(float(x), 2)
+            row[f'ID_{aruco_id}_y_tracker'] = round(float(y), 2)
+
+        for aruco_id, (x, y) in bottom_by_aruco.items():
+            row[f'ID_{aruco_id}_x_bottom'] = round(float(x), 2)
+            row[f'ID_{aruco_id}_y_bottom'] = round(float(y), 2)
+
         self._buffer.append(row)
         if len(self._buffer) >= CSV_FLUSH_EVERY:
             self.flush()
@@ -624,6 +662,174 @@ class CsvWriter:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  CSV brut trackers — zéro donnée perdue, même avant le match
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TrackerRawCsvWriter:
+    """
+    Enregistre TOUTES les positions de TOUS les trackers KCF actifs,
+    frame par frame, sans aucune condition sur le match ArUco.
+
+    Une ligne = un tracker actif pour ce frame.
+    Si N trackers sont actifs, N lignes sont écrites pour ce frame.
+
+    Colonnes :
+        frame        — numéro de frame global (synchronisé avec session_main.csv)
+        timestamp    — horodatage ISO milliseconde
+        tracker_id   — identifiant interne KCF (0, 1, 2, …)
+        x_mm_raw     — position brute KCF, avant filtre EMA (mm)
+        y_mm_raw     — position brute KCF, avant filtre EMA (mm)
+        x_mm_ema     — position EMA-lissée (mm) — vide si pas encore calculée
+        y_mm_ema     — position EMA-lissée (mm) — vide si pas encore calculée
+        aruco_id     — tag ArUco associé à ce tracker (vide avant le match)
+        state        — état de l'identité : PENDING, MATCHED, AIRBORNE, LOST,
+                       ou UNMATCHED si le tracker n'a pas encore d'identité
+
+    Clé de jointure avec session_main.csv : (frame, aruco_id) une fois matché.
+    """
+
+    FIELDNAMES = [
+        'frame', 'timestamp',
+        'tracker_id',
+        'x_mm_raw', 'y_mm_raw',
+        'x_mm_ema', 'y_mm_ema',
+        'aruco_id', 'state',
+    ]
+
+    def __init__(self, output_path: str):
+        self._frame_index = 0
+        self._buffer: list = []
+
+        self._file   = open(output_path, 'w', newline='', encoding='utf-8')
+        self._writer = csv.DictWriter(
+            self._file,
+            fieldnames=self.FIELDNAMES,
+            extrasaction='ignore',
+            restval='',
+        )
+        self._writer.writeheader()
+        self._file.flush()
+        print(f"[CSV-raw] créé → {output_path}")
+
+    def push(
+        self,
+        frame_index: int,
+        cups: list,                          # liste de TrackedCup
+        identity_manager: CupIdentityManager,
+    ) -> None:
+        """
+        Écrit une ligne par TrackedCup actif dans ce frame.
+
+        Paramètres :
+          frame_index      — le même numéro de frame que session_main.csv
+          cups             — liste des TrackedCup retournés par TrackingManager
+          identity_manager — pour résoudre tracker_id → aruco_id + state
+        """
+        ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+
+        for cup in cups:
+            # tracker_id interne KCF
+            tid = cup.cup_id
+
+            # Résolution de l'identité — peut être None si pas encore matché
+            ident = identity_manager.get_identity(tid)
+            aruco_id = ident.aruco_id if ident is not None else ''
+            if ident is not None:
+                state = ident.state.name          # MATCHED / PENDING / AIRBORNE / LOST
+            else:
+                state = 'UNMATCHED'               # tracker créé, pas encore en PENDING
+
+            row: dict = {
+                'frame':     frame_index,
+                'timestamp': ts,
+                'tracker_id': tid,
+                'aruco_id':  aruco_id,
+                'state':     state,
+            }
+
+            if cup.pos_mm_raw is not None:
+                row['x_mm_raw'] = round(float(cup.pos_mm_raw[0]), 2)
+                row['y_mm_raw'] = round(float(cup.pos_mm_raw[1]), 2)
+
+            if cup.pos_mm is not None:
+                row['x_mm_ema'] = round(float(cup.pos_mm[0]), 2)
+                row['y_mm_ema'] = round(float(cup.pos_mm[1]), 2)
+
+            self._buffer.append(row)
+
+        if len(self._buffer) >= CSV_FLUSH_EVERY:
+            self.flush()
+
+    def flush(self):
+        if not self._buffer:
+            return
+        self._writer.writerows(self._buffer)
+        self._file.flush()
+        self._buffer.clear()
+
+    def close(self):
+        self.flush()
+        self._file.close()
+        print("[CSV-raw] fermé")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Export JSON des associations tracker↔tag
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _write_associations_json(
+    json_path: str,
+    identity_manager: CupIdentityManager,
+    participant_id: str,
+    protocol_name: str,
+    session_start: str,
+    total_frames: int,
+) -> None:
+    """
+    Écrit associations.json avec :
+      - Métadonnées de session
+      - Pour chaque aruco_id :
+          · tous les tracker_id qui lui ont été associés (sans doublons)
+          · log chronologique de tous les événements bind/unbind
+    """
+    history  = identity_manager.get_tracker_history_by_aruco()
+    full_log = identity_manager.get_association_log()
+
+    associations = {}
+    for aruco_id, tracker_ids in history.items():
+        associations[str(aruco_id)] = {
+            "tracker_ids_used": tracker_ids,
+            "bind_count": sum(
+                1 for ev in full_log
+                if ev["aruco_id"] == aruco_id and ev["event"] == "bind"
+            ),
+            "unbind_count": sum(
+                1 for ev in full_log
+                if ev["aruco_id"] == aruco_id and ev["event"] == "unbind"
+            ),
+        }
+
+    output = {
+        "session": {
+            "participant_id":  participant_id,
+            "protocol_name":   protocol_name,
+            "session_start":   session_start,
+            "total_frames":    total_frames,
+        },
+        "associations": associations,
+        "event_log":    full_log,
+    }
+
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(output, f, indent=2, ensure_ascii=False)
+
+    print(f"[JSON] associations écrites → {json_path}")
+    for aid, info in associations.items():
+        print(f"  ArUco#{aid} → trackers utilisés: {info['tracker_ids_used']}  "
+              f"(bind×{info['bind_count']} unbind×{info['unbind_count']})")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  Main
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -635,17 +841,22 @@ def main():
     protocol_name  = input("Nom du protocole  : ").strip() or "PROTO_TEST"
     participant_id = input("ID participant    : ").strip() or "P001"
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    basename  = f"{protocol_name}_{participant_id}_{timestamp}"
+    timestamp     = datetime.now().strftime("%Y%m%d_%H%M%S")
+    session_start = datetime.now().isoformat(timespec='seconds')
+    basename      = f"{protocol_name}_{participant_id}_{timestamp}"
 
     out_dir = str(data_path("sessions", "lite"))
     os.makedirs(out_dir, exist_ok=True)
 
-    csv_path   = os.path.join(out_dir, f"{basename}.csv")
-    video_path = os.path.join(out_dir, f"{basename}.mp4")
+    csv_path         = os.path.join(out_dir, f"{basename}.csv")
+    trackers_raw_path = os.path.join(out_dir, f"{basename}_trackers_raw.csv")
+    video_path       = os.path.join(out_dir, f"{basename}.mp4")
+    json_path        = os.path.join(out_dir, f"{basename}_associations.json")
 
-    print(f"\nCSV   → {csv_path}")
-    print(f"Vidéo → {video_path}\n")
+    print(f"\nCSV principal  → {csv_path}")
+    print(f"CSV trackers   → {trackers_raw_path}")
+    print(f"Associations   → {json_path}")
+    print(f"Vidéo          → {video_path}\n")
 
     # ── Config ───────────────────────────────────────────────────────────────
     H_proj = np.array(
@@ -656,7 +867,8 @@ def main():
     identity_manager = CupIdentityManager()
     detector         = CupDetector()
     manager          = TrackingManager(converter=converter, identity_manager=identity_manager)
-    csv_writer = CsvWriter(csv_path, cup_ids=ARUCO_CUP_IDS)
+    csv_writer            = CsvWriter(csv_path, cup_ids=ARUCO_CUP_IDS)
+    tracker_raw_writer    = TrackerRawCsvWriter(trackers_raw_path)
 
     # ── VideoWriter ──────────────────────────────────────────────────────────
     video_writer = VideoWriterThread(
@@ -675,7 +887,7 @@ def main():
         show_preview=False)
     cam_bot.start()
 
-    # ── Undistort cam_top — maps pour PROCESS_W×PROCESS_H ───────────────────
+    # ── Undistort cam_top ────────────────────────────────────────────────────
     map1 = map2 = None
     try:
         c    = json.load(open(config_path("camera_calibration_top.json")))
@@ -694,11 +906,11 @@ def main():
     except FileNotFoundError:
         print("[Main] Pas de camera_calibration_top.json — frames brutes")
 
-    # ── Projecteur — fond blanc (identique test_projection_identite.py) ──────
+    # ── Projecteur ───────────────────────────────────────────────────────────
     dm = DisplayManager(projector_screen_id=PROJ_SCREEN_ID)
     proj_frame = np.ones((PROJ_H, PROJ_W, 3), dtype=np.uint8) * 255
 
-    # ── Grille fenêtre PC — calculée UNE SEULE FOIS ──────────────────────────
+    # ── Grille fenêtre PC ────────────────────────────────────────────────────
     grid_bg = _build_grid_background()
     print("[Main] Grille PC calculée")
 
@@ -749,22 +961,18 @@ def main():
         if not ret or frame_native is None:
             continue
 
-        # resize D'ABORD, remap ENSUITE sur 640×360
         frame_small = cv2.resize(
             frame_native, (PROCESS_W, PROCESS_H), interpolation=cv2.INTER_LINEAR)
         if map1 is not None:
             frame_small = cv2.remap(frame_small, map1, map2, cv2.INTER_LINEAR)
 
-        # Vidéo native — push avant del (non bloquant)
         video_writer.push_frame(frame_native)
         del frame_native
 
         manager._use_3d = use_3d_correction
 
-        # KCF update chaque frame
         cups = manager.update_tracking(frame_small)
 
-        # Recalage HSV périodique
         now = time.monotonic()
         if now - last_det_t >= DETECT_INTERVAL_S:
             det_bboxes, _ = detector.detect(frame_small)
@@ -772,16 +980,37 @@ def main():
             cups       = list(manager._cups.values())
             last_det_t = now
 
-        # Purge identités stale
         frame_count += 1
         if frame_count % PURGE_EVERY_FRAMES == 0:
             identity_manager.purge_stale_identities(PURGE_MAX_AGE_S)
 
         labels = identity_manager.get_labels()
 
+        # ── Collecte des 3 sources de positions pour le CSV ───────────────────
+        #
+        # Source 1 — cam_top EMA-lissée (colonnes _camtop)
+        #   Indexée par aruco_id via identity_manager (seulement les cups matchées)
+        camtop_by_aruco: Dict[int, Tuple[float, float]] = {}
+        # Source 2 — tracker KCF brut (colonnes _tracker)
+        #   Même logique : tracker_id → aruco_id
+        tracker_by_aruco: Dict[int, Tuple[float, float]] = {}
+        # Source 3 — ArUco cam_bottom brut (colonnes _bottom)
+        #   Directement depuis identity_manager._last_aruco
+        bottom_by_aruco: Dict[int, Tuple[float, float]] = \
+            identity_manager.get_raw_aruco_positions()
+
+        for cup in cups:
+            ident = identity_manager.get_identity(cup.cup_id)
+            if ident is None:
+                continue
+            aruco_id = ident.aruco_id
+            if cup.pos_mm is not None:
+                camtop_by_aruco[aruco_id] = cup.pos_mm
+            if cup.pos_mm_raw is not None:
+                tracker_by_aruco[aruco_id] = cup.pos_mm_raw
+
         # ── Projecteur : fond blanc + cercles ────────────────────────────────
         proj_frame[:] = 255
-        data_out = []
 
         for cup in cups:
             if cup.pos_mm is None: continue
@@ -796,7 +1025,6 @@ def main():
             label = labels.get(cup.cup_id, f"?#{cup.cup_id}")
             ident = identity_manager.get_identity(cup.cup_id)
 
-            # ── Projecteur — toujours affiché ─────────────────────────────
             m = RING_RADIUS + RING_THICKNESS + 30
             if m <= px <= PROJ_W - m and m <= py <= PROJ_H - m:
                 cv2.circle(proj_frame, (px, py),
@@ -810,16 +1038,19 @@ def main():
                             cv2.FONT_HERSHEY_SIMPLEX, 2.5, color, 5,
                             cv2.LINE_AA)
 
-            # ── CSV — uniquement si identité ArUco confirmée ───────────────
-            if ident is not None:
-                data_out.append((ident.aruco_id, x_mm, y_mm))
-
         dm.display_image_on_projector_monitor(proj_frame)
 
-        # ── CSV ───────────────────────────────────────────────────────────────
-        csv_writer.push(data_out)
+        # ── CSV principal — 1 ligne/frame, indexé par aruco_id ───────────────
+        csv_writer.push(camtop_by_aruco, tracker_by_aruco, bottom_by_aruco)
 
-        # ── Fenêtre grille PC — points rouges ─────────────────────────────────
+        # ── CSV trackers brut — 1 ligne/tracker/frame, zéro perte ────────────
+        tracker_raw_writer.push(
+            frame_index=csv_writer._frame_index,   # même compteur de frame
+            cups=cups,
+            identity_manager=identity_manager,
+        )
+
+        # ── Fenêtre grille PC ─────────────────────────────────────────────────
         grid_vis = _draw_grid_frame(grid_bg, cups, labels, identity_manager)
         cv2.imshow("Napping Grille", grid_vis)
         del grid_vis
@@ -889,13 +1120,27 @@ def main():
     cap.release()
     video_writer.stop()
     csv_writer.close()
+    tracker_raw_writer.close()
+
+    # Export JSON associations
+    _write_associations_json(
+        json_path        = json_path,
+        identity_manager = identity_manager,
+        participant_id   = participant_id,
+        protocol_name    = protocol_name,
+        session_start    = session_start,
+        total_frames     = frame_count,
+    )
+
     cv2.destroyAllWindows()
     proj_frame[:] = 0
     dm.display_image_on_projector_monitor(proj_frame)
     cv2.waitKey(1)
-    print(f"[Main] Terminé — {frame_count} frames")
-    print(f"  CSV   : {csv_path}")
-    print(f"  Vidéo : {video_path}")
+    print(f"\n[Main] Terminé — {frame_count} frames")
+    print(f"  CSV principal  : {csv_path}")
+    print(f"  CSV trackers   : {trackers_raw_path}")
+    print(f"  Associations   : {json_path}")
+    print(f"  Vidéo          : {video_path}")
 
 
 if __name__ == "__main__":
