@@ -972,6 +972,12 @@ def main():
         manager._use_3d = use_3d_correction
 
         cups = manager.update_tracking(frame_small)
+        # if frame_count % 300 == 0 and len(manager._cups) > 0:
+        #     t0 = time.monotonic()
+        #     for cup in manager._cups.values():
+        #         cup.update_kcf(frame_small)
+        #     kcf_ms = (time.monotonic() - t0) * 1000
+        #     print(f"[BENCH] {len(manager._cups)} trackers KCF : {kcf_ms:.1f}ms  ({kcf_ms/len(manager._cups):.1f}ms/tracker)")
 
         now = time.monotonic()
         if now - last_det_t >= DETECT_INTERVAL_S:
