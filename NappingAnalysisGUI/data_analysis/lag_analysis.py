@@ -31,9 +31,9 @@ from collections import defaultdict
 # ── Paramètres ────────────────────────────────────────────────────────────────
 
 # Seuils de vitesse (mm/frame) pour classifier les phases
-SPEED_STATIC   = 2.0    # en dessous → tasse immobile
-SPEED_SLOW     = 5.0    # entre static et slow → mouvement lent
-SPEED_FAST     = 10.0   # au-dessus → mouvement rapide
+SPEED_STATIC = 0.5    # bruit KCF pur soit 0.5 mm/f 1.2 cm/s
+SPEED_SLOW   = 2.0    # micro-mouvement / vibration soit 5cm/s
+SPEED_FAST   = 7.0    # déplacement intentionnel soit 17.5cm/s
 
 # IDs ArUco à analyser (détectés automatiquement si None)
 ARUCO_IDS = None
