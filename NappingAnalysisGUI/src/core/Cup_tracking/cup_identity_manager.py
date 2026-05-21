@@ -36,6 +36,7 @@ Ajout :
   PURGE_EVERY_FRAMES frames pour éviter l'accumulation sur longue session.
 """
 
+from datetime import datetime
 import threading
 import time
 from dataclasses import dataclass, field
@@ -163,8 +164,10 @@ class CupIdentityManager:
         self._identities:       Dict[int, CupIdentity]        = {}
         self._tracker_to_aruco: Dict[int, int]                = {}
         self._last_aruco:       Dict[int, Tuple[float, float]] = {}
+        self._last_aruco_ts: Dict[int, datetime] = {} 
         self._last_trackers:    Dict[int, Tuple[float, float]] = {}
         self._frame_count = 0
+        
 
         # Historique des associations pour export JSON
         self._association_log: List[AssociationEvent] = []
@@ -173,10 +176,26 @@ class CupIdentityManager:
     #  Interface publique — mise à jour
     # ──────────────────────────────────────────────────────────────────────────
 
-    def update_aruco(self, aruco_positions: Dict[int, Tuple[float, float]]) -> None:
-        with self._lock:
-            self._last_aruco = dict(aruco_positions)
-            self._process_aruco_frame(aruco_positions)
+    def update_aruco(self, aruco_positions: Dict[int, Tuple]) -> None:
+       """
+       aruco_positions peut contenir :
+         {id: (x, y)}          ← ancien format (compatibilité)
+         {id: (x, y, ts)}      ← nouveau format avec timestamp
+       """
+       with self._lock:
+           # Séparer positions et timestamps
+           pos_only = {}
+           ts_only  = {}
+           for mid, val in aruco_positions.items():
+               if len(val) == 3:
+                   pos_only[mid] = (val[0], val[1])
+                   ts_only[mid]  = val[2]           # datetime object
+               else:
+                   pos_only[mid] = (val[0], val[1])
+
+           self._last_aruco    = pos_only
+           self._last_aruco_ts = ts_only            # ← NOUVEAU dict
+           self._process_aruco_frame(pos_only)
 
     def update_trackers(
         self,
@@ -307,6 +326,15 @@ class CupIdentityManager:
                     if ev.tracker_id not in lst:
                         lst.append(ev.tracker_id)
             return history
+    
+    def get_raw_aruco_timestamps(self) -> Dict[int, datetime]:
+       """
+       Retourne les timestamps de capture cam_bottom pour chaque tag détecté.
+       Utilisé pour calculer le décalage temporel exact top vs bottom dans le CSV.
+       Thread-safe.
+       """
+       with self._lock:
+           return dict(self._last_aruco_ts)
 
     # ──────────────────────────────────────────────────────────────────────────
     #  Reset et purge
@@ -317,6 +345,7 @@ class CupIdentityManager:
             self._identities.clear()
             self._tracker_to_aruco.clear()
             self._last_aruco.clear()
+            self._last_aruco_ts.clear() 
             self._last_trackers.clear()
             self._frame_count = 0
             # On ne vide PAS _association_log pour garder l'historique complet

@@ -704,6 +704,8 @@ class CsvWriter:
                 f'ID_{cid}_x_raw',       f'ID_{cid}_y_raw',        # anciennement _tracker
                 f'ID_{cid}_x_filtered',  f'ID_{cid}_y_filtered',   # NOUVEAU Kalman
                 f'ID_{cid}_x_bottom',    f'ID_{cid}_y_bottom',     # inchangé
+                f'ID_{cid}_ts_bottom',                           # ← AJOUT
+                f'ID_{cid}_delay_ms',  
             ]
 
         self._file   = open(output_path, 'w', newline='', encoding='utf-8')
@@ -724,9 +726,11 @@ class CsvWriter:
         raw_by_aruco:      Dict[int, Tuple[float, float]],  # pos_mm_raw (brut)
         filtered_by_aruco: Dict[int, Tuple[float, float]],  # pos_mm_kalman (Kalman)
         bottom_by_aruco:   Dict[int, Tuple[float, float]],  # ArUco cam_bottom
+        bottom_ts_by_aruco: Dict[int, 'datetime'] = None,
     ) -> None:
         from datetime import datetime
         self._frame_index += 1
+        now = datetime.now() 
         row: dict = {
             'frame':     self._frame_index,
             'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3],
@@ -747,6 +751,14 @@ class CsvWriter:
         for aruco_id, (x, y) in bottom_by_aruco.items():
             row[f'ID_{aruco_id}_x_bottom'] = round(float(x), 2)
             row[f'ID_{aruco_id}_y_bottom'] = round(float(y), 2)
+        
+        # Timestamps cam_bottom + calcul du décalage              ← AJOUT BLOC
+        if bottom_ts_by_aruco:
+            for aruco_id, ts_bot in bottom_ts_by_aruco.items():
+                row[f'ID_{aruco_id}_ts_bottom'] = \
+                    ts_bot.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+                delay_ms = (now - ts_bot).total_seconds() * 1000
+                row[f'ID_{aruco_id}_delay_ms'] = round(delay_ms, 1)
 
         self._buffer.append(row)
         if len(self._buffer) >= 50:   # flush toutes les 50 frames (~2s) au lieu de 200
@@ -1112,6 +1124,8 @@ def main():
         filtered_by_aruco: Dict[int, Tuple[float, float]] = {}   # Kalman → _filtered
         bottom_by_aruco:   Dict[int, Tuple[float, float]] = \
             identity_manager.get_raw_aruco_positions()
+        bottom_ts_by_aruco: Dict[int, 'datetime'] = \
+           identity_manager.get_raw_aruco_timestamps()  
 
         for cup in cups:
             ident = identity_manager.get_identity(cup.cup_id)
@@ -1157,7 +1171,7 @@ def main():
         dm.display_image_on_projector_monitor(proj_frame)
 
         # ── CSV principal — 1 ligne/frame, indexé par aruco_id ───────────────
-        csv_writer.push(ema_by_aruco, raw_by_aruco, filtered_by_aruco, bottom_by_aruco)
+        csv_writer.push(ema_by_aruco, raw_by_aruco, filtered_by_aruco, bottom_by_aruco, bottom_ts_by_aruco)
 
         # ── CSV trackers brut — 1 ligne/tracker/frame, zéro perte ────────────
         tracker_raw_writer.push(
