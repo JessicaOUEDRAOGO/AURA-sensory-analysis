@@ -46,6 +46,7 @@ logs/
 # =========================
 NappingAnalysisGUI/data/*.csv
 NappingAnalysisGUI/data/
+NappingAnalysisGUI/data_analysis/*.csv
 
 
 # Calibration locale (machine dépendante)
