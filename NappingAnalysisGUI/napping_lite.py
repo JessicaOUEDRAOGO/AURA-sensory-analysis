@@ -147,6 +147,100 @@ class EMAFilter:
 
     def reset(self): self._val = None
 
+class KalmanFilter2D:
+    """
+    Filtre de Kalman 2D à modèle cinématique vitesse constante.
+    Utilisé UNIQUEMENT pour l'export CSV — la projection reste sur EMA.
+
+    État interne : [x, vx, y, vy]
+    Mesure       : [x, y]
+
+    Paramètres (calibrés sur tes données) :
+      process_noise = 2.0  — confiance dans le modèle cinématique
+      measure_noise = 8.0  — confiance dans la mesure KCF brute
+      max_jump_mm   = 200  — même garde-fou que EMAFilter
+
+    Interface identique à EMAFilter :
+      update(x, y) → (xf, yf)
+      reset()
+    """
+
+    def __init__(
+        self,
+        process_noise: float = 2.0,
+        measure_noise: float = 8.0,
+        max_jump_mm:   float = 200.0,
+    ):
+        self._pn = process_noise
+        self._mn = measure_noise
+        self._mj = max_jump_mm
+
+        # Modèle cinématique vitesse constante, dt = 1 frame
+        self._F = np.array([
+            [1, 1, 0, 0],
+            [0, 1, 0, 0],
+            [0, 0, 1, 1],
+            [0, 0, 0, 1],
+        ], dtype=np.float64)
+
+        # On observe uniquement la position, pas la vitesse
+        self._H = np.array([
+            [1, 0, 0, 0],
+            [0, 0, 1, 0],
+        ], dtype=np.float64)
+
+        self._Q = self._pn * np.eye(4, dtype=np.float64)
+        self._R = self._mn * np.eye(2, dtype=np.float64)
+
+        self._x: Optional[np.ndarray] = None
+        self._P: Optional[np.ndarray] = None
+
+    def update(self, x: float, y: float) -> Tuple[float, float]:
+        if self._x is None:
+            self._x = np.array([x, 0.0, y, 0.0], dtype=np.float64)
+            self._P = np.eye(4, dtype=np.float64) * 100.0
+            return float(x), float(y)
+
+        # Garde-fou : saut impossible → réinitialisation
+        dx = x - float(self._x[0])
+        dy = y - float(self._x[2])
+        if (dx * dx + dy * dy) ** 0.5 > self._mj:
+            self._x = np.array([x, 0.0, y, 0.0], dtype=np.float64)
+            self._P = np.eye(4, dtype=np.float64) * 100.0
+            return float(x), float(y)
+
+        # Predict
+        x_pred = self._F @ self._x
+        P_pred = self._F @ self._P @ self._F.T + self._Q
+
+        # Update
+        z     = np.array([x, y], dtype=np.float64)
+        y_res = z - self._H @ x_pred
+        S     = self._H @ P_pred @ self._H.T + self._R
+        K     = P_pred @ self._H.T @ np.linalg.inv(S)
+        self._x = x_pred + K @ y_res
+        self._P = (np.eye(4) - K @ self._H) @ P_pred
+
+        return float(self._x[0]), float(self._x[2])
+
+    def reset(self) -> None:
+        self._x = None
+        self._P = None
+
+    @property
+    def velocity(self) -> Optional[Tuple[float, float]]:
+        """Vitesse estimée (vx, vy) en mm/frame. None si non initialisé."""
+        if self._x is None:
+            return None
+        return float(self._x[1]), float(self._x[3])
+
+    @property
+    def speed_mm_per_frame(self) -> float:
+        v = self.velocity
+        return 0.0 if v is None else (v[0] ** 2 + v[1] ** 2) ** 0.5
+
+
+
 
 def _cup_base_correction(cx, cy, rvec, tvec, K):
     K_inv = np.linalg.inv(K)
@@ -265,10 +359,12 @@ def _proc_to_mm(cx_p, cy_p, converter, use_3d):
 class TrackedCup:
     cup_id:      int
     ema:         EMAFilter
+    kalman_csv:     KalmanFilter2D 
     cv_tracker:  object
     bbox:        tuple
     pos_mm:      Optional[Tuple[float, float]] = None   # EMA-lissée → colonnes _camtop
     pos_mm_raw:  Optional[Tuple[float, float]] = None   # brute      → colonnes _tracker
+    pos_mm_kalman:  Optional[Tuple[float, float]] = None  # Kalman-filtrée → colonnes _kalman
     lost_frames: int  = 0
     active:      bool = True
 
@@ -309,6 +405,8 @@ class TrackedCup:
             self.pos_mm_raw = mm                      # ← brute
             xs, ys = self.ema.update(*mm)
             self.pos_mm = (xs, ys)                    # ← EMA-lissée
+            xk, yk = self.kalman_csv.update(*mm)
+            self.pos_mm_kalman = (xk, yk)           # ← Kalman-filtrée pour CSV
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -443,7 +541,8 @@ class TrackingManager:
         except Exception as e:
             print(f"[Manager] init KCF: {e}"); return
         cid = self._next_id; self._next_id += 1
-        cup = TrackedCup(cup_id=cid, ema=EMAFilter(), cv_tracker=t, bbox=(x,y,w,h))
+        cup = TrackedCup(cup_id=cid, ema=EMAFilter(), kalman_csv=KalmanFilter2D(),
+                        cv_tracker=t, bbox=(x,y,w,h))
         cup.update_mm(self._conv, self._use_3d)
         self._cups[cid] = cup
         print(f"[Manager] Nouveau cup#{cid}  bbox=({x},{y},{w},{h})")
@@ -574,29 +673,37 @@ def _draw_grid_frame(
 
 class CsvWriter:
     """
-    Écrit le CSV enrichi avec 3 sources de coordonnées par tasse.
+    Version patchée de CsvWriter avec 4 sources de coordonnées par tasse.
 
-    Colonnes :
-        frame, timestamp,
-        ID_{id}_x_camtop, ID_{id}_y_camtop,     ← EMA-lissée via cam_top
-        ID_{id}_x_tracker, ID_{id}_y_tracker,    ← brute KCF (avant EMA)
-        ID_{id}_x_bottom, ID_{id}_y_bottom       ← brute ArUco cam_bottom
+    Colonnes par tasse (ordre inchangé sauf ajout _filtered) :
+        ID_{id}_x_ema,      ID_{id}_y_ema       ← EMA lissée (comme x_camtop avant)
+        ID_{id}_x_raw,      ID_{id}_y_raw       ← brut KCF   (comme x_tracker avant)
+        ID_{id}_x_filtered, ID_{id}_y_filtered  ← Kalman     ← NOUVEAU
+        ID_{id}_x_bottom,   ID_{id}_y_bottom    ← ArUco cam_bottom (inchangé)
 
-    Toutes les tasses listées dans cup_ids sont présentes dès la première
-    ligne — cellule vide si la source n'a pas de donnée ce frame.
-    Flush tous les CSV_FLUSH_EVERY frames.
+    Le renommage camtop→ema et tracker→raw est purement documentaire :
+    les valeurs sont strictement identiques à la session précédente.
     """
 
+    import csv as _csv
+    from datetime import datetime as _dt
+
     def __init__(self, output_path: str, cup_ids: list):
+        import csv
+        from datetime import datetime
+
+        self._csv    = csv
+        self._dt     = datetime
         self._frame_index = 0
         self._buffer: list = []
 
         self._fieldnames = ['frame', 'timestamp']
         for cid in cup_ids:
             self._fieldnames += [
-                f'ID_{cid}_x_camtop',  f'ID_{cid}_y_camtop',
-                f'ID_{cid}_x_tracker', f'ID_{cid}_y_tracker',
-                f'ID_{cid}_x_bottom',  f'ID_{cid}_y_bottom',
+                f'ID_{cid}_x_ema',       f'ID_{cid}_y_ema',        # anciennement _camtop
+                f'ID_{cid}_x_raw',       f'ID_{cid}_y_raw',        # anciennement _tracker
+                f'ID_{cid}_x_filtered',  f'ID_{cid}_y_filtered',   # NOUVEAU Kalman
+                f'ID_{cid}_x_bottom',    f'ID_{cid}_y_bottom',     # inchangé
             ]
 
         self._file   = open(output_path, 'w', newline='', encoding='utf-8')
@@ -608,43 +715,41 @@ class CsvWriter:
         )
         self._writer.writeheader()
         self._file.flush()
-        print(f"[CSV] créé — {len(cup_ids)} tasse(s) × 3 sources")
+        print(f"[CSV] créé — {len(cup_ids)} tasse(s) × 4 sources")
         print(f"[CSV] colonnes : {self._fieldnames}")
 
     def push(
         self,
-        camtop_by_aruco:  Dict[int, Tuple[float, float]],
-        tracker_by_aruco: Dict[int, Tuple[float, float]],
-        bottom_by_aruco:  Dict[int, Tuple[float, float]],
+        ema_by_aruco:      Dict[int, Tuple[float, float]],  # pos_mm (EMA)
+        raw_by_aruco:      Dict[int, Tuple[float, float]],  # pos_mm_raw (brut)
+        filtered_by_aruco: Dict[int, Tuple[float, float]],  # pos_mm_kalman (Kalman)
+        bottom_by_aruco:   Dict[int, Tuple[float, float]],  # ArUco cam_bottom
     ) -> None:
-        """
-        Ajoute une ligne au buffer.
-
-        Paramètres (tous indexés par aruco_id) :
-          camtop_by_aruco  — pos_mm EMA-lissée  (colonnes _camtop)
-          tracker_by_aruco — pos_mm_raw brute   (colonnes _tracker)
-          bottom_by_aruco  — positions ArUco cam_bottom (colonnes _bottom)
-        """
+        from datetime import datetime
         self._frame_index += 1
         row: dict = {
             'frame':     self._frame_index,
             'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3],
         }
 
-        for aruco_id, (x, y) in camtop_by_aruco.items():
-            row[f'ID_{aruco_id}_x_camtop'] = round(float(x), 2)
-            row[f'ID_{aruco_id}_y_camtop'] = round(float(y), 2)
+        for aruco_id, (x, y) in ema_by_aruco.items():
+            row[f'ID_{aruco_id}_x_ema'] = round(float(x), 2)
+            row[f'ID_{aruco_id}_y_ema'] = round(float(y), 2)
 
-        for aruco_id, (x, y) in tracker_by_aruco.items():
-            row[f'ID_{aruco_id}_x_tracker'] = round(float(x), 2)
-            row[f'ID_{aruco_id}_y_tracker'] = round(float(y), 2)
+        for aruco_id, (x, y) in raw_by_aruco.items():
+            row[f'ID_{aruco_id}_x_raw'] = round(float(x), 2)
+            row[f'ID_{aruco_id}_y_raw'] = round(float(y), 2)
+
+        for aruco_id, (x, y) in filtered_by_aruco.items():
+            row[f'ID_{aruco_id}_x_filtered'] = round(float(x), 2)
+            row[f'ID_{aruco_id}_y_filtered'] = round(float(y), 2)
 
         for aruco_id, (x, y) in bottom_by_aruco.items():
             row[f'ID_{aruco_id}_x_bottom'] = round(float(x), 2)
             row[f'ID_{aruco_id}_y_bottom'] = round(float(y), 2)
 
         self._buffer.append(row)
-        if len(self._buffer) >= CSV_FLUSH_EVERY:
+        if len(self._buffer) >= 50:   # flush toutes les 50 frames (~2s) au lieu de 200
             self.flush()
 
     def flush(self):
@@ -653,7 +758,6 @@ class CsvWriter:
         self._writer.writerows(self._buffer)
         self._file.flush()
         self._buffer.clear()
-        print(f"[CSV] flush → {self._frame_index} frames")
 
     def close(self):
         self.flush()
@@ -972,13 +1076,23 @@ def main():
         manager._use_3d = use_3d_correction
 
         cups = manager.update_tracking(frame_small)
+        
         # if frame_count % 300 == 0 and len(manager._cups) > 0:
-        #     t0 = time.monotonic()
-        #     for cup in manager._cups.values():
-        #         cup.update_kcf(frame_small)
-        #     kcf_ms = (time.monotonic() - t0) * 1000
-        #     print(f"[BENCH] {len(manager._cups)} trackers KCF : {kcf_ms:.1f}ms  ({kcf_ms/len(manager._cups):.1f}ms/tracker)")
+        # Cette condition est vraie toutes les 300 frames, soit environ toutes les 12 secondes à 25 FPS.
+        # On vérifie qu’il y a au moins une tasse suivie avant de lancer la mise à jour.
+        
+            # t0 = time.monotonic()
+        #On enregistre le temps de départ pour mesurer la durée dexécution du bloc.
 
+            # for cup in manager._cups.values():
+            #     cup.update_kcf(frame_small)
+        #Pour chaque tasse, on appelle la méthode update_kcf() qui met à jour le tracker KCF avec la nouvelle image (frame_small).
+
+            # kcf_ms = (time.monotonic() - t0) * 1000
+        # On calcule le temps total d’exécution en millisecondes
+            # print(f"[BENCH] {len(manager._cups)} trackers KCF : {kcf_ms:.1f}ms  ({kcf_ms/len(manager._cups):.1f}ms/tracker)")
+
+        #Depuis la dernière détection, si plus de DETECT_INTERVAL_S secondes se sont écoulées, on lance une nouvelle détection sur l’image réduite (frame_small) et on met à jour le manager avec les nouvelles détections. On récupère ensuite la liste des tasses suivies (cups) et on met à jour le temps de la dernière détection (last_det_t).
         now = time.monotonic()
         if now - last_det_t >= DETECT_INTERVAL_S:
             det_bboxes, _ = detector.detect(frame_small)
@@ -992,17 +1106,11 @@ def main():
 
         labels = identity_manager.get_labels()
 
-        # ── Collecte des 3 sources de positions pour le CSV ───────────────────
-        #
-        # Source 1 — cam_top EMA-lissée (colonnes _camtop)
-        #   Indexée par aruco_id via identity_manager (seulement les cups matchées)
-        camtop_by_aruco: Dict[int, Tuple[float, float]] = {}
-        # Source 2 — tracker KCF brut (colonnes _tracker)
-        #   Même logique : tracker_id → aruco_id
-        tracker_by_aruco: Dict[int, Tuple[float, float]] = {}
-        # Source 3 — ArUco cam_bottom brut (colonnes _bottom)
-        #   Directement depuis identity_manager._last_aruco
-        bottom_by_aruco: Dict[int, Tuple[float, float]] = \
+        # ── Collecte des 4 sources de positions pour le CSV ──────────────────────────
+        ema_by_aruco:      Dict[int, Tuple[float, float]] = {}   # EMA → _ema
+        raw_by_aruco:      Dict[int, Tuple[float, float]] = {}   # brut → _raw
+        filtered_by_aruco: Dict[int, Tuple[float, float]] = {}   # Kalman → _filtered
+        bottom_by_aruco:   Dict[int, Tuple[float, float]] = \
             identity_manager.get_raw_aruco_positions()
 
         for cup in cups:
@@ -1011,9 +1119,11 @@ def main():
                 continue
             aruco_id = ident.aruco_id
             if cup.pos_mm is not None:
-                camtop_by_aruco[aruco_id] = cup.pos_mm
+                ema_by_aruco[aruco_id] = cup.pos_mm             # EMA inchangée
             if cup.pos_mm_raw is not None:
-                tracker_by_aruco[aruco_id] = cup.pos_mm_raw
+                raw_by_aruco[aruco_id] = cup.pos_mm_raw         # brut inchangé
+            if cup.pos_mm_kalman is not None:                   # NOUVEAU
+                filtered_by_aruco[aruco_id] = cup.pos_mm_kalman
 
         # ── Projecteur : fond blanc + cercles ────────────────────────────────
         proj_frame[:] = 255
@@ -1047,7 +1157,7 @@ def main():
         dm.display_image_on_projector_monitor(proj_frame)
 
         # ── CSV principal — 1 ligne/frame, indexé par aruco_id ───────────────
-        csv_writer.push(camtop_by_aruco, tracker_by_aruco, bottom_by_aruco)
+        csv_writer.push(ema_by_aruco, raw_by_aruco, filtered_by_aruco, bottom_by_aruco)
 
         # ── CSV trackers brut — 1 ligne/tracker/frame, zéro perte ────────────
         tracker_raw_writer.push(
@@ -1110,6 +1220,8 @@ def main():
             det_bboxes, _ = detector.detect(frame_small)
             manager.force_reset(frame_small, det_bboxes)
             identity_manager.reset()
+            for cup in manager._cups.values():
+                cup.kalman_csv.reset()
             print(f"Reset — seuil={detector.v_threshold}")
         elif key == ord('c'):
             use_3d_correction = not use_3d_correction
