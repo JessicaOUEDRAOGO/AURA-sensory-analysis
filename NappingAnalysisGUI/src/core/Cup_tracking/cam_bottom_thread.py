@@ -19,7 +19,6 @@ import json
 import numpy as np
 import threading
 import time
-from datetime import datetime
 from typing import Dict, Optional, Set, Tuple
 
 from PyQt6.QtCore import QThread, pyqtSignal
@@ -102,16 +101,16 @@ class CamBottomThread(QThread):
 
             # Publier dans le dict partagé
             with self._pos_lock:
-                self.aruco_positions = {mid: (d['x'], d['y'])        # ← MODIFIÉ
-                                        for mid, d in detected.items()}
+                self.aruco_positions = {mid: tuple(pos)
+                                        for mid, pos in detected.items()}
 
+            # Notifier le gestionnaire d'identités
             if self.identity_manager is not None:
-                self.identity_manager.update_aruco(                   # ← MODIFIÉ
-                    {mid: (d['x'], d['y'], d['ts']) for mid, d in detected.items()})
+                self.identity_manager.update_aruco(
+                    {mid: tuple(pos) for mid, pos in detected.items()})
 
             if detected:
-                self.markers_signal.emit(                             # ← MODIFIÉ
-                    {mid: [d['x'], d['y']] for mid, d in detected.items()})
+                self.markers_signal.emit(detected)
 
             # FPS
             self._fps_count += 1
@@ -135,9 +134,6 @@ class CamBottomThread(QThread):
         self.running = False
 
     def _process_frame(self, frame: np.ndarray) -> dict:
-        # Horodatage le plus tôt possible — avant tout traitement
-        capture_ts = datetime.now()                              # ← AJOUT
-
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         corners, ids, _ = self._detector.detectMarkers(gray)
 
@@ -145,8 +141,8 @@ class CamBottomThread(QThread):
             return {}
 
         valid = [i for i in range(len(ids))
-                    if int(ids[i][0]) not in self.calibration_tag_ids
-                    and (not self.valid_cup_ids or int(ids[i][0]) in self.valid_cup_ids)]
+                 if int(ids[i][0]) not in self.calibration_tag_ids
+                 and (not self.valid_cup_ids or int(ids[i][0]) in self.valid_cup_ids)]
         if not valid:
             return {}
 
@@ -158,11 +154,7 @@ class CamBottomThread(QThread):
             cy  = float(np.mean(pts[:, 1]))
             mm  = self._pixel_to_table(cx, cy)
             if mm is not None:
-                detected[marker_id] = {       # ← MODIFIÉ : dict au lieu de list
-                    'x':  float(mm[0]),
-                    'y':  float(mm[1]),
-                    'ts': capture_ts,         # ← AJOUT : timestamp de capture
-                }
+                detected[marker_id] = list(mm)
 
         return detected
 
