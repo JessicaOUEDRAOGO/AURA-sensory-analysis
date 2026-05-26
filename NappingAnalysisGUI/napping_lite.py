@@ -105,6 +105,7 @@ MAX_LOST_FRAMES   = 15
 MATCH_MIN_SCORE   = 0.01
 MAX_DRIFT_RATIO   = 0.6
 STABILITY_FRAMES  = 8
+MAX_DRIFT_PX = 25
 
 # EMA
 EMA_ALPHA       = 0.35
@@ -295,7 +296,8 @@ def _drift_ok(prev, new):
     x, y, w, h = prev
     diag = max(np.sqrt(w**2+h**2), 1.0)
     cx1,cy1 = _center(prev); cx2,cy2 = _center(new)
-    return np.sqrt((cx1-cx2)**2+(cy1-cy2)**2) < MAX_DRIFT_RATIO * diag
+    dist = np.sqrt((cx1-cx2)**2+(cy1-cy2)**2)
+    return dist < MAX_DRIFT_RATIO * diag and dist < MAX_DRIFT_PX
 
 
 def _identity_color(state: Optional[CupState]) -> tuple:
@@ -507,7 +509,7 @@ class TrackingManager:
                 if S[i, j] < MATCH_MIN_SCORE: break
                 cup = cups[i]; det = detected[j]
                 cx1,cy1 = _center(cup.bbox); cx2,cy2 = _center(det)
-                if np.sqrt((cx1-cx2)**2+(cy1-cy2)**2) < 15:
+                if np.sqrt((cx1-cx2)**2+(cy1-cy2)**2) <  MAX_DRIFT_PX:
                     cup.reinit_kcf(frame, det)
                     cup.update_mm(self._conv, self._use_3d)
                     cup.lost_frames = 0
