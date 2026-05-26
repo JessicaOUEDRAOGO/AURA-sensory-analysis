@@ -110,6 +110,7 @@ MAX_DRIFT_PX = 25
 # EMA
 EMA_ALPHA       = 0.35
 EMA_MAX_JUMP_MM = 200.0
+OFFSET_ALPHA = 0.15
 
 # CSV
 CSV_FLUSH_EVERY = 200
@@ -369,6 +370,12 @@ class TrackedCup:
     pos_mm_kalman:  Optional[Tuple[float, float]] = None  # Kalman-filtrée → colonnes _kalman
     lost_frames: int  = 0
     active:      bool = True
+
+    #— offset de correction cam_top → cam_bottom
+    proj_offset: Tuple[float, float] = (0.0, 0.0)
+    _offset_ema_x: float = 0.0   # EMA interne sur l'offset x
+    _offset_ema_y: float = 0.0   # EMA interne sur l'offset y
+    _offset_init:  bool  = False
 
     def update_kcf(self, frame):
         if not self.active: return False
@@ -1131,48 +1138,71 @@ def main():
         bottom_by_aruco:   Dict[int, Tuple[float, float]] = \
             identity_manager.get_raw_aruco_positions()
 
+        # ── Collecte positions + calcul offset cam_top → cam_bottom ──────────────
+        
+
         for cup in cups:
             ident = identity_manager.get_identity(cup.cup_id)
             if ident is None:
                 continue
             aruco_id = ident.aruco_id
             if cup.pos_mm is not None:
-                ema_by_aruco[aruco_id] = cup.pos_mm             # EMA inchangée
+                ema_by_aruco[aruco_id] = cup.pos_mm
             if cup.pos_mm_raw is not None:
-                raw_by_aruco[aruco_id] = cup.pos_mm_raw         # brut inchangé
-            if cup.pos_mm_kalman is not None:                   # NOUVEAU
+                raw_by_aruco[aruco_id] = cup.pos_mm_raw
+            if cup.pos_mm_kalman is not None:
                 filtered_by_aruco[aruco_id] = cup.pos_mm_kalman
 
-        # ── Projecteur : fond blanc + cercles ────────────────────────────────
-        proj_frame[:] = 255
+            # Mise à jour offset si cam_bottom a une donnée pour cette tasse ce frame
+            if cup.pos_mm is not None and aruco_id in bottom_by_aruco:
+                bx, by = bottom_by_aruco[aruco_id]
+                tx, ty = cup.pos_mm
+                dx, dy = bx - tx, by - ty
 
-        for cup in cups:
-            if cup.pos_mm is None: continue
-            x_mm, y_mm = cup.pos_mm
-            pt  = np.array([[[x_mm, y_mm]]], dtype=np.float32)
-            pxy = cv2.perspectiveTransform(pt, H_proj)
-            px  = int(pxy[0, 0, 0])
-            py  = int(pxy[0, 0, 1])
+                if not cup._offset_init:
+                    cup._offset_ema_x = dx
+                    cup._offset_ema_y = dy
+                    cup._offset_init  = True
+                else:
+                    cup._offset_ema_x = OFFSET_ALPHA * dx + (1 - OFFSET_ALPHA) * cup._offset_ema_x
+                    cup._offset_ema_y = OFFSET_ALPHA * dy + (1 - OFFSET_ALPHA) * cup._offset_ema_y
 
-            state = identity_manager.get_state(cup.cup_id)
-            color = _identity_color(state)
-            label = labels.get(cup.cup_id, f"?#{cup.cup_id}")
-            ident = identity_manager.get_identity(cup.cup_id)
+                cup.proj_offset = (cup._offset_ema_x, cup._offset_ema_y)
 
-            m = RING_RADIUS + RING_THICKNESS + 30
-            if m <= px <= PROJ_W - m and m <= py <= PROJ_H - m:
-                cv2.circle(proj_frame, (px, py),
-                        RING_RADIUS, color, RING_THICKNESS,
-                        lineType=cv2.LINE_AA)
-                txt_size, _ = cv2.getTextSize(
-                    label, cv2.FONT_HERSHEY_SIMPLEX, 2.5, 5)
-                tx = px - txt_size[0]//2
-                ty = py + RING_RADIUS + 60
-                cv2.putText(proj_frame, label, (tx, ty),
-                            cv2.FONT_HERSHEY_SIMPLEX, 2.5, color, 5,
-                            cv2.LINE_AA)
+            # ── Projecteur : fond blanc + cercles ────────────────────────────────────
+            proj_frame[:] = 255
 
-        dm.display_image_on_projector_monitor(proj_frame)
+            for cup in cups:
+                if cup.pos_mm is None:
+                    continue
+
+                # Position corrigée pour la projection
+                x_mm = cup.pos_mm[0] + cup.proj_offset[0]
+                y_mm = cup.pos_mm[1] + cup.proj_offset[1]
+
+                pt  = np.array([[[x_mm, y_mm]]], dtype=np.float32)
+                pxy = cv2.perspectiveTransform(pt, H_proj)
+                px  = int(pxy[0, 0, 0])
+                py  = int(pxy[0, 0, 1])
+
+                state = identity_manager.get_state(cup.cup_id)
+                color = _identity_color(state)
+                label = labels.get(cup.cup_id, f"?#{cup.cup_id}")
+
+                m = RING_RADIUS + RING_THICKNESS + 30
+                if m <= px <= PROJ_W - m and m <= py <= PROJ_H - m:
+                    cv2.circle(proj_frame, (px, py),
+                            RING_RADIUS, color, RING_THICKNESS,
+                            lineType=cv2.LINE_AA)
+                    txt_size, _ = cv2.getTextSize(
+                        label, cv2.FONT_HERSHEY_SIMPLEX, 2.5, 5)
+                    tx = px - txt_size[0]//2
+                    ty = py + RING_RADIUS + 60
+                    cv2.putText(proj_frame, label, (tx, ty),
+                                cv2.FONT_HERSHEY_SIMPLEX, 2.5, color, 5,
+                                cv2.LINE_AA)
+
+            dm.display_image_on_projector_monitor(proj_frame)
 
         # ── CSV principal — 1 ligne/frame, indexé par aruco_id ───────────────
         csv_writer.push(ema_by_aruco, raw_by_aruco, filtered_by_aruco, bottom_by_aruco)
