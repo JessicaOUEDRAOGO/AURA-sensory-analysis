@@ -100,10 +100,10 @@ ASPECT_MAX   = 3.5
 MARGIN       = 20
 
 # KCF
-DETECT_INTERVAL_S = 0.15
-MAX_LOST_FRAMES   = 20
+DETECT_INTERVAL_S = 0.10
+MAX_LOST_FRAMES   = 15
 MATCH_MIN_SCORE   = 0.01
-MAX_DRIFT_RATIO   = 0.8
+MAX_DRIFT_RATIO   = 0.6
 STABILITY_FRAMES  = 8
 
 # EMA
@@ -123,7 +123,7 @@ PURGE_EVERY_FRAMES = 300
 PURGE_MAX_AGE_S    = 20.0
 # IDs ArUco des tasses utilisées dans la session
 # À adapter selon le protocole
-ARUCO_CUP_IDS = [6, 8]
+ARUCO_CUP_IDS = [0,1,2,3,4,5,6,7,8]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -384,7 +384,8 @@ class TrackedCup:
         x, y, w, h = bbox
         x=max(0,min(x,fw-1)); y=max(0,min(y,fh-1))
         w=max(4,min(w,fw-x)); h=max(4,min(h,fh-y))
-        t = cv2.TrackerKCF_create()
+        # t = cv2.TrackerKCF_create()
+        t = cv2.legacy.TrackerMOSSE_create()
         try:
             t.init(frame, (x,y,w,h))
             self.cv_tracker=t; self.bbox=(x,y,w,h); self.active=True; return True
@@ -536,7 +537,8 @@ class TrackingManager:
         x,y,w,h = bbox
         x=max(0,min(x,fw-1)); y=max(0,min(y,fh-1))
         w=max(4,min(w,fw-x)); h=max(4,min(h,fh-y))
-        t = cv2.TrackerKCF_create()
+        # t = cv2.TrackerKCF_create()
+        t = cv2.legacy.TrackerMOSSE_create()
         try: t.init(frame, (x,y,w,h))
         except Exception as e:
             print(f"[Manager] init KCF: {e}"); return
@@ -988,6 +990,7 @@ def main():
         camera_manager=cam_bot_manager,
         pose_path=str(config_path("cambottom_table_pose.json")),
         identity_manager=identity_manager,
+        valid_cup_ids=set(ARUCO_CUP_IDS),
         show_preview=False)
     cam_bot.start()
 
@@ -1050,7 +1053,7 @@ def main():
 
     print("\nq=quitter  r=reset  +/-=seuil  c=3D  i=debug\n")
 
-    use_3d_correction = True
+    use_3d_correction = False
     last_det_t        = time.monotonic()
     fps_t0            = time.monotonic()
     fps_count         = 0
@@ -1091,6 +1094,19 @@ def main():
             # kcf_ms = (time.monotonic() - t0) * 1000
         # On calcule le temps total d’exécution en millisecondes
             # print(f"[BENCH] {len(manager._cups)} trackers KCF : {kcf_ms:.1f}ms  ({kcf_ms/len(manager._cups):.1f}ms/tracker)")
+            
+        
+        if frame_count % 300 == 0 and len(manager._cups) > 0:
+            import time as _t
+            N = 10  # répéter 10 fois pour avoir une mesure stable
+            t0 = _t.perf_counter()  # perf_counter > monotonic sur Windows
+            for _ in range(N):
+                for cup in manager._cups.values():
+                    cup.cv_tracker.update(frame_small)
+            elapsed_ms = (_t.perf_counter() - t0) * 1000 / N
+            n = len(manager._cups)
+            print(f"[BENCH] {n} trackers MOSSE : {elapsed_ms:.2f}ms total  "
+                f"({elapsed_ms/n:.2f}ms/tracker)  →  max théorique {1000/elapsed_ms:.0f} FPS")
 
         #Depuis la dernière détection, si plus de DETECT_INTERVAL_S secondes se sont écoulées, on lance une nouvelle détection sur l’image réduite (frame_small) et on met à jour le manager avec les nouvelles détections. On récupère ensuite la liste des tasses suivies (cups) et on met à jour le temps de la dernière détection (last_det_t).
         now = time.monotonic()
