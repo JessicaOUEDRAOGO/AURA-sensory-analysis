@@ -1169,40 +1169,35 @@ def main():
 
                 cup.proj_offset = (cup._offset_ema_x, cup._offset_ema_y)
 
-            # ── Projecteur : fond blanc + cercles ────────────────────────────────────
-            proj_frame[:] = 255
+        # ── Projecteur : fond blanc + cercles ────────────────────────────
+        proj_frame[:] = 255
 
-            for cup in cups:
-                if cup.pos_mm is None:
-                    continue
+        for cup in cups:
+            if cup.pos_mm is None:
+                continue
+            x_mm = cup.pos_mm[0] + cup.proj_offset[0]
+            y_mm = cup.pos_mm[1] + cup.proj_offset[1]
+            pt  = np.array([[[x_mm, y_mm]]], dtype=np.float32)
+            pxy = cv2.perspectiveTransform(pt, H_proj)
+            px  = int(pxy[0, 0, 0])
+            py  = int(pxy[0, 0, 1])
+            state = identity_manager.get_state(cup.cup_id)
+            color = _identity_color(state)
+            label = labels.get(cup.cup_id, f"?#{cup.cup_id}")
+            m = RING_RADIUS + RING_THICKNESS + 30
+            if m <= px <= PROJ_W - m and m <= py <= PROJ_H - m:
+                cv2.circle(proj_frame, (px, py),
+                        RING_RADIUS, color, RING_THICKNESS,
+                        lineType=cv2.LINE_AA)
+                txt_size, _ = cv2.getTextSize(
+                    label, cv2.FONT_HERSHEY_SIMPLEX, 2.5, 5)
+                tx = px - txt_size[0] // 2
+                ty = py + RING_RADIUS + 60
+                cv2.putText(proj_frame, label, (tx, ty),
+                            cv2.FONT_HERSHEY_SIMPLEX, 2.5, color, 5,
+                            cv2.LINE_AA)
 
-                # Position corrigée pour la projection
-                x_mm = cup.pos_mm[0] + cup.proj_offset[0]
-                y_mm = cup.pos_mm[1] + cup.proj_offset[1]
-
-                pt  = np.array([[[x_mm, y_mm]]], dtype=np.float32)
-                pxy = cv2.perspectiveTransform(pt, H_proj)
-                px  = int(pxy[0, 0, 0])
-                py  = int(pxy[0, 0, 1])
-
-                state = identity_manager.get_state(cup.cup_id)
-                color = _identity_color(state)
-                label = labels.get(cup.cup_id, f"?#{cup.cup_id}")
-
-                m = RING_RADIUS + RING_THICKNESS + 30
-                if m <= px <= PROJ_W - m and m <= py <= PROJ_H - m:
-                    cv2.circle(proj_frame, (px, py),
-                            RING_RADIUS, color, RING_THICKNESS,
-                            lineType=cv2.LINE_AA)
-                    txt_size, _ = cv2.getTextSize(
-                        label, cv2.FONT_HERSHEY_SIMPLEX, 2.5, 5)
-                    tx = px - txt_size[0]//2
-                    ty = py + RING_RADIUS + 60
-                    cv2.putText(proj_frame, label, (tx, ty),
-                                cv2.FONT_HERSHEY_SIMPLEX, 2.5, color, 5,
-                                cv2.LINE_AA)
-
-            dm.display_image_on_projector_monitor(proj_frame)
+        dm.display_image_on_projector_monitor(proj_frame)
 
         # ── CSV principal — 1 ligne/frame, indexé par aruco_id ───────────────
         csv_writer.push(ema_by_aruco, raw_by_aruco, filtered_by_aruco, bottom_by_aruco)
