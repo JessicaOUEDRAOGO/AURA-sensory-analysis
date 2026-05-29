@@ -1,7 +1,7 @@
 import cv2
 import os
 
-save_dir = "img_checker_cam_top"
+save_dir = "img_checker"
 os.makedirs(save_dir, exist_ok=True)
 
 index = 0
