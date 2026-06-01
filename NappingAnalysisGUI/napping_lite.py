@@ -99,13 +99,18 @@ ASPECT_MIN   = 0.25
 ASPECT_MAX   = 3.5
 MARGIN       = 20
 
-# KCF
+# MOSSE
 DETECT_INTERVAL_S = 0.10
 MAX_LOST_FRAMES   = 15
 MATCH_MIN_SCORE   = 0.01
 MAX_DRIFT_RATIO   = 0.6
 STABILITY_FRAMES  = 8
 MAX_DRIFT_PX = 25
+
+BBOX_GROW_RATIO   = 1.4   # bbox MOSSE autorisée à grandir de 40% max
+                           # au delà → tracker a perdu sa cible
+ARUCO_DRIFT_MM    = 80.0  # distance max tracker↔ArUco avant de considérer hijacking
+ARUCO_DRIFT_FRAMES = 2    # nombre de frames consécutives de drift avant invalidation
 
 # EMA
 EMA_ALPHA       = 0.35
@@ -360,63 +365,135 @@ def _proc_to_mm(cx_p, cy_p, converter, use_3d):
 
 @dataclass
 class TrackedCup:
-    cup_id:      int
-    ema:         EMAFilter
-    kalman_csv:     KalmanFilter2D 
-    cv_tracker:  object
-    bbox:        tuple
-    pos_mm:      Optional[Tuple[float, float]] = None   # EMA-lissée → colonnes _camtop
-    pos_mm_raw:  Optional[Tuple[float, float]] = None   # brute      → colonnes _tracker
-    pos_mm_kalman:  Optional[Tuple[float, float]] = None  # Kalman-filtrée → colonnes _kalman
-    lost_frames: int  = 0
-    active:      bool = True
+    cup_id:         int
+    ema:            EMAFilter
+    kalman_csv:     KalmanFilter2D
+    cv_tracker:     object
+    bbox:           tuple
+    pos_mm:         Optional[Tuple[float, float]] = None
+    pos_mm_raw:     Optional[Tuple[float, float]] = None
+    pos_mm_kalman:  Optional[Tuple[float, float]] = None
+    lost_frames:    int   = 0
+    active:         bool  = True
 
-    #— offset de correction cam_top → cam_bottom
-    proj_offset: Tuple[float, float] = (0.0, 0.0)
-    _offset_ema_x: float = 0.0   # EMA interne sur l'offset x
-    _offset_ema_y: float = 0.0   # EMA interne sur l'offset y
-    _offset_init:  bool  = False
+    # Offset correction cam_top → cam_bottom (inchangé)
+    proj_offset:    Tuple[float, float] = (0.0, 0.0)
+    _offset_ema_x:  float = 0.0
+    _offset_ema_y:  float = 0.0
+    _offset_init:   bool  = False
 
-    def update_kcf(self, frame):
-        if not self.active: return False
+    # ── NOUVEAU — contrainte taille bbox ─────────────────────────────────────
+    # Enregistrée à l'init, comparée à chaque update MOSSE.
+    # Si MOSSE retourne une bbox > BBOX_GROW_RATIO × ref → tracker invalidé.
+    bbox_ref_w:     int   = 0
+    bbox_ref_h:     int   = 0
+
+    # ── NOUVEAU — compteur de drift ArUco ────────────────────────────────────
+    # Incrémenté chaque frame où pos_mm s'éloigne de ArUco de plus de ARUCO_DRIFT_MM.
+    # Remis à 0 dès que l'écart repasse sous le seuil ou que ArUco n'est pas visible.
+    # Quand il atteint ARUCO_DRIFT_FRAMES → tracker invalidé.
+    aruco_drift_count: int = 0
+
+    def update_kcf(self, frame: np.ndarray) -> bool:
+        if not self.active:
+            return False
+
         ok, raw = self.cv_tracker.update(frame)
-        if ok:
-            rx, ry, rw, rh = raw
-            nb = (int(rx), int(ry), max(4, int(rw)), max(4, int(rh)))
-            if _drift_ok(self.bbox, nb):
-                self.bbox = nb; return True
-            self.active = False; return False
-        self.active = False; return False
+        if not ok:
+            self.active = False
+            return False
 
-    def reinit_kcf(self, frame, bbox):
+        rx, ry, rw, rh = raw
+        nb = (int(rx), int(ry), max(4, int(rw)), max(4, int(rh)))
+
+        # Contrainte 1 — dérive position (inchangée)
+        if not _drift_ok(self.bbox, nb):
+            self.active = False
+            return False
+
+        # Contrainte 2 — bbox qui gonfle (NOUVEAU)
+        # MOSSE dont la bbox grossit a perdu sa cible et suit une zone vide.
+        if self.bbox_ref_w > 0 and self.bbox_ref_h > 0:
+            if (nb[2] > self.bbox_ref_w * BBOX_GROW_RATIO or
+                    nb[3] > self.bbox_ref_h * BBOX_GROW_RATIO):
+                print(f"[TrackedCup] #{self.cup_id} : bbox gonflée "
+                      f"({nb[2]}×{nb[3]} vs ref {self.bbox_ref_w}×{self.bbox_ref_h}) "
+                      f"→ invalidé")
+                self.active = False
+                return False
+
+        self.bbox = nb
+        return True
+
+    def check_aruco_drift(
+        self,
+        aruco_pos_mm: Optional[Tuple[float, float]],
+    ) -> bool:
+        '''
+        Vérifie la cohérence entre pos_mm (tracker) et aruco_pos_mm (cam_bottom).
+
+        Appelée depuis la boucle principale APRÈS update_tracking(),
+        uniquement pour les trackers dont on connaît l'aruco_id.
+
+        Retourne True si le tracker est toujours valide, False si invalidé.
+
+        Logique :
+          - ArUco absent ou tasse AIRBORNE → pas de vérification (drift_count = 0)
+          - ArUco présent ET distance > ARUCO_DRIFT_MM → drift_count++
+          - Si drift_count >= ARUCO_DRIFT_FRAMES → tracker invalidé
+          - ArUco présent ET distance ok → drift_count = 0
+        '''
+        if aruco_pos_mm is None or self.pos_mm is None:
+            self.aruco_drift_count = 0
+            return True
+
+        dx = self.pos_mm[0] - aruco_pos_mm[0]
+        dy = self.pos_mm[1] - aruco_pos_mm[1]
+        dist = (dx * dx + dy * dy) ** 0.5
+
+        if dist > ARUCO_DRIFT_MM:
+            self.aruco_drift_count += 1
+            if self.aruco_drift_count >= ARUCO_DRIFT_FRAMES:
+                print(f"[TrackedCup] #{self.cup_id} : drift ArUco "
+                      f"{dist:.0f}mm depuis {self.aruco_drift_count} frames → invalidé")
+                self.active = False
+                return False
+        else:
+            self.aruco_drift_count = 0
+
+        return True
+
+    def reinit_kcf(self, frame: np.ndarray, bbox: tuple) -> bool:
         fh, fw = frame.shape[:2]
         x, y, w, h = bbox
-        x=max(0,min(x,fw-1)); y=max(0,min(y,fh-1))
-        w=max(4,min(w,fw-x)); h=max(4,min(h,fh-y))
-        # t = cv2.TrackerKCF_create()
+        x = max(0, min(x, fw - 1))
+        y = max(0, min(y, fh - 1))
+        w = max(4, min(w, fw - x))
+        h = max(4, min(h, fh - y))
         t = cv2.legacy.TrackerMOSSE_create()
         try:
-            t.init(frame, (x,y,w,h))
-            self.cv_tracker=t; self.bbox=(x,y,w,h); self.active=True; return True
+            t.init(frame, (x, y, w, h))
+            self.cv_tracker       = t
+            self.bbox             = (x, y, w, h)
+            self.bbox_ref_w       = w          # ← réinitialiser la référence
+            self.bbox_ref_h       = h
+            self.aruco_drift_count = 0          # ← reset compteur drift
+            self.active           = True
+            return True
         except Exception as e:
             print(f"[KCF] reinit cup#{self.cup_id}: {e}")
-            self.active=False; return False
+            self.active = False
+            return False
 
-    def update_mm(self, converter, use_3d):
-        """
-        Calcule pos_mm_raw (brute, non lissée) et pos_mm (EMA-lissée).
-
-        pos_mm_raw → colonnes ID_X_x_tracker / ID_X_y_tracker dans le CSV.
-        pos_mm     → colonnes ID_X_x_camtop  / ID_X_y_camtop  dans le CSV.
-        """
+    def update_mm(self, converter, use_3d: bool) -> None:
         cx, cy = _center(self.bbox)
         mm = _proc_to_mm(cx, cy, converter, use_3d)
         if mm is not None:
-            self.pos_mm_raw = mm                      # ← brute
+            self.pos_mm_raw   = mm
             xs, ys = self.ema.update(*mm)
-            self.pos_mm = (xs, ys)                    # ← EMA-lissée
+            self.pos_mm       = (xs, ys)
             xk, yk = self.kalman_csv.update(*mm)
-            self.pos_mm_kalman = (xk, yk)           # ← Kalman-filtrée pour CSV
+            self.pos_mm_kalman = (xk, yk)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -543,18 +620,22 @@ class TrackingManager:
 
     def _create(self, frame, bbox):
         fh, fw = frame.shape[:2]
-        x,y,w,h = bbox
-        x=max(0,min(x,fw-1)); y=max(0,min(y,fh-1))
-        w=max(4,min(w,fw-x)); h=max(4,min(h,fh-y))
-        # t = cv2.TrackerKCF_create()
+        x, y, w, h = bbox
+        x = max(0, min(x, fw - 1)); y = max(0, min(y, fh - 1))
+        w = max(4, min(w, fw - x)); h = max(4, min(h, fh - y))
         t = cv2.legacy.TrackerMOSSE_create()
-        try: t.init(frame, (x,y,w,h))
+        try:
+            t.init(frame, (x, y, w, h))
         except Exception as e:
             print(f"[Manager] init KCF: {e}"); return
         cid = self._next_id; self._next_id += 1
         cup = TrackedCup(cup_id=cid, ema=EMAFilter(), kalman_csv=KalmanFilter2D(),
-                        cv_tracker=t, bbox=(x,y,w,h))
+                         cv_tracker=t, bbox=(x, y, w, h))
         cup.update_mm(self._conv, self._use_3d)
+        # ── NOUVEAU — enregistrer taille de référence ──────────────────────
+        cup.bbox_ref_w = w
+        cup.bbox_ref_h = h
+        # ──────────────────────────────────────────────────────────────────
         self._cups[cid] = cup
         print(f"[Manager] Nouveau cup#{cid}  bbox=({x},{y},{w},{h})")
 
@@ -1088,6 +1169,28 @@ def main():
         manager._use_3d = use_3d_correction
 
         cups = manager.update_tracking(frame_small)
+
+        # ── Vérification drift ArUco + suppression immédiate si invalidé ─────
+        aruco_pos = cam_bot.get_aruco_positions()
+        to_remove = []
+        for cup in list(manager._cups.values()):
+            ident = identity_manager.get_identity(cup.cup_id)
+            if ident is None:
+                continue
+            if ident.state != CupState.MATCHED:
+                cup.aruco_drift_count = 0
+                continue
+            aruco_mm = aruco_pos.get(ident.aruco_id)
+            still_valid = cup.check_aruco_drift(aruco_mm)
+            if not still_valid:
+                to_remove.append(cup.cup_id)
+
+        for cid in to_remove:
+            if cid in manager._cups:
+                del manager._cups[cid]
+                print(f"[Main] Tracker #{cid} supprimé immédiatement (drift ArUco)")
+
+        cups = list(manager._cups.values())
         
         # if frame_count % 300 == 0 and len(manager._cups) > 0:
         # Cette condition est vraie toutes les 300 frames, soit environ toutes les 12 secondes à 25 FPS.
