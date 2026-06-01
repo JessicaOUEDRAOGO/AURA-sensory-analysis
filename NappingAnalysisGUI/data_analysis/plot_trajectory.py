@@ -115,24 +115,26 @@ def checkbox_style(color: str) -> str:
     return f"""
         QCheckBox {{
             color: {TEXT_MAIN};
-            font-size: 11px;
+            font-size: 12px;
+            font-weight: 600;
             spacing: 5px;
             background: transparent;
         }}
         QCheckBox::indicator {{
-            width: 14px; height: 14px;
+            width: 15px; height: 15px;
             border-radius: 3px;
         }}
         QCheckBox::indicator:unchecked {{
-            background: {BG_DARK};
-            border: 1.5px solid #2E4A6A;
+            background: #1A3A5C;
+            border: 2px solid #5A8ABF;
         }}
         QCheckBox::indicator:unchecked:hover {{
-            border-color: {color};
+            background: #1F4570;
+            border: 2px solid {color};
         }}
         QCheckBox::indicator:checked {{
             background: {color};
-            border: 1.5px solid {color};
+            border: 2px solid {color};
             image: none;
         }}
     """
@@ -226,10 +228,10 @@ def _draw_one(ax, fig, cup_id, sub, source, downsample, use_colormap, show_stats
             ax.plot(x[i:i+2], y[i:i+2], color=cmap(norm(i)), lw=1.4, alpha=0.85)
         sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
         sm.set_array([])
-        cb = fig.colorbar(sm, ax=ax, pad=0.02, fraction=0.025)
-        cb.set_label("Frame (début → fin)", color="white", fontsize=9)
-        cb.ax.yaxis.set_tick_params(color="white")
-        plt.setp(cb.ax.yaxis.get_ticklabels(), color="white")
+        cb = fig.colorbar(sm, ax=ax, pad=0.01, fraction=0.018, shrink=0.85)
+        cb.set_label("Frame", color="#A0B8D0", fontsize=9, labelpad=6)
+        cb.ax.yaxis.set_tick_params(color="#A0B8D0", labelsize=8)
+        plt.setp(cb.ax.yaxis.get_ticklabels(), color="#A0B8D0")
     else:
         ax.plot(x, y, color=color, lw=1.4, alpha=0.85, label=label)
 
@@ -316,7 +318,7 @@ class ControlBar(QWidget):
         # Fond sombre forcé sur ce widget
         self.setAutoFillBackground(True)
         self.setStyleSheet(f"background-color: {BG_PANEL};")
-        self.setFixedHeight(44)
+        self.setFixedHeight(48)
 
         self._build()
 
@@ -327,7 +329,7 @@ class ControlBar(QWidget):
 
         # ── Source ────────────────────────────────────────────────────────────
         lbl_src = QLabel("Source :")
-        lbl_src.setStyleSheet(label_style(11, dim=True))
+        lbl_src.setStyleSheet(label_style(11, dim=False))
         layout.addWidget(lbl_src)
 
         self._combo_src = QComboBox()
@@ -342,7 +344,7 @@ class ControlBar(QWidget):
 
         # ── Tasses ────────────────────────────────────────────────────────────
         lbl_cups = QLabel("Tasses :")
-        lbl_cups.setStyleSheet(label_style(11, dim=True))
+        lbl_cups.setStyleSheet(label_style(11, dim=False))
         layout.addWidget(lbl_cups)
 
         self._checkboxes: dict[str, QCheckBox] = {}
@@ -417,13 +419,21 @@ class TrajectoryWindow(QMainWindow):
         mpl_bar = NavigationToolbar2QT(canvas, self)
         # Fond sombre sur la toolbar matplotlib native
         mpl_bar.setStyleSheet(f"""
-            QToolBar {{ background-color: {BG_PANEL}; border: none; spacing: 2px; }}
-            QToolButton {{
+            NavigationToolbar2QT QToolBar,
+            QToolBar#NavigationToolbar2QT {{
+                background-color: {BG_PANEL}; border: none; spacing: 2px;
+            }}
+            NavigationToolbar2QT QToolButton,
+            QToolBar#NavigationToolbar2QT QToolButton {{
                 background-color: transparent; color: {TEXT_MAIN};
                 border: none; border-radius: 4px; padding: 3px;
             }}
-            QToolButton:hover {{ background-color: {BG_WIDGET}; }}
-            QToolButton:checked {{ background-color: {ACCENT}; }}
+            NavigationToolbar2QT QToolButton:hover {{
+                background-color: {BG_WIDGET};
+            }}
+            NavigationToolbar2QT QToolButton:checked {{
+                background-color: {ACCENT};
+            }}
         """)
 
         ctrl_bar = ControlBar(cups, fig, ax, downsample, file_title, self)
