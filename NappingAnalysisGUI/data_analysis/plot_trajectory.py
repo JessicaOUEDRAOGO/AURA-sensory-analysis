@@ -238,6 +238,35 @@ def detect_pose_episodes(cups: dict, cup_id: str,
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+#  Découpage en segments continus (coupe la ligne aux gaps de frames)
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Seuil : si deux frames consécutives dans le DataFrame sont distantes de plus
+# de GAP_FRAMES_THRESHOLD frames réelles, on coupe la ligne.
+GAP_FRAMES_THRESHOLD = 8
+
+def split_continuous_segments(sub: pd.DataFrame,
+                               gap: int = GAP_FRAMES_THRESHOLD) -> list[pd.DataFrame]:
+    """
+    Découpe sub en sous-DataFrames continus.
+    Un 'saut' est détecté quand la différence entre deux numéros de frame
+    consécutifs dépasse `gap`.
+    """
+    if sub.empty:
+        return []
+    frames = sub["frame"].astype(int).values
+    diffs  = np.diff(frames)
+    cuts   = np.where(diffs > gap)[0] + 1          # indices de coupure
+    segs   = []
+    prev   = 0
+    for cut in cuts:
+        segs.append(sub.iloc[prev:cut].reset_index(drop=True))
+        prev = cut
+    segs.append(sub.iloc[prev:].reset_index(drop=True))
+    return [s for s in segs if len(s) >= 2]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 #  Stats
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -323,17 +352,27 @@ def _draw_one(ax, fig, cup_id, sub, source, cups,
     color = cup_color(cup_id)
     if downsample > 1:
         sub = sub.iloc[::downsample].reset_index(drop=True)
-    x, y, n = sub["x"].values, sub["y"].values, len(sub)
+
+    # Nombre total de points valides avant segmentation
+    n = len(sub)
     if n == 0:
         return
 
-    label = f"Cup #{cup_id}  [{source}]"
+    label   = f"Cup #{cup_id}  [{source}]"
+    # Découpe en segments continus (coupe aux gaps de détection)
+    segments = split_continuous_segments(sub)
 
     if use_colormap and n > 1:
-        cmap = plt.colormaps["plasma"]
-        norm = mcolors.Normalize(vmin=0, vmax=n - 1)
-        for i in range(n - 1):
-            ax.plot(x[i:i+2], y[i:i+2], color=cmap(norm(i)), lw=1.4, alpha=0.85)
+        # Colormap globale sur toutes les frames (index dans sub original)
+        cmap      = plt.colormaps["plasma"]
+        norm      = mcolors.Normalize(vmin=0, vmax=n - 1)
+        global_i  = 0
+        for seg in segments:
+            xs, ys = seg["x"].values, seg["y"].values
+            for i in range(len(xs) - 1):
+                ax.plot(xs[i:i+2], ys[i:i+2],
+                        color=cmap(norm(global_i + i)), lw=1.4, alpha=0.85)
+            global_i += len(xs)
         sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
         sm.set_array([])
         cb = fig.colorbar(sm, ax=ax, pad=0.01, fraction=0.018, shrink=0.85)
@@ -341,11 +380,17 @@ def _draw_one(ax, fig, cup_id, sub, source, cups,
         cb.ax.yaxis.set_tick_params(color="#A0B8D0", labelsize=8)
         plt.setp(cb.ax.yaxis.get_ticklabels(), color="#A0B8D0")
     else:
-        ax.plot(x, y, color=color, lw=1.4, alpha=0.85, label=label)
+        for k, seg in enumerate(segments):
+            ax.plot(seg["x"].values, seg["y"].values,
+                    color=color, lw=1.4, alpha=0.85,
+                    label=label if k == 0 else "_nolegend_")
 
-    ax.scatter(x[0],  y[0],  s=70, color="#06D6A0", zorder=5,
+    # Marqueurs départ / arrivée (premier et dernier point valides)
+    x0, y0 = sub["x"].iloc[0],  sub["y"].iloc[0]
+    x1, y1 = sub["x"].iloc[-1], sub["y"].iloc[-1]
+    ax.scatter(x0, y0, s=70, color="#06D6A0", zorder=5,
                marker="o", label=f"#{cup_id} départ")
-    ax.scatter(x[-1], y[-1], s=70, color="#E63946",  zorder=5,
+    ax.scatter(x1, y1, s=70, color="#E63946",  zorder=5,
                marker="X", label=f"#{cup_id} arrivée")
 
     # ── Poses ─────────────────────────────────────────────────────────────────
