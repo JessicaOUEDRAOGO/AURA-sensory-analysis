@@ -1,8 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-plot_trajectory.py  –  v4
+plot_trajectory.py  –  v5
 =========================
 Visualisation multi-tasses / multi-sources — tout dans l'interface.
+
+Nouveautés v5 :
+  • Détection des épisodes de pose via la source "bottom"
+  • Affichage : surbrillance du segment posé + marqueur central par épisode
+  • Checkbox "Poses" dans la barre de contrôles
 
 Usage :
     python plot_trajectory.py chemin/vers/fichier.csv
@@ -22,15 +27,11 @@ import matplotlib.colors as mcolors
 import numpy as np
 import pandas as pd
 
-from matplotlib.backends.backend_qtagg import (
-    FigureCanvasQTAgg,
-    NavigationToolbar2QT,
-)
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow,
     QLabel, QComboBox, QCheckBox,
-    QWidget, QHBoxLayout, QVBoxLayout, QFrame,
-    QSizePolicy,
+    QWidget, QHBoxLayout, QVBoxLayout, QFrame, QSizePolicy,
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
@@ -47,14 +48,21 @@ CUP_COLORS = [
     "#9B5DE5", "#1982C4", "#FF595E", "#6A994E",
 ]
 
-SOURCES    = ["ema", "raw", "filtered", "bottom"]
-BG_DARK    = "#0D1B2A"   # fond fenêtre
-BG_PANEL   = "#112240"   # fond barre de contrôles
-BG_WIDGET  = "#1A3A5C"   # fond combo / hover
-ACCENT     = "#2E6DB4"   # bordure active
-TEXT_MAIN  = "#E8EEF4"   # texte principal
-TEXT_DIM   = "#7A9ABF"   # labels discrets
-SEP_COLOR  = "#1E3A5C"   # séparateurs
+SOURCES   = ["ema", "raw", "filtered", "bottom"]
+BG_DARK   = "#0D1B2A"
+BG_PANEL  = "#112240"
+BG_WIDGET = "#1A3A5C"
+ACCENT    = "#2E6DB4"
+TEXT_MAIN = "#E8EEF4"
+TEXT_DIM  = "#7A9ABF"
+SEP_COLOR = "#1E3A5C"
+
+# Couleur et style des marqueurs de pose
+POSE_SEGMENT_ALPHA = 0.55   # transparence du segment surligné
+POSE_MARKER_COLOR  = "#FFFFFF"
+POSE_MARKER_EDGE   = "#000000"
+POSE_MARKER_SIZE   = 120
+POSE_GAP_TOLERANCE = 5      # frames de gap max dans un même épisode
 
 
 def cup_color(cup_id: str) -> str:
@@ -66,22 +74,16 @@ def cup_color(cup_id: str) -> str:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Styles Qt (appliqués sur fond sombre garanti)
+#  Styles Qt
 # ──────────────────────────────────────────────────────────────────────────────
 
 COMBO_STYLE = f"""
     QComboBox {{
-        background-color: {BG_WIDGET};
-        color: {TEXT_MAIN};
-        border: 1px solid {ACCENT};
-        border-radius: 5px;
-        padding: 4px 10px;
-        font-size: 12px;
-        min-width: 105px;
+        background-color: {BG_WIDGET}; color: {TEXT_MAIN};
+        border: 1px solid {ACCENT}; border-radius: 5px;
+        padding: 4px 10px; font-size: 12px; min-width: 105px;
     }}
-    QComboBox:hover {{
-        border-color: #4A8FD4;
-    }}
+    QComboBox:hover {{ border-color: #4A8FD4; }}
     QComboBox::drop-down {{ border: none; width: 16px; }}
     QComboBox::down-arrow {{
         width: 0; height: 0;
@@ -90,11 +92,9 @@ COMBO_STYLE = f"""
         border-top: 5px solid {TEXT_DIM};
     }}
     QComboBox QAbstractItemView {{
-        background-color: {BG_WIDGET};
-        color: {TEXT_MAIN};
+        background-color: {BG_WIDGET}; color: {TEXT_MAIN};
         border: 1px solid {ACCENT};
-        selection-background-color: {ACCENT};
-        selection-color: white;
+        selection-background-color: {ACCENT}; selection-color: white;
         outline: none;
     }}
 """
@@ -104,44 +104,29 @@ def label_style(size=11, dim=False):
     return f"color: {color}; font-size: {size}px; background: transparent;"
 
 def sep_style():
-    return f"""
-        QFrame {{
-            background-color: {SEP_COLOR};
-            border: none;
-        }}
-    """
+    return f"QFrame {{ background-color: {SEP_COLOR}; border: none; }}"
 
 def checkbox_style(color: str) -> str:
     return f"""
         QCheckBox {{
-            color: {TEXT_MAIN};
-            font-size: 12px;
-            font-weight: 600;
-            spacing: 5px;
-            background: transparent;
+            color: {TEXT_MAIN}; font-size: 12px; font-weight: 600;
+            spacing: 5px; background: transparent;
         }}
         QCheckBox::indicator {{
-            width: 15px; height: 15px;
-            border-radius: 3px;
+            width: 15px; height: 15px; border-radius: 3px;
         }}
         QCheckBox::indicator:unchecked {{
-            background: #1A3A5C;
-            border: 2px solid #5A8ABF;
+            background: #1A3A5C; border: 2px solid #5A8ABF;
         }}
         QCheckBox::indicator:unchecked:hover {{
-            background: #1F4570;
-            border: 2px solid {color};
+            background: #1F4570; border: 2px solid {color};
         }}
         QCheckBox::indicator:checked {{
-            background: {color};
-            border: 2px solid {color};
-            image: none;
+            background: {color}; border: 2px solid {color}; image: none;
         }}
     """
 
-
 def vline() -> QFrame:
-    """Séparateur vertical."""
     line = QFrame()
     line.setFrameShape(QFrame.Shape.VLine)
     line.setFixedWidth(1)
@@ -167,7 +152,11 @@ def load_csv(path: str) -> pd.DataFrame:
 
 
 def extract_cups(df: pd.DataFrame) -> dict:
-    cups: dict[str, dict[str, pd.DataFrame]] = {}
+    """
+    Retourne cups[cup_id][source] = DataFrame(frame, x, y).
+    Conserve aussi les frames brutes du bottom pour la détection des poses.
+    """
+    cups: dict[str, dict] = {}
     for source in SOURCES:
         for col_x in [c for c in df.columns
                       if c.endswith(f"_x_{source}") and c.startswith("ID_")]:
@@ -185,11 +174,67 @@ def extract_cups(df: pd.DataFrame) -> dict:
         print("[ERREUR] Aucune colonne ID_N_x_<source> trouvée.")
         sys.exit(1)
 
+    # Stocker les frames valides de bottom (avant dropna) pour détection de pose
+    for cup_id in cups:
+        col_x_b = f"ID_{cup_id}_x_bottom"
+        col_y_b = f"ID_{cup_id}_y_bottom"
+        if col_x_b in df.columns and col_y_b in df.columns:
+            b = df[["frame", col_x_b, col_y_b]].copy()
+            b.columns = ["frame", "x", "y"]
+            # garder TOUTES les lignes (NaN inclus) pour avoir l'index des frames
+            cups[cup_id]["_bottom_full"] = b
+        else:
+            cups[cup_id]["_bottom_full"] = pd.DataFrame(columns=["frame", "x", "y"])
+
     for cid, srcs in sorted(cups.items(),
                              key=lambda kv: int(kv[0]) if kv[0].isdigit() else kv[0]):
-        pts = {s: len(v) for s, v in srcs.items()}
+        pts = {s: len(v) for s, v in srcs.items() if not s.startswith("_")}
         print(f"  Tasse {cid:>3} | " + " | ".join(f"{s}:{n}" for s, n in pts.items()))
     return cups
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  Détection des épisodes de pose
+# ──────────────────────────────────────────────────────────────────────────────
+
+def detect_pose_episodes(cups: dict, cup_id: str,
+                          gap_tolerance: int = POSE_GAP_TOLERANCE) -> list[dict]:
+    """
+    Retourne une liste d'épisodes :
+        [{ "frames": [f1, f2, …], "cx": float, "cy": float }, …]
+    cx/cy = centroïde bottom de l'épisode.
+    """
+    b = cups[cup_id].get("_bottom_full", pd.DataFrame())
+    if b.empty:
+        return []
+
+    # Frames où bottom est valide
+    valid = b.dropna(subset=["x", "y"]).copy()
+    if valid.empty:
+        return []
+
+    frames = sorted(valid["frame"].astype(int).tolist())
+
+    # Regrouper en épisodes (gap ≤ tolerance)
+    episodes = []
+    current  = [frames[0]]
+    for f in frames[1:]:
+        if f - current[-1] <= gap_tolerance + 1:
+            current.append(f)
+        else:
+            episodes.append(current)
+            current = [f]
+    episodes.append(current)
+
+    # Calculer le centroïde bottom de chaque épisode
+    result = []
+    for ep in episodes:
+        ep_rows = valid[valid["frame"].isin(ep)]
+        cx = float(ep_rows["x"].mean())
+        cy = float(ep_rows["y"].mean())
+        result.append({"frames": ep, "cx": cx, "cy": cy})
+
+    return result
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -208,10 +253,73 @@ def compute_stats(sub: pd.DataFrame) -> dict:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Dessin matplotlib
+#  Superposition des poses sur la trajectoire
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _draw_one(ax, fig, cup_id, sub, source, downsample, use_colormap, show_stats):
+def _draw_poses(ax, cup_id: str, sub: pd.DataFrame,
+                episodes: list[dict], cup_col: str):
+    """
+    Pour chaque épisode :
+      • Surbrillance du segment de la trajectoire source pendant la pose
+      • Marqueur central (losange blanc cerclé de la couleur de la tasse)
+    sub : DataFrame(frame, x, y) de la source affichée (ema/raw/filtered).
+    """
+    if not episodes or sub.empty:
+        return
+
+    # Index rapide frame → (x, y) dans la trajectoire source
+    frame_to_xy = {int(r.frame): (r.x, r.y) for r in sub.itertuples()}
+
+    for k, ep in enumerate(episodes):
+        ep_frames = set(ep["frames"])
+
+        # ── Segment surligné ──────────────────────────────────────────────────
+        # Points de la trajectoire source qui tombent dans la fenêtre de pose
+        # (on étend légèrement autour pour inclure les frames intermédiaires)
+        f_min, f_max = min(ep["frames"]), max(ep["frames"])
+        seg = sub[(sub["frame"] >= f_min) & (sub["frame"] <= f_max)]
+
+        if len(seg) >= 2:
+            ax.plot(seg["x"].values, seg["y"].values,
+                    color=cup_col, lw=5, alpha=POSE_SEGMENT_ALPHA,
+                    solid_capstyle="round", zorder=3)
+
+        # ── Marqueur central (losange) ────────────────────────────────────────
+        # Position dans la trajectoire source à la frame médiane de l'épisode
+        mid_frame = ep["frames"][len(ep["frames"]) // 2]
+        # Chercher la frame source la plus proche
+        if mid_frame in frame_to_xy:
+            mx, my = frame_to_xy[mid_frame]
+        else:
+            # Prendre la frame source la plus proche
+            src_frames = np.array(list(frame_to_xy.keys()))
+            closest    = src_frames[np.argmin(np.abs(src_frames - mid_frame))]
+            mx, my     = frame_to_xy[closest]
+
+        ax.scatter(
+            mx, my,
+            s=POSE_MARKER_SIZE, marker="D",
+            facecolor=POSE_MARKER_COLOR,
+            edgecolors=cup_col,
+            linewidths=2.0,
+            zorder=6,
+            label=f"#{cup_id} pose ×{len(episodes)}" if k == 0 else "_nolegend_",
+        )
+
+        # ── Numéro de l'épisode (petit label) ────────────────────────────────
+        ax.annotate(
+            str(k + 1),
+            xy=(mx, my), xytext=(4, 4), textcoords="offset points",
+            fontsize=7, color=cup_col, fontweight="bold", zorder=7,
+        )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  Dessin d'une tasse
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _draw_one(ax, fig, cup_id, sub, source, cups,
+              downsample, use_colormap, show_poses, show_stats):
     color = cup_color(cup_id)
     if downsample > 1:
         sub = sub.iloc[::downsample].reset_index(drop=True)
@@ -240,14 +348,22 @@ def _draw_one(ax, fig, cup_id, sub, source, downsample, use_colormap, show_stats
     ax.scatter(x[-1], y[-1], s=70, color="#E63946",  zorder=5,
                marker="X", label=f"#{cup_id} arrivée")
 
+    # ── Poses ─────────────────────────────────────────────────────────────────
+    if show_poses and source != "bottom":
+        episodes = detect_pose_episodes(cups, cup_id)
+        _draw_poses(ax, cup_id, sub, episodes, color)
+
     if show_stats:
         st   = compute_stats(sub)
+        n_poses = len(detect_pose_episodes(cups, cup_id)) if show_poses else 0
+        pose_line = f"Poses détectées : {n_poses}\n" if show_poses else ""
         info = (
             f"Cup #{cup_id}  [{source}]\n"
             f"{st['n_frames']} frames\n"
             f"Dist. totale : {st['dist_totale_mm']:.0f} mm\n"
-            f"Saut max     : {st['dist_max_mm']:.1f} mm"
-        )
+            f"Saut max     : {st['dist_max_mm']:.1f} mm\n"
+            f"{pose_line}"
+        ).rstrip()
         ax.text(
             0.02, 0.98, info, transform=ax.transAxes,
             fontsize=8, va="top", color="white",
@@ -256,7 +372,12 @@ def _draw_one(ax, fig, cup_id, sub, source, downsample, use_colormap, show_stats
         )
 
 
-def render(fig, ax, cups, cup_ids, source, downsample, use_colormap, file_title):
+# ──────────────────────────────────────────────────────────────────────────────
+#  Rendu complet
+# ──────────────────────────────────────────────────────────────────────────────
+
+def render(fig, ax, cups, cup_ids, source, downsample,
+           use_colormap, show_poses, file_title):
     for extra in [a for a in fig.axes if a is not ax]:
         extra.remove()
     ax.clear()
@@ -285,7 +406,8 @@ def render(fig, ax, cups, cup_ids, source, downsample, use_colormap, file_title)
         if sub is None or sub.empty:
             print(f"[WARN] Cup #{cup_id} / '{source}' : pas de données")
             continue
-        _draw_one(ax, fig, cup_id, sub, source, downsample, use_colormap,
+        _draw_one(ax, fig, cup_id, sub, source, cups,
+                  downsample, use_colormap, show_poses,
                   show_stats=(not overlay))
 
     if not use_colormap:
@@ -296,11 +418,10 @@ def render(fig, ax, cups, cup_ids, source, downsample, use_colormap, file_title)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Barre de contrôles custom (QWidget pur, fond sombre garanti)
+#  Barre de contrôles
 # ──────────────────────────────────────────────────────────────────────────────
 
 class ControlBar(QWidget):
-    """Barre horizontale sombre avec tous les contrôles."""
 
     def __init__(self, cups, fig, ax, downsample, file_title, parent=None):
         super().__init__(parent)
@@ -314,12 +435,11 @@ class ControlBar(QWidget):
         self._source       = "ema"
         self._active_ids   = [self._all_ids[0]] if self._all_ids else []
         self._use_colormap = False
+        self._show_poses   = False
 
-        # Fond sombre forcé sur ce widget
         self.setAutoFillBackground(True)
         self.setStyleSheet(f"background-color: {BG_PANEL};")
         self.setFixedHeight(48)
-
         self._build()
 
     def _build(self):
@@ -329,7 +449,7 @@ class ControlBar(QWidget):
 
         # ── Source ────────────────────────────────────────────────────────────
         lbl_src = QLabel("Source :")
-        lbl_src.setStyleSheet(label_style(11, dim=False))
+        lbl_src.setStyleSheet(label_style(11))
         layout.addWidget(lbl_src)
 
         self._combo_src = QComboBox()
@@ -344,7 +464,7 @@ class ControlBar(QWidget):
 
         # ── Tasses ────────────────────────────────────────────────────────────
         lbl_cups = QLabel("Tasses :")
-        lbl_cups.setStyleSheet(label_style(11, dim=False))
+        lbl_cups.setStyleSheet(label_style(11))
         layout.addWidget(lbl_cups)
 
         self._checkboxes: dict[str, QCheckBox] = {}
@@ -366,12 +486,31 @@ class ControlBar(QWidget):
         self._cb_cmap.stateChanged.connect(self._on_colormap)
         layout.addWidget(self._cb_cmap)
 
+        layout.addWidget(vline())
+
+        # ── Poses ─────────────────────────────────────────────────────────────
+        self._cb_poses = QCheckBox("Poses  ◆")
+        self._cb_poses.setStyleSheet(checkbox_style("#F0C040"))
+        self._cb_poses.setChecked(False)
+        self._cb_poses.setToolTip(
+            "Affiche les épisodes où la tasse est posée\n"
+            "(détectés via la caméra bottom)\n"
+            "◆ = centroïde de pose  |  trait épais = durée de l'épisode"
+        )
+        self._cb_poses.stateChanged.connect(self._on_poses)
+        layout.addWidget(self._cb_poses)
+
         layout.addStretch()
 
     # ── callbacks ─────────────────────────────────────────────────────────────
 
     def _on_source(self, _):
         self._source = self._combo_src.currentData()
+        # Désactiver "Poses" si on affiche la source bottom (redondant)
+        is_bottom = self._source == "bottom"
+        self._cb_poses.setEnabled(not is_bottom)
+        if is_bottom:
+            self._cb_poses.setChecked(False)
         self._refresh()
 
     def _on_cups(self, _):
@@ -383,6 +522,10 @@ class ControlBar(QWidget):
         self._use_colormap = self._cb_cmap.isChecked()
         self._refresh()
 
+    def _on_poses(self, _):
+        self._show_poses = self._cb_poses.isChecked()
+        self._refresh()
+
     def _refresh(self):
         render(
             fig=self._fig, ax=self._ax,
@@ -391,6 +534,7 @@ class ControlBar(QWidget):
             source=self._source,
             downsample=self._downsample,
             use_colormap=self._use_colormap,
+            show_poses=self._show_poses,
             file_title=self._file_title,
         )
 
@@ -405,35 +549,26 @@ class TrajectoryWindow(QMainWindow):
         self.setWindowTitle(f"Trajectoires — {file_title}")
         self.setStyleSheet(f"background-color: {BG_DARK};")
 
-        # Figure matplotlib
         fig, ax = plt.subplots(figsize=(14, 9))
         fig.patch.set_facecolor(BG_DARK)
-        self._fig = fig
-        self._ax  = ax
 
-        all_ids = sorted(cups.keys(),
-                         key=lambda x: int(x) if x.isdigit() else x)
-        render(fig, ax, cups, [all_ids[0]], "ema", downsample, False, file_title)
+        all_ids = sorted(cups.keys(), key=lambda x: int(x) if x.isdigit() else x)
+        render(fig, ax, cups, [all_ids[0]], "ema", downsample, False, False, file_title)
 
         canvas  = FigureCanvasQTAgg(fig)
         mpl_bar = NavigationToolbar2QT(canvas, self)
-        # Fond sombre sur la toolbar matplotlib native
-        mpl_bar.setStyleSheet(f"""
-            NavigationToolbar2QT QToolBar,
-            QToolBar#NavigationToolbar2QT {{
-                background-color: {BG_PANEL}; border: none; spacing: 2px;
-            }}
-            NavigationToolbar2QT QToolButton,
-            QToolBar#NavigationToolbar2QT QToolButton {{
-                background-color: transparent; color: {TEXT_MAIN};
-                border: none; border-radius: 4px; padding: 3px;
-            }}
-            NavigationToolbar2QT QToolButton:hover {{
-                background-color: {BG_WIDGET};
-            }}
-            NavigationToolbar2QT QToolButton:checked {{
-                background-color: {ACCENT};
-            }}
+        mpl_bar.setStyleSheet("""
+            QToolBar {
+                background-color: #2C3E50; border: none;
+                border-top: 1px solid #1A2A3A; spacing: 2px; padding: 2px 4px;
+            }
+            QToolButton {
+                background-color: #3A5068; border: 1px solid #4A6280;
+                border-radius: 4px; padding: 3px 5px; margin: 1px;
+            }
+            QToolButton:hover  { background-color: #4A6A8A; border-color: #6A9ABF; }
+            QToolButton:checked { background-color: #2E6DB4; border-color: #5A9ADF; }
+            QToolButton:pressed { background-color: #1E4A7A; }
         """)
 
         ctrl_bar = ControlBar(cups, fig, ax, downsample, file_title, self)
@@ -443,10 +578,9 @@ class TrajectoryWindow(QMainWindow):
         vbox = QVBoxLayout(central)
         vbox.setContentsMargins(0, 0, 0, 0)
         vbox.setSpacing(0)
-        vbox.addWidget(ctrl_bar)       # 1. contrôles (fond sombre)
-        vbox.addWidget(mpl_bar)        # 2. toolbar matplotlib (zoom/pan…)
-        vbox.addWidget(canvas, 1)      # 3. figure
-
+        vbox.addWidget(ctrl_bar)
+        vbox.addWidget(mpl_bar)
+        vbox.addWidget(canvas, 1)
         self.setCentralWidget(central)
         self.resize(1280, 820)
 
@@ -457,11 +591,10 @@ class TrajectoryWindow(QMainWindow):
 
 def plot_trajectories(cups, file_title="Trajectoires", downsample=1, output_path=None):
     all_ids = sorted(cups.keys(), key=lambda x: int(x) if x.isdigit() else x)
-
     if output_path:
         fig, ax = plt.subplots(figsize=(12, 8))
         fig.patch.set_facecolor(BG_DARK)
-        render(fig, ax, cups, [all_ids[0]], "ema", downsample, False, file_title)
+        render(fig, ax, cups, [all_ids[0]], "ema", downsample, False, False, file_title)
         plt.tight_layout()
         plt.savefig(output_path, dpi=150, bbox_inches="tight",
                     facecolor=fig.get_facecolor())
