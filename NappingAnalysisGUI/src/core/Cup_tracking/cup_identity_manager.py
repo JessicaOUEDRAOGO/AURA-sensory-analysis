@@ -34,6 +34,18 @@ Ajout v4 — export enrichi :
 Ajout :
   purge_stale_identities() — appelée par CupTrackingPipeline toutes les
   PURGE_EVERY_FRAMES frames pour éviter l'accumulation sur longue session.
+
+1. AssociationEvent — champ extra: Optional[dict] = None
+     Permet de stocker des données supplémentaires (drift_mm, positions, etc.)
+     sur les événements de type "hijack_detected".
+
+  2. log_hijack_event() — nouvelle méthode publique
+     Appelée depuis la boucle principale de napping_lite.py quand un hijacking
+     est confirmé par drift ArUco. Enregistre un AssociationEvent avec
+     event="hijack_detected" et les infos de drift dans extra.
+
+  3. get_association_log() — enrichi pour inclure extra
+     Les dicts retournés incluent maintenant les champs de extra quand présents.
 """
 
 import threading
@@ -109,6 +121,7 @@ class AssociationEvent:
     event:      str   # "bind" ou "unbind"
     timestamp:  float = field(default_factory=time.monotonic)
     frame:      int   = 0
+    extra:      Optional[dict] = None
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -261,32 +274,20 @@ class CupIdentityManager:
             return result
 
     def get_association_log(self) -> List[dict]:
-        """
-        Retourne l'historique complet des liaisons tracker↔tag sous forme
-        de liste de dicts sérialisables en JSON.
-
-        Format de chaque entrée :
-            {
-                "aruco_id":   6,
-                "tracker_id": 2,
-                "event":      "bind",      # ou "unbind"
-                "timestamp":  1718123456.789,
-                "frame":      1234
-            }
-
-        Appelé une seule fois en fin de session pour écrire associations.json.
-        """
         with self._lock:
-            return [
-                {
+            result = []
+            for ev in self._association_log:
+                d = {
                     "aruco_id":   ev.aruco_id,
                     "tracker_id": ev.tracker_id,
                     "event":      ev.event,
                     "timestamp":  round(ev.timestamp, 3),
                     "frame":      ev.frame,
                 }
-                for ev in self._association_log
-            ]
+                if ev.extra:
+                    d.update(ev.extra)   # ajoute drift_mm, positions, etc.
+                result.append(d)
+            return result
 
     def get_tracker_history_by_aruco(self) -> Dict[int, List[int]]:
         """
@@ -339,6 +340,35 @@ class CupIdentityManager:
             for aid in to_delete:
                 del self._identities[aid]
                 print(f"[Identity] Purge identité stale ArUco#{aid}")
+    
+    def log_hijack_event(
+        self,
+        aruco_id:    int,
+        tracker_id:  int,
+        frame:       int,
+        drift_event: dict,
+    ) -> None:
+        """
+        Enregistre un événement de hijacking détecté par drift ArUco.
+
+        Paramètres :
+          aruco_id    — aruco_id de la tasse dont le tracker a dérivé
+          tracker_id  — tracker_id interne invalidé
+          frame       — numéro de frame courant
+          drift_event — dict avec drift_mm, drift_frames,
+                        tracker_pos_mm, aruco_pos_mm
+
+        L'événement apparaît dans get_association_log() avec
+        event="hijack_detected" et les champs de drift_event à plat.
+        """
+        with self._lock:
+            self._association_log.append(AssociationEvent(
+                aruco_id=aruco_id,
+                tracker_id=tracker_id,
+                event="hijack_detected",
+                frame=frame,
+                extra=drift_event,
+            ))
 
     # ──────────────────────────────────────────────────────────────────────────
     #  Logique interne — traitement ArUco (inchangée)

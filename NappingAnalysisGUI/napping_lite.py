@@ -426,42 +426,48 @@ class TrackedCup:
         return True
 
     def check_aruco_drift(
-        self,
-        aruco_pos_mm: Optional[Tuple[float, float]],
-    ) -> bool:
-        '''
-        Vérifie la cohérence entre pos_mm (tracker) et aruco_pos_mm (cam_bottom).
+            self,
+            aruco_pos_mm: Optional[Tuple[float, float]],
+        ) -> Tuple[bool, Optional[dict]]:
+            '''
+            Vérifie la cohérence entre pos_mm (tracker) et aruco_pos_mm (cam_bottom).
 
-        Appelée depuis la boucle principale APRÈS update_tracking(),
-        uniquement pour les trackers dont on connaît l'aruco_id.
+            Retourne (still_valid, event_info) :
+            still_valid — True si le tracker est sain, False si invalidé
+            event_info  — None si pas de hijacking, sinon dict avec :
+                            drift_mm, drift_frames, tracker_pos_mm, aruco_pos_mm
 
-        Retourne True si le tracker est toujours valide, False si invalidé.
+            Logique :
+            - ArUco absent ou pos_mm None → pas de vérification, drift_count=0
+            - ArUco présent, dist > ARUCO_DRIFT_MM → drift_count++
+                Si drift_count >= ARUCO_DRIFT_FRAMES → invalide + retourne event
+            - ArUco présent, dist ok → drift_count=0
+            '''
+            if aruco_pos_mm is None or self.pos_mm is None:
+                self.aruco_drift_count = 0
+                return True, None
 
-        Logique :
-          - ArUco absent ou tasse AIRBORNE → pas de vérification (drift_count = 0)
-          - ArUco présent ET distance > ARUCO_DRIFT_MM → drift_count++
-          - Si drift_count >= ARUCO_DRIFT_FRAMES → tracker invalidé
-          - ArUco présent ET distance ok → drift_count = 0
-        '''
-        if aruco_pos_mm is None or self.pos_mm is None:
-            self.aruco_drift_count = 0
-            return True
+            dx = self.pos_mm[0] - aruco_pos_mm[0]
+            dy = self.pos_mm[1] - aruco_pos_mm[1]
+            dist = (dx * dx + dy * dy) ** 0.5
 
-        dx = self.pos_mm[0] - aruco_pos_mm[0]
-        dy = self.pos_mm[1] - aruco_pos_mm[1]
-        dist = (dx * dx + dy * dy) ** 0.5
+            if dist > ARUCO_DRIFT_MM:
+                self.aruco_drift_count += 1
+                if self.aruco_drift_count >= ARUCO_DRIFT_FRAMES:
+                    event_info = {
+                        "drift_mm":       round(dist, 1),
+                        "drift_frames":   self.aruco_drift_count,
+                        "tracker_pos_mm": (round(self.pos_mm[0], 1),
+                                        round(self.pos_mm[1], 1)),
+                        "aruco_pos_mm":   (round(aruco_pos_mm[0], 1),
+                                        round(aruco_pos_mm[1], 1)),
+                    }
+                    self.active = False
+                    return False, event_info
+            else:
+                self.aruco_drift_count = 0
 
-        if dist > ARUCO_DRIFT_MM:
-            self.aruco_drift_count += 1
-            if self.aruco_drift_count >= ARUCO_DRIFT_FRAMES:
-                print(f"[TrackedCup] #{self.cup_id} : drift ArUco "
-                      f"{dist:.0f}mm depuis {self.aruco_drift_count} frames → invalidé")
-                self.active = False
-                return False
-        else:
-            self.aruco_drift_count = 0
-
-        return True
+            return True, None
 
     def reinit_kcf(self, frame: np.ndarray, bbox: tuple) -> bool:
         fh, fw = frame.shape[:2]
@@ -765,37 +771,41 @@ def _draw_grid_frame(
 
 class CsvWriter:
     """
-    Version patchée de CsvWriter avec 4 sources de coordonnées par tasse.
+    4 sources de coordonnées + colonne hijack par tasse.
 
-    Colonnes par tasse (ordre inchangé sauf ajout _filtered) :
-        ID_{id}_x_ema,      ID_{id}_y_ema       ← EMA lissée (comme x_camtop avant)
-        ID_{id}_x_raw,      ID_{id}_y_raw       ← brut KCF   (comme x_tracker avant)
-        ID_{id}_x_filtered, ID_{id}_y_filtered  ← Kalman     ← NOUVEAU
-        ID_{id}_x_bottom,   ID_{id}_y_bottom    ← ArUco cam_bottom (inchangé)
+    Colonnes par tasse :
+        ID_{id}_x_ema,       ID_{id}_y_ema       ← EMA lissée
+        ID_{id}_x_raw,       ID_{id}_y_raw       ← brut KCF
+        ID_{id}_x_filtered,  ID_{id}_y_filtered  ← Kalman
+        ID_{id}_x_bottom,    ID_{id}_y_bottom    ← ArUco cam_bottom
+        ID_{id}_hijack                           ← 1 si frame contaminée, 0 sinon
 
-    Le renommage camtop→ema et tracker→raw est purement documentaire :
-    les valeurs sont strictement identiques à la session précédente.
+    hijack=1 : x_ema/x_raw/x_filtered potentiellement faux ce frame.
+    x_bottom reste fiable si disponible.
     """
-
-    import csv as _csv
-    from datetime import datetime as _dt
 
     def __init__(self, output_path: str, cup_ids: list):
         import csv
         from datetime import datetime
 
-        self._csv    = csv
-        self._dt     = datetime
+        self._csv         = csv
+        self._dt          = datetime
+        self._cup_ids     = list(cup_ids)
         self._frame_index = 0
         self._buffer: list = []
 
         self._fieldnames = ['frame', 'timestamp']
         for cid in cup_ids:
             self._fieldnames += [
-                f'ID_{cid}_x_ema',       f'ID_{cid}_y_ema',        # anciennement _camtop
-                f'ID_{cid}_x_raw',       f'ID_{cid}_y_raw',        # anciennement _tracker
-                f'ID_{cid}_x_filtered',  f'ID_{cid}_y_filtered',   # NOUVEAU Kalman
-                f'ID_{cid}_x_bottom',    f'ID_{cid}_y_bottom',     # inchangé
+                f'ID_{cid}_x_ema',
+                f'ID_{cid}_y_ema',
+                f'ID_{cid}_x_raw',
+                f'ID_{cid}_y_raw',
+                f'ID_{cid}_x_filtered',
+                f'ID_{cid}_y_filtered',
+                f'ID_{cid}_x_bottom',
+                f'ID_{cid}_y_bottom',
+                f'ID_{cid}_hijack',
             ]
 
         self._file   = open(output_path, 'w', newline='', encoding='utf-8')
@@ -807,18 +817,20 @@ class CsvWriter:
         )
         self._writer.writeheader()
         self._file.flush()
-        print(f"[CSV] créé — {len(cup_ids)} tasse(s) × 4 sources")
-        print(f"[CSV] colonnes : {self._fieldnames}")
+        print(f"[CSV] créé — {len(cup_ids)} tasse(s) × 5 sources (+ hijack)")
 
     def push(
         self,
-        ema_by_aruco:      Dict[int, Tuple[float, float]],  # pos_mm (EMA)
-        raw_by_aruco:      Dict[int, Tuple[float, float]],  # pos_mm_raw (brut)
-        filtered_by_aruco: Dict[int, Tuple[float, float]],  # pos_mm_kalman (Kalman)
-        bottom_by_aruco:   Dict[int, Tuple[float, float]],  # ArUco cam_bottom
+        ema_by_aruco:      Dict[int, Tuple[float, float]],
+        raw_by_aruco:      Dict[int, Tuple[float, float]],
+        filtered_by_aruco: Dict[int, Tuple[float, float]],
+        bottom_by_aruco:   Dict[int, Tuple[float, float]],
+        hijacked_ids:      set = None,
     ) -> None:
         from datetime import datetime
         self._frame_index += 1
+        hijacked_ids = hijacked_ids or set()
+
         row: dict = {
             'frame':     self._frame_index,
             'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3],
@@ -840,9 +852,37 @@ class CsvWriter:
             row[f'ID_{aruco_id}_x_bottom'] = round(float(x), 2)
             row[f'ID_{aruco_id}_y_bottom'] = round(float(y), 2)
 
+        for cid in self._cup_ids:
+            col = f'ID_{cid}_hijack'
+            if col in self._fieldnames:
+                row[col] = 1 if cid in hijacked_ids else 0
+
         self._buffer.append(row)
-        if len(self._buffer) >= 50:   # flush toutes les 50 frames (~2s) au lieu de 200
+        if len(self._buffer) >= 50:
             self.flush()
+
+    def mark_hijack_retroactive(
+        self,
+        aruco_id: int,
+        n_frames: int,
+    ) -> None:
+        """
+        Remonte dans le buffer pour marquer les n_frames précédentes
+        comme contaminées (hijack=1) pour cet aruco_id.
+
+        Avec ARUCO_DRIFT_FRAMES=2, au maximum 2 frames sont rétroactivement
+        marquées — elles sont toujours dans le buffer (taille 50).
+        """
+        col = f'ID_{aruco_id}_hijack'
+        if col not in self._fieldnames:
+            return
+        count = min(n_frames, len(self._buffer))
+        if count <= 0:
+            return
+        for row in self._buffer[-count:]:
+            row[col] = 1
+        print(f"[CSV] ArUco#{aruco_id} : {count} frame(s) rétroactivement "
+              f"marquées hijack=1")
 
     def flush(self):
         if not self._buffer:
@@ -1170,9 +1210,12 @@ def main():
 
         cups = manager.update_tracking(frame_small)
 
-        # ── Vérification drift ArUco + suppression immédiate si invalidé ─────
+        
+        # ── Vérification drift ArUco + colonne hijack CSV ────────────────────
         aruco_pos = cam_bot.get_aruco_positions()
-        to_remove = []
+        to_remove = []            # (cup_id, aruco_id, event_info)
+        current_hijacked_ids = set()   # aruco_ids en hijacking ce frame
+
         for cup in list(manager._cups.values()):
             ident = identity_manager.get_identity(cup.cup_id)
             if ident is None:
@@ -1181,16 +1224,39 @@ def main():
                 cup.aruco_drift_count = 0
                 continue
             aruco_mm = aruco_pos.get(ident.aruco_id)
-            still_valid = cup.check_aruco_drift(aruco_mm)
+            still_valid, event_info = cup.check_aruco_drift(aruco_mm)
             if not still_valid:
-                to_remove.append(cup.cup_id)
+                to_remove.append((cup.cup_id, ident.aruco_id, event_info))
+                current_hijacked_ids.add(ident.aruco_id)  # marquer ce frame
 
-        for cid in to_remove:
+        for cid, aruco_id, event_info in to_remove:
             if cid in manager._cups:
                 del manager._cups[cid]
-                print(f"[Main] Tracker #{cid} supprimé immédiatement (drift ArUco)")
+
+                if event_info:
+                    # Log console synthétique
+                    print(
+                        f"[Hijack] ArUco#{aruco_id} ← tracker#{cid} invalidé "
+                        f"| drift={event_info['drift_mm']}mm "
+                        f"| tracker_pos={event_info['tracker_pos_mm']} "
+                        f"| aruco_pos={event_info['aruco_pos_mm']}"
+                    )
+                    # Marquer rétroactivement les frames contaminées dans le CSV
+                    csv_writer.mark_hijack_retroactive(
+                        aruco_id=aruco_id,
+                        n_frames=event_info['drift_frames'],
+                    )
+                    # Log JSON
+                    identity_manager.log_hijack_event(
+                        aruco_id=aruco_id,
+                        tracker_id=cid,
+                        frame=frame_count,
+                        drift_event=event_info,
+                    )
 
         cups = list(manager._cups.values())
+        # ─────────────────────────────────────────────────────────────────────
+        # ─────────────────────────────────────────────────────────────────────
         
         # if frame_count % 300 == 0 and len(manager._cups) > 0:
         # Cette condition est vraie toutes les 300 frames, soit environ toutes les 12 secondes à 25 FPS.
@@ -1303,7 +1369,13 @@ def main():
         dm.display_image_on_projector_monitor(proj_frame)
 
         # ── CSV principal — 1 ligne/frame, indexé par aruco_id ───────────────
-        csv_writer.push(ema_by_aruco, raw_by_aruco, filtered_by_aruco, bottom_by_aruco)
+        csv_writer.push(
+           ema_by_aruco,
+           raw_by_aruco,
+           filtered_by_aruco,
+           bottom_by_aruco,
+           hijacked_ids=current_hijacked_ids,
+       )
 
         # ── CSV trackers brut — 1 ligne/tracker/frame, zéro perte ────────────
         tracker_raw_writer.push(
