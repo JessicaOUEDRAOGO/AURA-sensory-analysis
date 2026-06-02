@@ -68,9 +68,10 @@ POSE_MERGE_MM      = 30.0    # distance en mm sous laquelle deux poses sont fusi
 SHOW_DIRECTION_DEFAULT = True
 
 ARROW_SPACING_MM  = 80      # une flèche tous les 80 mm de trajectoire réelle
-ARROW_SMOOTH_WIN  = 5       # fenêtre de lissage direction (points)
-ARROW_ALPHA       = 0.80
-ARROW_SIZE        = 11      # mutation_scale matplotlib
+ARROW_TANGENT_WIN = 2       # demi-fenêtre pour la tangente locale (points)
+ARROW_LENGTH_MM   = 8       # longueur visuelle de la flèche en mm
+ARROW_ALPHA       = 0.85
+ARROW_SIZE        = 10      # mutation_scale matplotlib
 
 # ── Numérotation temporelle ───────────────────────────────────────────────────
 SHOW_TIME_LABELS_DEFAULT = True
@@ -307,53 +308,62 @@ def compute_stats(sub: pd.DataFrame) -> dict:
 
 def _draw_direction_arrows(ax, sub: pd.DataFrame, color: str):
     """
-    Flèches directionnelles espacées par distance cumulée (mm),
-    pas par indice — densité uniforme quelle que soit la vitesse.
+    Flèches directionnelles courtes et tangentes à la courbe.
+
+    Espacement par distance cumulée (mm) → densité uniforme.
+    Direction : tangente locale (fenêtre ±ARROW_TANGENT_WIN points).
+    Longueur   : ARROW_LENGTH_MM en unités données — flèche ancrée au point,
+                 pas une corde qui traverse la trajectoire.
     """
     n = len(sub)
-    if n < ARROW_SMOOTH_WIN * 2 + 2:
+    if n < ARROW_TANGENT_WIN * 2 + 2:
         return
 
     xs = sub["x"].values
     ys = sub["y"].values
 
-    # Distance cumulée le long de la trajectoire
-    dx_all  = np.diff(xs)
-    dy_all  = np.diff(ys)
-    dists   = np.sqrt(dx_all**2 + dy_all**2)
+    # Distance cumulée
+    dxs     = np.diff(xs)
+    dys     = np.diff(ys)
+    dists   = np.sqrt(dxs**2 + dys**2)
     cumdist = np.concatenate([[0.0], np.cumsum(dists)])
     total   = cumdist[-1]
-
     if total < 1.0:
         return
 
-    # Espacement fixe en mm — une flèche tous les ARROW_SPACING_MM
-    step = ARROW_SPACING_MM
-    targets = np.arange(step, total, step)
-
-    half = ARROW_SMOOTH_WIN
+    half    = ARROW_TANGENT_WIN
+    targets = np.arange(ARROW_SPACING_MM, total, ARROW_SPACING_MM)
 
     for target in targets:
-        # Indice du point le plus proche de la distance cible
         i = int(np.searchsorted(cumdist, target))
         i = max(half, min(i, n - half - 1))
 
-        x0, y0 = xs[i - half], ys[i - half]
-        x1, y1 = xs[i + half], ys[i + half]
-
-        if x0 == x1 and y0 == y1:
+        # Tangente locale : direction entre i-half et i+half
+        tx = xs[i + half] - xs[i - half]
+        ty = ys[i + half] - ys[i - half]
+        norm = np.sqrt(tx**2 + ty**2)
+        if norm < 1e-6:
             continue
+        tx /= norm
+        ty /= norm
 
-        # Contour noir pour lisibilité sur tout fond
+        # Flèche courte centrée sur le point i
+        half_len = ARROW_LENGTH_MM / 2.0
+        x0 = xs[i] - tx * half_len
+        y0 = ys[i] - ty * half_len
+        x1 = xs[i] + tx * half_len
+        y1 = ys[i] + ty * half_len
+
+        # Contour noir
         ax.annotate(
             "",
             xy=(x1, y1), xytext=(x0, y0),
             arrowprops=dict(
                 arrowstyle="-|>",
                 color="black",
-                lw=2.8,
-                alpha=ARROW_ALPHA * 0.6,
-                mutation_scale=ARROW_SIZE + 3,
+                lw=2.5,
+                alpha=ARROW_ALPHA * 0.55,
+                mutation_scale=ARROW_SIZE + 2,
                 shrinkA=0, shrinkB=0,
             ),
             zorder=4,
@@ -365,7 +375,7 @@ def _draw_direction_arrows(ax, sub: pd.DataFrame, color: str):
             arrowprops=dict(
                 arrowstyle="-|>",
                 color=color,
-                lw=1.4,
+                lw=1.3,
                 alpha=ARROW_ALPHA,
                 mutation_scale=ARROW_SIZE,
                 shrinkA=0, shrinkB=0,
