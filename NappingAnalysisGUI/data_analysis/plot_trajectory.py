@@ -217,6 +217,52 @@ def extract_cups(df: pd.DataFrame) -> dict:
         else:
             cups[cup_id]["_bottom_full"] = pd.DataFrame(columns=["frame", "x", "y"])
 
+    # ── Recalage top → bottom par offset médian ─────────────────────────────
+    # Sur les frames où ema ET bottom sont simultanément disponibles,
+    # on calcule offset = médiane(bottom - ema) et on l'applique à
+    # ema / raw / filtered pour les aligner sur le référentiel bottom.
+    # La médiane est robuste aux outliers (dérives KCF ponctuelles).
+    TOP_SOURCES = {"ema", "raw", "filtered"}
+
+    for cup_id, srcs in cups.items():
+        ref_ema    = srcs.get("ema")
+        ref_bottom = srcs.get("bottom")
+
+        if ref_ema is None or ref_bottom is None or ref_bottom.empty:
+            continue
+
+        # Jointure sur frame pour trouver les frames communes
+        merged = ref_ema.merge(
+            ref_bottom[["frame", "x", "y"]].rename(columns={"x": "bx", "y": "by"}),
+            on="frame", how="inner",
+        )
+
+        if len(merged) < 5:
+            print(f"  [offset] Tasse {cup_id:>3} : pas assez de frames communes "
+                  f"({len(merged)}) — recalage ignoré")
+            continue
+
+        # Offset médian (robuste aux outliers)
+        off_x = float(np.median(merged["bx"] - merged["x"]))
+        off_y = float(np.median(merged["by"] - merged["y"]))
+
+        if abs(off_x) < 0.5 and abs(off_y) < 0.5:
+            continue  # offset négligeable
+
+        print(f"  [offset] Tasse {cup_id:>3} : "
+              f"Dx={off_x:+.1f}mm  Dy={off_y:+.1f}mm  "
+              f"(sur {len(merged)} frames communes)")
+
+        # Appliquer à toutes les sources top
+        for src in TOP_SOURCES:
+            if src in srcs and not srcs[src].empty:
+                srcs[src] = srcs[src].copy()
+                srcs[src]["x"] = srcs[src]["x"] + off_x
+                srcs[src]["y"] = srcs[src]["y"] + off_y
+
+        # Stocker l'offset pour usage externe si besoin
+        srcs["_top_offset"] = (off_x, off_y)
+
     for cid, srcs in sorted(cups.items(),
                              key=lambda kv: int(kv[0]) if kv[0].isdigit() else kv[0]):
         pts = {s: len(v) for s, v in srcs.items() if not s.startswith("_")}
@@ -892,14 +938,32 @@ def main():
     parser = argparse.ArgumentParser(
         description="Trajectoires de tasses — contrôles dans l'interface."
     )
-    parser.add_argument("csv")
-    parser.add_argument("--downsample", type=int, default=1, metavar="N")
-    parser.add_argument("--output",     type=str, default=None, metavar="FICHIER.png")
+    parser.add_argument("csv",          nargs="?", default=None)
+    parser.add_argument("--downsample", type=int,  default=1,    metavar="N")
+    parser.add_argument("--output",     type=str,  default=None, metavar="FICHIER.png")
     args = parser.parse_args()
 
-    df    = load_csv(args.csv)
+    # ── Sélection du fichier ──────────────────────────────────────────────────
+    if args.csv is None:
+        # QApplication doit exister avant tout widget
+        app = QApplication.instance() or QApplication(sys.argv)
+
+        from PyQt6.QtWidgets import QFileDialog
+        csv_path, _ = QFileDialog.getOpenFileName(
+            None,
+            "Ouvrir un fichier CSV de trajectoires",
+            "",
+            "Fichiers CSV (*.csv);;Tous les fichiers (*)",
+        )
+        if not csv_path:
+            print("[Annulé] Aucun fichier sélectionné.")
+            sys.exit(0)
+    else:
+        csv_path = args.csv
+
+    df    = load_csv(csv_path)
     cups  = extract_cups(df)
-    title = Path(args.csv).stem.replace("_", " ")
+    title = Path(csv_path).stem.replace("_", " ")
 
     plot_trajectories(
         cups        = cups,
