@@ -58,7 +58,6 @@ TEXT_DIM  = "#7A9ABF"
 SEP_COLOR = "#1E3A5C"
 
 # ── Poses ─────────────────────────────────────────────────────────────────────
-POSE_SEGMENT_ALPHA = 0.55
 POSE_MARKER_COLOR  = "#FFFFFF"
 POSE_MARKER_SIZE   = 120
 POSE_GAP_TOLERANCE = 5       # frames de gap max dans un même épisode
@@ -460,33 +459,22 @@ def _draw_poses(ax, cup_id: str, sub: pd.DataFrame,
                 episodes: list[dict], cup_col: str):
     """
     Pour chaque épisode (potentiellement fusionné) :
-      • Surbrillance du segment de trajectoire
-      • Marqueur losange blanc + compteur si > 1 pose fusionnée
+      • Losange ancré sur le centroïde bottom (cx, cy) — position ArUco réelle
+      • Pas de surbrillance du segment KCF : pendant une pose le tracker dérive,
+        tracer ce segment ajouterait des artefacts absents de la vraie trajectoire
+
+    sub  : trajectoire source (ema/raw/filtered) — utilisée uniquement pour
+           positionner le losange si bottom n'a pas de centroïde valide.
+    ep["cx"], ep["cy"] : centroïde bottom de l'épisode — vérité terrain.
     """
-    if not episodes or sub.empty:
+    if not episodes:
         return
 
-    frame_to_xy = {int(r.frame): (r.x, r.y) for r in sub.itertuples()}
-
     for k, ep in enumerate(episodes):
-        f_min, f_max = min(ep["frames"]), max(ep["frames"])
-        seg = sub[(sub["frame"] >= f_min) & (sub["frame"] <= f_max)]
+        # ── Position du losange : centroïde bottom en priorité ───────────────
+        mx, my = ep["cx"], ep["cy"]
 
-        if len(seg) >= 2:
-            ax.plot(seg["x"].values, seg["y"].values,
-                    color=cup_col, lw=5, alpha=POSE_SEGMENT_ALPHA,
-                    solid_capstyle="round", zorder=3)
-
-        # Position du marqueur
-        mid_frame = ep["frames"][len(ep["frames"]) // 2]
-        if mid_frame in frame_to_xy:
-            mx, my = frame_to_xy[mid_frame]
-        else:
-            src_frames = np.array(list(frame_to_xy.keys()))
-            closest    = src_frames[np.argmin(np.abs(src_frames - mid_frame))]
-            mx, my     = frame_to_xy[closest]
-
-        count = ep.get("count", 1)
+        count        = ep.get("count", 1)
         label_legend = (f"#{cup_id} pose ×{len(episodes)}"
                         if k == 0 else "_nolegend_")
 
@@ -500,7 +488,7 @@ def _draw_poses(ax, cup_id: str, sub: pd.DataFrame,
             label=label_legend,
         )
 
-        # Compteur sur le losange si poses fusionnées
+        # Numéro / compteur de fusion
         count_label = str(count) if count > 1 else str(k + 1)
         ax.annotate(
             count_label,
