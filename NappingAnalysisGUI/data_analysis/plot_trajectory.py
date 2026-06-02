@@ -65,14 +65,12 @@ POSE_GAP_TOLERANCE = 5       # frames de gap max dans un même épisode
 POSE_MERGE_MM      = 30.0    # distance en mm sous laquelle deux poses sont fusionnées
 
 # ── Flèches directionnelles ───────────────────────────────────────────────────
-SHOW_DIRECTION_DEFAULT = True   # ← activé par défaut (v6)
+SHOW_DIRECTION_DEFAULT = True
 
-# Nombre cible de flèches par segment (adaptatif selon longueur)
-ARROW_TARGET_COUNT = 6          # on vise N flèches par segment
-ARROW_MIN_SPACING  = 20         # points minimum entre deux flèches
-ARROW_SMOOTH_WIN   = 5          # fenêtre de lissage direction
-ARROW_ALPHA        = 0.80
-ARROW_SIZE         = 11         # mutation_scale matplotlib
+ARROW_SPACING_MM  = 80      # une flèche tous les 80 mm de trajectoire réelle
+ARROW_SMOOTH_WIN  = 5       # fenêtre de lissage direction (points)
+ARROW_ALPHA       = 0.80
+ARROW_SIZE        = 11      # mutation_scale matplotlib
 
 # ── Numérotation temporelle ───────────────────────────────────────────────────
 SHOW_TIME_LABELS_DEFAULT = True
@@ -309,9 +307,8 @@ def compute_stats(sub: pd.DataFrame) -> dict:
 
 def _draw_direction_arrows(ax, sub: pd.DataFrame, color: str):
     """
-    Flèches directionnelles noires contourées (lisibles sur tout fond).
-    Densité adaptative : ARROW_TARGET_COUNT flèches par segment,
-    espacées au minimum de ARROW_MIN_SPACING points.
+    Flèches directionnelles espacées par distance cumulée (mm),
+    pas par indice — densité uniforme quelle que soit la vitesse.
     """
     n = len(sub)
     if n < ARROW_SMOOTH_WIN * 2 + 2:
@@ -320,21 +317,34 @@ def _draw_direction_arrows(ax, sub: pd.DataFrame, color: str):
     xs = sub["x"].values
     ys = sub["y"].values
 
-    # Espacement adaptatif
-    spacing = max(ARROW_MIN_SPACING, n // ARROW_TARGET_COUNT)
-    half    = ARROW_SMOOTH_WIN
+    # Distance cumulée le long de la trajectoire
+    dx_all  = np.diff(xs)
+    dy_all  = np.diff(ys)
+    dists   = np.sqrt(dx_all**2 + dy_all**2)
+    cumdist = np.concatenate([[0.0], np.cumsum(dists)])
+    total   = cumdist[-1]
 
-    indices = range(half, n - half, spacing)
+    if total < 1.0:
+        return
 
-    for i in indices:
+    # Espacement fixe en mm — une flèche tous les ARROW_SPACING_MM
+    step = ARROW_SPACING_MM
+    targets = np.arange(step, total, step)
+
+    half = ARROW_SMOOTH_WIN
+
+    for target in targets:
+        # Indice du point le plus proche de la distance cible
+        i = int(np.searchsorted(cumdist, target))
+        i = max(half, min(i, n - half - 1))
+
         x0, y0 = xs[i - half], ys[i - half]
         x1, y1 = xs[i + half], ys[i + half]
 
-        dx, dy = x1 - x0, y1 - y0
-        if dx == 0 and dy == 0:
+        if x0 == x1 and y0 == y1:
             continue
 
-        # Contour noir (légèrement plus large) pour lisibilité sur tout fond
+        # Contour noir pour lisibilité sur tout fond
         ax.annotate(
             "",
             xy=(x1, y1), xytext=(x0, y0),
