@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-plot_trajectory.py  –  v5
+plot_trajectory.py  –  v6
 =========================
 Visualisation multi-tasses / multi-sources — tout dans l'interface.
 
-Nouveautés v5 :
-  • Détection des épisodes de pose via la source "bottom"
-  • Affichage : surbrillance du segment posé + marqueur central par épisode
-  • Checkbox "Poses" dans la barre de contrôles
+Nouveautés v6 :
+  • Couleur unique par tasse (par défaut), dégradé temporel en option
+  • Flèches directionnelles activées par défaut, densité adaptative
+  • Numérotation temporelle progressive (t1, t2, …) le long de la trajectoire
+  • Poses : fusion des épisodes proches (< POSE_MERGE_MM), compteur sur marqueur
 
 Usage :
     python plot_trajectory.py chemin/vers/fichier.csv
@@ -31,10 +32,9 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolb
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow,
     QLabel, QComboBox, QCheckBox,
-    QWidget, QHBoxLayout, QVBoxLayout, QFrame, QSizePolicy,
+    QWidget, QHBoxLayout, QVBoxLayout, QFrame,
 )
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFont
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -57,12 +57,27 @@ TEXT_MAIN = "#E8EEF4"
 TEXT_DIM  = "#7A9ABF"
 SEP_COLOR = "#1E3A5C"
 
-# Couleur et style des marqueurs de pose
-POSE_SEGMENT_ALPHA = 0.55   # transparence du segment surligné
+# ── Poses ─────────────────────────────────────────────────────────────────────
+POSE_SEGMENT_ALPHA = 0.55
 POSE_MARKER_COLOR  = "#FFFFFF"
-POSE_MARKER_EDGE   = "#000000"
 POSE_MARKER_SIZE   = 120
-POSE_GAP_TOLERANCE = 5      # frames de gap max dans un même épisode
+POSE_GAP_TOLERANCE = 5       # frames de gap max dans un même épisode
+POSE_MERGE_MM      = 30.0    # distance en mm sous laquelle deux poses sont fusionnées
+
+# ── Flèches directionnelles ───────────────────────────────────────────────────
+SHOW_DIRECTION_DEFAULT = True   # ← activé par défaut (v6)
+
+# Nombre cible de flèches par segment (adaptatif selon longueur)
+ARROW_TARGET_COUNT = 6          # on vise N flèches par segment
+ARROW_MIN_SPACING  = 20         # points minimum entre deux flèches
+ARROW_SMOOTH_WIN   = 5          # fenêtre de lissage direction
+ARROW_ALPHA        = 0.80
+ARROW_SIZE         = 11         # mutation_scale matplotlib
+
+# ── Numérotation temporelle ───────────────────────────────────────────────────
+SHOW_TIME_LABELS_DEFAULT = True
+TIME_LABEL_COUNT   = 8          # nombre de labels "t1…tN" par trajectoire
+TIME_LABEL_OFFSET  = (5, 5)     # offset pixels du texte par rapport au point
 
 
 def cup_color(cup_id: str) -> str:
@@ -152,10 +167,6 @@ def load_csv(path: str) -> pd.DataFrame:
 
 
 def extract_cups(df: pd.DataFrame) -> dict:
-    """
-    Retourne cups[cup_id][source] = DataFrame(frame, x, y).
-    Conserve aussi les frames brutes du bottom pour la détection des poses.
-    """
     cups: dict[str, dict] = {}
     for source in SOURCES:
         for col_x in [c for c in df.columns
@@ -174,14 +185,12 @@ def extract_cups(df: pd.DataFrame) -> dict:
         print("[ERREUR] Aucune colonne ID_N_x_<source> trouvée.")
         sys.exit(1)
 
-    # Stocker les frames valides de bottom (avant dropna) pour détection de pose
     for cup_id in cups:
         col_x_b = f"ID_{cup_id}_x_bottom"
         col_y_b = f"ID_{cup_id}_y_bottom"
         if col_x_b in df.columns and col_y_b in df.columns:
             b = df[["frame", col_x_b, col_y_b]].copy()
             b.columns = ["frame", "x", "y"]
-            # garder TOUTES les lignes (NaN inclus) pour avoir l'index des frames
             cups[cup_id]["_bottom_full"] = b
         else:
             cups[cup_id]["_bottom_full"] = pd.DataFrame(columns=["frame", "x", "y"])
@@ -194,69 +203,82 @@ def extract_cups(df: pd.DataFrame) -> dict:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Détection des épisodes de pose
+#  Détection des épisodes de pose  +  fusion des poses proches
 # ──────────────────────────────────────────────────────────────────────────────
 
 def detect_pose_episodes(cups: dict, cup_id: str,
                           gap_tolerance: int = POSE_GAP_TOLERANCE) -> list[dict]:
     """
-    Retourne une liste d'épisodes :
-        [{ "frames": [f1, f2, …], "cx": float, "cy": float }, …]
-    cx/cy = centroïde bottom de l'épisode.
+    Retourne une liste d'épisodes fusionnés :
+        [{ "frames": [...], "cx": float, "cy": float, "count": int }, …]
+
+    Fusion : si deux épisodes consécutifs ont leurs centroïdes à moins de
+    POSE_MERGE_MM, ils sont regroupés en un seul marqueur (count > 1).
     """
     b = cups[cup_id].get("_bottom_full", pd.DataFrame())
     if b.empty:
         return []
 
-    # Frames où bottom est valide
     valid = b.dropna(subset=["x", "y"]).copy()
     if valid.empty:
         return []
 
     frames = sorted(valid["frame"].astype(int).tolist())
 
-    # Regrouper en épisodes (gap ≤ tolerance)
-    episodes = []
-    current  = [frames[0]]
+    # Segmenter en épisodes bruts
+    raw_episodes = []
+    current = [frames[0]]
     for f in frames[1:]:
         if f - current[-1] <= gap_tolerance + 1:
             current.append(f)
         else:
-            episodes.append(current)
+            raw_episodes.append(current)
             current = [f]
-    episodes.append(current)
+    raw_episodes.append(current)
 
-    # Calculer le centroïde bottom de chaque épisode
-    result = []
-    for ep in episodes:
+    # Calculer centroïde de chaque épisode brut
+    enriched = []
+    for ep in raw_episodes:
         ep_rows = valid[valid["frame"].isin(ep)]
         cx = float(ep_rows["x"].mean())
         cy = float(ep_rows["y"].mean())
-        result.append({"frames": ep, "cx": cx, "cy": cy})
+        enriched.append({"frames": ep, "cx": cx, "cy": cy, "count": 1})
 
-    return result
+    # ── Fusion des poses proches ──────────────────────────────────────────────
+    merged = [enriched[0]]
+    for ep in enriched[1:]:
+        prev = merged[-1]
+        dist = np.sqrt((ep["cx"] - prev["cx"])**2 + (ep["cy"] - prev["cy"])**2)
+        if dist < POSE_MERGE_MM:
+            # Fusionner : recalculer centroïde pondéré par nb de frames
+            n1 = len(prev["frames"])
+            n2 = len(ep["frames"])
+            total = n1 + n2
+            merged[-1] = {
+                "frames": prev["frames"] + ep["frames"],
+                "cx": (prev["cx"] * n1 + ep["cx"] * n2) / total,
+                "cy": (prev["cy"] * n1 + ep["cy"] * n2) / total,
+                "count": prev["count"] + ep["count"],
+            }
+        else:
+            merged.append(ep)
+
+    return merged
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Découpage en segments continus (coupe la ligne aux gaps de frames)
+#  Découpage en segments continus
 # ──────────────────────────────────────────────────────────────────────────────
 
-# Seuil : si deux frames consécutives dans le DataFrame sont distantes de plus
-# de GAP_FRAMES_THRESHOLD frames réelles, on coupe la ligne.
 GAP_FRAMES_THRESHOLD = 8
 
 def split_continuous_segments(sub: pd.DataFrame,
                                gap: int = GAP_FRAMES_THRESHOLD) -> list[pd.DataFrame]:
-    """
-    Découpe sub en sous-DataFrames continus.
-    Un 'saut' est détecté quand la différence entre deux numéros de frame
-    consécutifs dépasse `gap`.
-    """
     if sub.empty:
         return []
     frames = sub["frame"].astype(int).values
     diffs  = np.diff(frames)
-    cuts   = np.where(diffs > gap)[0] + 1          # indices de coupure
+    cuts   = np.where(diffs > gap)[0] + 1
     segs   = []
     prev   = 0
     for cut in cuts:
@@ -282,29 +304,127 @@ def compute_stats(sub: pd.DataFrame) -> dict:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Superposition des poses sur la trajectoire
+#  Flèches directionnelles  (v6 — densité adaptative)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _draw_direction_arrows(ax, sub: pd.DataFrame, color: str):
+    """
+    Flèches directionnelles noires contourées (lisibles sur tout fond).
+    Densité adaptative : ARROW_TARGET_COUNT flèches par segment,
+    espacées au minimum de ARROW_MIN_SPACING points.
+    """
+    n = len(sub)
+    if n < ARROW_SMOOTH_WIN * 2 + 2:
+        return
+
+    xs = sub["x"].values
+    ys = sub["y"].values
+
+    # Espacement adaptatif
+    spacing = max(ARROW_MIN_SPACING, n // ARROW_TARGET_COUNT)
+    half    = ARROW_SMOOTH_WIN
+
+    indices = range(half, n - half, spacing)
+
+    for i in indices:
+        x0, y0 = xs[i - half], ys[i - half]
+        x1, y1 = xs[i + half], ys[i + half]
+
+        dx, dy = x1 - x0, y1 - y0
+        if dx == 0 and dy == 0:
+            continue
+
+        # Contour noir (légèrement plus large) pour lisibilité sur tout fond
+        ax.annotate(
+            "",
+            xy=(x1, y1), xytext=(x0, y0),
+            arrowprops=dict(
+                arrowstyle="-|>",
+                color="black",
+                lw=2.8,
+                alpha=ARROW_ALPHA * 0.6,
+                mutation_scale=ARROW_SIZE + 3,
+                shrinkA=0, shrinkB=0,
+            ),
+            zorder=4,
+        )
+        # Flèche colorée par-dessus
+        ax.annotate(
+            "",
+            xy=(x1, y1), xytext=(x0, y0),
+            arrowprops=dict(
+                arrowstyle="-|>",
+                color=color,
+                lw=1.4,
+                alpha=ARROW_ALPHA,
+                mutation_scale=ARROW_SIZE,
+                shrinkA=0, shrinkB=0,
+            ),
+            zorder=5,
+        )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  Numérotation temporelle progressive  (v6 — NOUVEAU)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _draw_time_labels(ax, sub: pd.DataFrame, color: str,
+                      n_labels: int = TIME_LABEL_COUNT):
+    """
+    Place n_labels petits repères temporels (t1, t2, …) régulièrement
+    répartis sur la trajectoire (hors premier et dernier points déjà marqués).
+    Fond semi-transparent pour rester lisible sur toute trajectoire.
+    """
+    n = len(sub)
+    if n < n_labels * 2:
+        return
+
+    # Indices équidistants (excluant le début et la fin)
+    indices = np.linspace(0, n - 1, n_labels + 2, dtype=int)[1:-1]
+
+    for rank, idx in enumerate(indices, start=1):
+        x = sub["x"].iloc[idx]
+        y = sub["y"].iloc[idx]
+        label = f"t{rank}"
+
+        ax.annotate(
+            label,
+            xy=(x, y),
+            xytext=TIME_LABEL_OFFSET,
+            textcoords="offset points",
+            fontsize=7,
+            fontweight="bold",
+            color=color,
+            zorder=8,
+            bbox=dict(
+                boxstyle="round,pad=0.18",
+                facecolor="#0D1B2A",
+                edgecolor=color,
+                alpha=0.82,
+                linewidth=0.8,
+            ),
+        )
+        # Petit point de rattachement
+        ax.scatter(x, y, s=18, color=color, zorder=7, alpha=0.9)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  Superposition des poses
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _draw_poses(ax, cup_id: str, sub: pd.DataFrame,
                 episodes: list[dict], cup_col: str):
     """
-    Pour chaque épisode :
-      • Surbrillance du segment de la trajectoire source pendant la pose
-      • Marqueur central (losange blanc cerclé de la couleur de la tasse)
-    sub : DataFrame(frame, x, y) de la source affichée (ema/raw/filtered).
+    Pour chaque épisode (potentiellement fusionné) :
+      • Surbrillance du segment de trajectoire
+      • Marqueur losange blanc + compteur si > 1 pose fusionnée
     """
     if not episodes or sub.empty:
         return
 
-    # Index rapide frame → (x, y) dans la trajectoire source
     frame_to_xy = {int(r.frame): (r.x, r.y) for r in sub.itertuples()}
 
     for k, ep in enumerate(episodes):
-        ep_frames = set(ep["frames"])
-
-        # ── Segment surligné ──────────────────────────────────────────────────
-        # Points de la trajectoire source qui tombent dans la fenêtre de pose
-        # (on étend légèrement autour pour inclure les frames intermédiaires)
         f_min, f_max = min(ep["frames"]), max(ep["frames"])
         seg = sub[(sub["frame"] >= f_min) & (sub["frame"] <= f_max)]
 
@@ -313,17 +433,18 @@ def _draw_poses(ax, cup_id: str, sub: pd.DataFrame,
                     color=cup_col, lw=5, alpha=POSE_SEGMENT_ALPHA,
                     solid_capstyle="round", zorder=3)
 
-        # ── Marqueur central (losange) ────────────────────────────────────────
-        # Position dans la trajectoire source à la frame médiane de l'épisode
+        # Position du marqueur
         mid_frame = ep["frames"][len(ep["frames"]) // 2]
-        # Chercher la frame source la plus proche
         if mid_frame in frame_to_xy:
             mx, my = frame_to_xy[mid_frame]
         else:
-            # Prendre la frame source la plus proche
             src_frames = np.array(list(frame_to_xy.keys()))
             closest    = src_frames[np.argmin(np.abs(src_frames - mid_frame))]
             mx, my     = frame_to_xy[closest]
+
+        count = ep.get("count", 1)
+        label_legend = (f"#{cup_id} pose ×{len(episodes)}"
+                        if k == 0 else "_nolegend_")
 
         ax.scatter(
             mx, my,
@@ -332,14 +453,15 @@ def _draw_poses(ax, cup_id: str, sub: pd.DataFrame,
             edgecolors=cup_col,
             linewidths=2.0,
             zorder=6,
-            label=f"#{cup_id} pose ×{len(episodes)}" if k == 0 else "_nolegend_",
+            label=label_legend,
         )
 
-        # ── Numéro de l'épisode (petit label) ────────────────────────────────
+        # Compteur sur le losange si poses fusionnées
+        count_label = str(count) if count > 1 else str(k + 1)
         ax.annotate(
-            str(k + 1),
+            count_label,
             xy=(mx, my), xytext=(4, 4), textcoords="offset points",
-            fontsize=7, color=cup_col, fontweight="bold", zorder=7,
+            fontsize=7, color=cup_col, fontweight="bold", zorder=9,
         )
 
 
@@ -347,61 +469,80 @@ def _draw_poses(ax, cup_id: str, sub: pd.DataFrame,
 #  Dessin d'une tasse
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _draw_one(ax, fig, cup_id, sub, source, cups,
-              downsample, use_colormap, show_poses, show_stats):
+def _draw_one(
+    ax, fig, cup_id, sub, source, cups,
+    downsample, use_colormap,
+    show_poses,
+    show_direction,
+    show_time_labels,
+    show_stats,
+):
     color = cup_color(cup_id)
     if downsample > 1:
         sub = sub.iloc[::downsample].reset_index(drop=True)
 
-    # Nombre total de points valides avant segmentation
     n = len(sub)
     if n == 0:
         return
 
-    label   = f"Cup #{cup_id}  [{source}]"
-    # Découpe en segments continus (coupe aux gaps de détection)
+    label    = f"Cup #{cup_id}  [{source}]"
     segments = split_continuous_segments(sub)
 
+    # ── Tracé principal ───────────────────────────────────────────────────────
     if use_colormap and n > 1:
-        # Colormap globale sur toutes les frames (index dans sub original)
-        cmap      = plt.colormaps["plasma"]
-        norm      = mcolors.Normalize(vmin=0, vmax=n - 1)
-        global_i  = 0
+        cmap     = plt.colormaps["plasma"]
+        norm     = mcolors.Normalize(vmin=0, vmax=n - 1)
+        global_i = 0
         for seg in segments:
             xs, ys = seg["x"].values, seg["y"].values
             for i in range(len(xs) - 1):
                 ax.plot(xs[i:i+2], ys[i:i+2],
-                        color=cmap(norm(global_i + i)), lw=1.4, alpha=0.85)
+                        color=cmap(norm(global_i + i)), lw=1.6, alpha=0.90)
             global_i += len(xs)
         sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
         sm.set_array([])
         cb = fig.colorbar(sm, ax=ax, pad=0.01, fraction=0.018, shrink=0.85)
-        cb.set_label("Frame", color="#A0B8D0", fontsize=9, labelpad=6)
+        cb.set_label("Frame (temps)", color="#A0B8D0", fontsize=9, labelpad=6)
         cb.ax.yaxis.set_tick_params(color="#A0B8D0", labelsize=8)
         plt.setp(cb.ax.yaxis.get_ticklabels(), color="#A0B8D0")
+        # Avec le dégradé, la couleur de tracé pour les annotations est la teinte médiane
+        mid_color = mcolors.to_hex(cmap(0.5))
     else:
         for k, seg in enumerate(segments):
             ax.plot(seg["x"].values, seg["y"].values,
-                    color=color, lw=1.4, alpha=0.85,
+                    color=color, lw=1.6, alpha=0.88,
                     label=label if k == 0 else "_nolegend_")
+        mid_color = color
 
-    # Marqueurs départ / arrivée (premier et dernier point valides)
+    # ── Flèches directionnelles (sur chaque segment) ─────────────────────────
+    if show_direction:
+        for seg in segments:
+            _draw_direction_arrows(ax, seg, color)
+
+    # ── Numérotation temporelle ───────────────────────────────────────────────
+    if show_time_labels:
+        _draw_time_labels(ax, sub, color)
+
+    # ── Marqueurs départ / arrivée ────────────────────────────────────────────
     x0, y0 = sub["x"].iloc[0],  sub["y"].iloc[0]
     x1, y1 = sub["x"].iloc[-1], sub["y"].iloc[-1]
-    ax.scatter(x0, y0, s=70, color="#06D6A0", zorder=5,
-               marker="o", label=f"#{cup_id} départ")
-    ax.scatter(x1, y1, s=70, color="#E63946",  zorder=5,
-               marker="X", label=f"#{cup_id} arrivée")
+    ax.scatter(x0, y0, s=80, color="#06D6A0", zorder=10,
+               marker="o", label=f"#{cup_id} départ",
+               edgecolors="white", linewidths=1.2)
+    ax.scatter(x1, y1, s=80, color="#E63946",  zorder=10,
+               marker="X", label=f"#{cup_id} arrivée",
+               edgecolors="white", linewidths=0.8)
 
     # ── Poses ─────────────────────────────────────────────────────────────────
     if show_poses and source != "bottom":
         episodes = detect_pose_episodes(cups, cup_id)
         _draw_poses(ax, cup_id, sub, episodes, color)
 
+    # ── Stats ─────────────────────────────────────────────────────────────────
     if show_stats:
-        st   = compute_stats(sub)
+        st = compute_stats(sub)
         n_poses = len(detect_pose_episodes(cups, cup_id)) if show_poses else 0
-        pose_line = f"Poses détectées : {n_poses}\n" if show_poses else ""
+        pose_line = f"Poses : {n_poses}\n" if show_poses else ""
         info = (
             f"Cup #{cup_id}  [{source}]\n"
             f"{st['n_frames']} frames\n"
@@ -421,8 +562,15 @@ def _draw_one(ax, fig, cup_id, sub, source, cups,
 #  Rendu complet
 # ──────────────────────────────────────────────────────────────────────────────
 
-def render(fig, ax, cups, cup_ids, source, downsample,
-           use_colormap, show_poses, file_title):
+def render(
+    fig, ax, cups, cup_ids,
+    source, downsample,
+    use_colormap,
+    show_poses,
+    show_direction,
+    show_time_labels,
+    file_title,
+):
     for extra in [a for a in fig.axes if a is not ax]:
         extra.remove()
     ax.clear()
@@ -451,9 +599,16 @@ def render(fig, ax, cups, cup_ids, source, downsample,
         if sub is None or sub.empty:
             print(f"[WARN] Cup #{cup_id} / '{source}' : pas de données")
             continue
-        _draw_one(ax, fig, cup_id, sub, source, cups,
-                  downsample, use_colormap, show_poses,
-                  show_stats=(not overlay))
+        _draw_one(
+            ax, fig,
+            cup_id, sub, source, cups,
+            downsample,
+            use_colormap,
+            show_poses,
+            show_direction,
+            show_time_labels,
+            show_stats=(not overlay),
+        )
 
     if not use_colormap:
         ax.legend(loc="lower right", fontsize=8,
@@ -463,24 +618,26 @@ def render(fig, ax, cups, cup_ids, source, downsample,
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Barre de contrôles
+#  Barre de contrôles  (v6)
 # ──────────────────────────────────────────────────────────────────────────────
 
 class ControlBar(QWidget):
 
     def __init__(self, cups, fig, ax, downsample, file_title, parent=None):
         super().__init__(parent)
-        self._cups        = cups
-        self._fig         = fig
-        self._ax          = ax
-        self._downsample  = downsample
-        self._file_title  = file_title
-        self._all_ids     = sorted(cups.keys(),
-                                   key=lambda x: int(x) if x.isdigit() else x)
-        self._source       = "ema"
-        self._active_ids   = [self._all_ids[0]] if self._all_ids else []
-        self._use_colormap = False
-        self._show_poses   = False
+        self._cups           = cups
+        self._fig            = fig
+        self._ax             = ax
+        self._downsample     = downsample
+        self._file_title     = file_title
+        self._all_ids        = sorted(cups.keys(),
+                                      key=lambda x: int(x) if x.isdigit() else x)
+        self._source         = "ema"
+        self._active_ids     = [self._all_ids[0]] if self._all_ids else []
+        self._use_colormap   = False   # couleur unique par tasse par défaut
+        self._show_poses     = False
+        self._show_direction = SHOW_DIRECTION_DEFAULT
+        self._show_time_labels = SHOW_TIME_LABELS_DEFAULT
 
         self.setAutoFillBackground(True)
         self.setStyleSheet(f"background-color: {BG_PANEL};")
@@ -525,22 +682,45 @@ class ControlBar(QWidget):
         layout.addWidget(vline())
 
         # ── Dégradé temporel ──────────────────────────────────────────────────
-        self._cb_cmap = QCheckBox("Dégradé temporel")
+        self._cb_cmap = QCheckBox("Dégradé")
         self._cb_cmap.setStyleSheet(checkbox_style("#A78BFA"))
         self._cb_cmap.setChecked(False)
+        self._cb_cmap.setToolTip("Dégradé violet→jaune selon le temps\n(violet = début, jaune = fin)")
         self._cb_cmap.stateChanged.connect(self._on_colormap)
         layout.addWidget(self._cb_cmap)
 
         layout.addWidget(vline())
 
+        # ── Flèches directionnelles ───────────────────────────────────────────
+        self._cb_direction = QCheckBox("Flèches →")
+        self._cb_direction.setStyleSheet(checkbox_style("#4A9FD4"))
+        self._cb_direction.setChecked(self._show_direction)
+        self._cb_direction.setToolTip("Flèches directionnelles le long de la trajectoire")
+        self._cb_direction.stateChanged.connect(self._on_direction)
+        layout.addWidget(self._cb_direction)
+
+        layout.addWidget(vline())
+
+        # ── Repères temporels ─────────────────────────────────────────────────
+        self._cb_time = QCheckBox("Repères t")
+        self._cb_time.setStyleSheet(checkbox_style("#06D6A0"))
+        self._cb_time.setChecked(self._show_time_labels)
+        self._cb_time.setToolTip(
+            "Affiche des repères t1…t8 régulièrement\n"
+            "répartis sur la trajectoire pour lire l'ordre"
+        )
+        self._cb_time.stateChanged.connect(self._on_time_labels)
+        layout.addWidget(self._cb_time)
+
+        layout.addWidget(vline())
+
         # ── Poses ─────────────────────────────────────────────────────────────
-        self._cb_poses = QCheckBox("Poses  ◆")
+        self._cb_poses = QCheckBox("Poses ◆")
         self._cb_poses.setStyleSheet(checkbox_style("#F0C040"))
         self._cb_poses.setChecked(False)
         self._cb_poses.setToolTip(
-            "Affiche les épisodes où la tasse est posée\n"
-            "(détectés via la caméra bottom)\n"
-            "◆ = centroïde de pose  |  trait épais = durée de l'épisode"
+            "Épisodes où la tasse est posée (cam bottom)\n"
+            "◆ = centroïde  |  chiffre = nb de poses fusionnées"
         )
         self._cb_poses.stateChanged.connect(self._on_poses)
         layout.addWidget(self._cb_poses)
@@ -551,7 +731,6 @@ class ControlBar(QWidget):
 
     def _on_source(self, _):
         self._source = self._combo_src.currentData()
-        # Désactiver "Poses" si on affiche la source bottom (redondant)
         is_bottom = self._source == "bottom"
         self._cb_poses.setEnabled(not is_bottom)
         if is_bottom:
@@ -567,6 +746,14 @@ class ControlBar(QWidget):
         self._use_colormap = self._cb_cmap.isChecked()
         self._refresh()
 
+    def _on_direction(self, _):
+        self._show_direction = self._cb_direction.isChecked()
+        self._refresh()
+
+    def _on_time_labels(self, _):
+        self._show_time_labels = self._cb_time.isChecked()
+        self._refresh()
+
     def _on_poses(self, _):
         self._show_poses = self._cb_poses.isChecked()
         self._refresh()
@@ -580,6 +767,8 @@ class ControlBar(QWidget):
             downsample=self._downsample,
             use_colormap=self._use_colormap,
             show_poses=self._show_poses,
+            show_direction=self._show_direction,
+            show_time_labels=self._show_time_labels,
             file_title=self._file_title,
         )
 
@@ -598,7 +787,14 @@ class TrajectoryWindow(QMainWindow):
         fig.patch.set_facecolor(BG_DARK)
 
         all_ids = sorted(cups.keys(), key=lambda x: int(x) if x.isdigit() else x)
-        render(fig, ax, cups, [all_ids[0]], "ema", downsample, False, False, file_title)
+        render(
+            fig, ax, cups, [all_ids[0]], "ema", downsample,
+            use_colormap=False,
+            show_poses=False,
+            show_direction=SHOW_DIRECTION_DEFAULT,
+            show_time_labels=SHOW_TIME_LABELS_DEFAULT,
+            file_title=file_title,
+        )
 
         canvas  = FigureCanvasQTAgg(fig)
         mpl_bar = NavigationToolbar2QT(canvas, self)
@@ -639,7 +835,14 @@ def plot_trajectories(cups, file_title="Trajectoires", downsample=1, output_path
     if output_path:
         fig, ax = plt.subplots(figsize=(12, 8))
         fig.patch.set_facecolor(BG_DARK)
-        render(fig, ax, cups, [all_ids[0]], "ema", downsample, False, False, file_title)
+        render(
+            fig, ax, cups, [all_ids[0]], "ema", downsample,
+            use_colormap=False,
+            show_poses=False,
+            show_direction=True,
+            show_time_labels=True,
+            file_title=file_title,
+        )
         plt.tight_layout()
         plt.savefig(output_path, dpi=150, bbox_inches="tight",
                     facecolor=fig.get_facecolor())
