@@ -166,6 +166,17 @@ def load_csv(path: str) -> pd.DataFrame:
 
 
 def extract_cups(df: pd.DataFrame) -> dict:
+    """
+    Charge les trajectoires par tasse et par source.
+
+    Filtrage hijack : pour les sources ema / raw / filtered,
+    les frames où ID_{id}_hijack == 1 sont écartées — leurs coordonnées
+    sont potentiellement corrompues (tracker KCF sur mauvaise cible).
+    La source 'bottom' (ArUco) est immunisée et n'est jamais filtrée.
+    """
+    # Sources dont les coordonnées sont invalides pendant un hijack
+    HIJACK_AFFECTED = {"ema", "raw", "filtered"}
+
     cups: dict[str, dict] = {}
     for source in SOURCES:
         for col_x in [c for c in df.columns
@@ -175,8 +186,21 @@ def extract_cups(df: pd.DataFrame) -> dict:
             col_y  = f"ID_{cup_id}_y_{source}"
             if col_y not in df.columns:
                 continue
+
             sub = df[["frame", col_x, col_y]].copy()
             sub.columns = ["frame", "x", "y"]
+
+            # ── Masquage des frames hijackées ─────────────────────────────────
+            if source in HIJACK_AFFECTED:
+                hijack_col = f"ID_{cup_id}_hijack"
+                if hijack_col in df.columns:
+                    hijacked = df[hijack_col].fillna(0).astype(int) == 1
+                    n_hijack = int(hijacked.sum())
+                    if n_hijack:
+                        sub.loc[hijacked.values, ["x", "y"]] = np.nan
+                        print(f"  [hijack] Tasse {cup_id:>3} / {source:>8} "
+                              f"→ {n_hijack} frame(s) masquée(s)")
+
             sub = sub.dropna().reset_index(drop=True)
             cups.setdefault(cup_id, {})[source] = sub
 
