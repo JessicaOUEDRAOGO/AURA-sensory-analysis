@@ -842,7 +842,7 @@ class CsvWriter:
                 f'ID_{cid}_y_filtered',
                 f'ID_{cid}_x_bottom',
                 f'ID_{cid}_y_bottom',
-                f'ID_{cid}_hijack',
+                f'ID_{cid}_quality',
             ]
 
         self._file   = open(output_path, 'w', newline='', encoding='utf-8')
@@ -862,13 +862,12 @@ class CsvWriter:
         raw_by_aruco:      Dict[int, Tuple[float, float]],
         filtered_by_aruco: Dict[int, Tuple[float, float]],
         bottom_by_aruco:   Dict[int, Tuple[float, float]],
-        hijacked_ids:      set = None,
+        quality_by_aruco:  Dict[int, int] = None,   # ← nouveau
     ) -> None:
-        from datetime import datetime
         self._frame_index += 1
-        hijacked_ids = hijacked_ids or set()
+        quality_by_aruco = quality_by_aruco or {}
 
-        row: dict = {
+        row = {
             'frame':     self._frame_index,
             'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3],
         }
@@ -876,50 +875,33 @@ class CsvWriter:
         for aruco_id, (x, y) in ema_by_aruco.items():
             row[f'ID_{aruco_id}_x_ema'] = round(float(x), 2)
             row[f'ID_{aruco_id}_y_ema'] = round(float(y), 2)
-
         for aruco_id, (x, y) in raw_by_aruco.items():
             row[f'ID_{aruco_id}_x_raw'] = round(float(x), 2)
             row[f'ID_{aruco_id}_y_raw'] = round(float(y), 2)
-
         for aruco_id, (x, y) in filtered_by_aruco.items():
             row[f'ID_{aruco_id}_x_filtered'] = round(float(x), 2)
             row[f'ID_{aruco_id}_y_filtered'] = round(float(y), 2)
-
         for aruco_id, (x, y) in bottom_by_aruco.items():
             row[f'ID_{aruco_id}_x_bottom'] = round(float(x), 2)
             row[f'ID_{aruco_id}_y_bottom'] = round(float(y), 2)
 
         for cid in self._cup_ids:
-            col = f'ID_{cid}_hijack'
-            if col in self._fieldnames:
-                row[col] = 1 if cid in hijacked_ids else 0
+            row[f'ID_{cid}_quality'] = quality_by_aruco.get(cid, 0)
 
         self._buffer.append(row)
         if len(self._buffer) >= 50:
             self.flush()
 
-    def mark_hijack_retroactive(
-        self,
-        aruco_id: int,
-        n_frames: int,
-    ) -> None:
-        """
-        Remonte dans le buffer pour marquer les n_frames précédentes
-        comme contaminées (hijack=1) pour cet aruco_id.
-
-        Avec ARUCO_DRIFT_FRAMES=2, au maximum 2 frames sont rétroactivement
-        marquées — elles sont toujours dans le buffer (taille 50).
-        """
-        col = f'ID_{aruco_id}_hijack'
+    def mark_hijack_retroactive(self, aruco_id: int, n_frames: int) -> None:
+        col = f'ID_{aruco_id}_quality'
         if col not in self._fieldnames:
             return
         count = min(n_frames, len(self._buffer))
-        if count <= 0:
-            return
         for row in self._buffer[-count:]:
-            row[col] = 1
-        print(f"[CSV] ArUco#{aruco_id} : {count} frame(s) rétroactivement "
-              f"marquées hijack=1")
+            # Ne dégrader que si la qualité était OK — ne pas écraser un code plus grave
+            if row.get(col, 0) == 0:
+                row[col] = 1
+        print(f"[CSV] ArUco#{aruco_id} : {count} frame(s) rétroactivement quality=1")
 
     def flush(self):
         if not self._buffer:
@@ -1557,13 +1539,41 @@ def main():
 
         dm.display_image_on_projector_monitor(proj_frame)
 
+        # ── Qualité par aruco_id pour le CSV ─────────────────────────────────────
+        QUALITY_OK               = 0
+        QUALITY_HIJACK           = 1
+        QUALITY_AIRBORNE         = 2
+        QUALITY_BOOTSTRAP        = 3
+        QUALITY_LOST             = 4
+
+        quality_by_aruco: Dict[int, int] = {}
+
+        # Initialiser toutes les tasses connues à OK
+        all_idents = identity_manager.get_all_identities()
+        for aruco_id, ident in all_idents.items():
+            if ident.state == CupState.AIRBORNE:
+                quality_by_aruco[aruco_id] = QUALITY_AIRBORNE
+            elif ident.state == CupState.LOST:
+                quality_by_aruco[aruco_id] = QUALITY_LOST
+            elif ident.state == CupState.PENDING:
+                quality_by_aruco[aruco_id] = QUALITY_LOST
+            elif ident.spawn_tracker_id is not None:
+                # MATCHED mais bootstrap pas encore confirmé
+                quality_by_aruco[aruco_id] = QUALITY_BOOTSTRAP
+            else:
+                quality_by_aruco[aruco_id] = QUALITY_OK
+
+        # Écraser avec hijack (priorité maximale — frames déjà identifiées)
+        for aruco_id in current_hijacked_ids:
+            quality_by_aruco[aruco_id] = QUALITY_HIJACK
+
         # ── CSV principal — 1 ligne/frame, indexé par aruco_id ───────────────
         csv_writer.push(
            ema_by_aruco,
            raw_by_aruco,
            filtered_by_aruco,
            bottom_by_aruco,
-           hijacked_ids=current_hijacked_ids,
+           quality_by_aruco=quality_by_aruco,
        )
 
         # ── CSV trackers brut — 1 ligne/tracker/frame, zéro perte ────────────
