@@ -46,7 +46,7 @@ from typing import Dict, List, Optional, Tuple
 from src.core.vision.camera_manager import CameraManager
 from src.core.cup_tracking.cam_bottom_thread import CamBottomThread as CamBottomThreadCore
 from src.core.cup_tracking.video_writer_thread import VideoWriterThread
-from src.core.cup_tracking.cup_identity_manager import CupIdentityManager, CupState
+from src.core.cup_tracking.cup_identity_manager import CupIdentityManager, CupState, AssociationEvent
 from src.core.config.app_config import CAMERA_WIDTH, CAMERA_HEIGHT, CAMERA_FPS
 from src.core.utils.paths import config_path, data_path
 from src.core.projection.display_manager import DisplayManager
@@ -132,6 +132,11 @@ PURGE_MAX_AGE_S    = 20.0
 # À adapter selon le protocole
 ARUCO_CUP_IDS = [0,1,2,3,4,5,6,7,8]
 
+# Bootstrap ArUco → tracker
+BOOTSTRAP_ORPHAN_FRAMES = 20   # frames PENDING sans tracker avant bootstrap
+BOOTSTRAP_AMBIGUITY_MM  = 120  # rayon d'exclusion entre ArUcos connus
+BOOTSTRAP_SPAWN_CONF    = 5    # frames de validation post-spawn
+BOOTSTRAP_SPAWN_VALID_MM = 50  # distance max tracker↔ArUco pendant validation
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  Utilitaires géométriques  (inchangés)
@@ -346,6 +351,38 @@ class PoseConverter:
             np.array([[[float(pt_table[0]), float(pt_table[1])]]],
                      dtype=np.float32), self._H)
         return float(pt2[0, 0, 0]), float(pt2[0, 0, 1])
+    
+    def mm_to_pixel(self, x_mm: float, y_mm: float) -> Optional[Tuple[int, int]]:
+        """
+        Inverse de pixel_to_mm : coordonnées table (mm) → pixel cam_top (process).
+        Utilise H_top_to_bottom inversé pour revenir dans le repère cam_top,
+        puis projection perspective inverse.
+        """
+        # Étape 1 : repère bottom → repère top via H inverse
+        H_inv = np.linalg.inv(self._H.astype(np.float64))
+        pt = cv2.perspectiveTransform(
+            np.array([[[float(x_mm), float(y_mm)]]], dtype=np.float32),
+            H_inv.astype(np.float32))
+        x_top = float(pt[0, 0, 0])
+        y_top = float(pt[0, 0, 1])
+
+        # Étape 2 : coordonnées table (repère cam_top) → pixel natif
+        # On cherche le pixel (u,v) tel que pixel_to_mm(u,v) = (x_top, y_top)
+        # En réinjectant dans le modèle perspectif :
+        #   pt_table = R^T (ray*t - tvec)  avec ray = K^-1 [u,v,1] / ||...||
+        # On projette directement le point 3D (x_top, y_top, 0) dans l'image
+        R, _ = cv2.Rodrigues(self.rvec)
+        pt3d = np.array([[x_top, y_top, 0.0]], dtype=np.float64)
+        # Rotation inverse : pt_cam = R @ pt_table + tvec
+        pt_cam = (R @ pt3d.T).T + self.tvec.reshape(1, 3)
+        # Projection
+        u = self.K[0, 0] * pt_cam[0, 0] / pt_cam[0, 2] + self.K[0, 2]
+        v = self.K[1, 1] * pt_cam[0, 1] / pt_cam[0, 2] + self.K[1, 2]
+
+        # Étape 3 : natif → process
+        px = int(u / PROC_TO_NATIVE)
+        py = int(v / PROC_TO_NATIVE)
+        return px, py
 
 
 def _proc_to_mm(cx_p, cy_p, converter, use_3d):
@@ -1064,6 +1101,122 @@ def _write_associations_json(
         print(f"  ArUco#{aid} → trackers utilisés: {info['tracker_ids_used']}  "
               f"(bind×{info['bind_count']} unbind×{info['unbind_count']})")
 
+def _try_bootstrap_orphans(
+    frame_small:      np.ndarray,
+    manager:          TrackingManager,
+    identity_manager: CupIdentityManager,
+    converter:        PoseConverter,
+    use_3d:           bool,
+    cups:             list,
+    aruco_pos:        dict,
+) -> list:
+    """
+    Pour chaque ArUco en PENDING depuis trop longtemps sans tracker,
+    tente de spawner un nouveau tracker KCF à la position corrigée.
+
+    Garde-fous :
+      1. Ambiguïté spatiale — si un autre ArUco connu est à moins de
+         BOOTSTRAP_AMBIGUITY_MM, on n'essaie rien pour éviter les mauvaises
+         assignations. On utilise les positions ArUco connues (bottom), pas
+         les trackers top (driftés).
+      2. Position cible calculée avec l'offset EMA appris pour cette tasse.
+         Si l'offset n'est pas encore initialisé, on utilise (0,0) — l'EMA
+         se chargera de converger.
+      3. Vérification post-spawn sur BOOTSTRAP_SPAWN_CONF frames : si le
+         tracker s'éloigne de l'ArUco de plus de BOOTSTRAP_SPAWN_VALID_MM,
+         rollback immédiat.
+
+    Retourne la liste cups mise à jour.
+    """
+    orphans = identity_manager.get_orphan_aruco_ids(
+        min_frames=BOOTSTRAP_ORPHAN_FRAMES)
+
+    if not orphans:
+        return cups
+
+    # Positions ArUco de TOUTES les tasses connues (pas seulement les actives)
+    all_known_aruco = identity_manager.get_raw_aruco_positions()
+
+    for aruco_id, aruco_pos_mm in orphans:
+        # ── Garde 1 : ambiguïté spatiale ────────────────────────────────────
+        # On vérifie la distance avec TOUS les autres ArUcos connus ce frame.
+        # Si une tasse voisine est trop proche, on ne spawne rien.
+        too_close = False
+        for other_id, other_pos in all_known_aruco.items():
+            if other_id == aruco_id:
+                continue
+            dx = aruco_pos_mm[0] - other_pos[0]
+            dy = aruco_pos_mm[1] - other_pos[1]
+            if (dx*dx + dy*dy)**0.5 < BOOTSTRAP_AMBIGUITY_MM:
+                too_close = True
+                break
+
+        if too_close:
+            print(f"[Bootstrap] ArUco#{aruco_id} : zone ambiguë → pas de spawn")
+            continue
+
+        # ── Garde 2 : calculer la position en coordonnées cam_top ───────────
+        # On cherche l'offset EMA appris pour cet aruco_id dans les cups
+        # existantes (même invalides — on veut l'offset historique).
+        offset_x, offset_y = 0.0, 0.0
+        for cup in cups:
+            ident = identity_manager.get_identity(cup.cup_id)
+            if ident is not None and ident.aruco_id == aruco_id and cup._offset_init:
+                offset_x, offset_y = cup.proj_offset
+                break
+
+        # pos_top = pos_aruco - offset  (offset = aruco - top donc top = aruco - offset)
+        target_mm = (aruco_pos_mm[0] - offset_x, aruco_pos_mm[1] - offset_y)
+
+        result = converter.mm_to_pixel(target_mm[0], target_mm[1])
+        if result is None:
+            print(f"[Bootstrap] ArUco#{aruco_id} : mm_to_pixel échoué → skip")
+            continue
+        tx_px, ty_px = result
+
+        # Clamp dans l'image
+        half_box = 30  # pixels — taille initiale de bbox
+        tx_px = max(half_box, min(PROCESS_W - half_box, tx_px))
+        ty_px = max(half_box, min(PROCESS_H - half_box, ty_px))
+        bbox = (tx_px - half_box, ty_px - half_box, half_box*2, half_box*2)
+
+        # ── Garde 3a : vérifier qu'aucun tracker actif n'est déjà là ────────
+        already_covered = False
+        for cup in cups:
+            cx, cy = _center(cup.bbox)
+            if abs(cx - tx_px) < half_box and abs(cy - ty_px) < half_box:
+                already_covered = True
+                break
+        if already_covered:
+            continue
+
+        # ── Spawn ────────────────────────────────────────────────────────────
+        manager._create(frame_small, bbox)
+        cups = list(manager._cups.values())
+
+        # Trouver le tracker fraîchement créé (le dernier _next_id - 1)
+        new_tid = manager._next_id - 1
+        print(f"[Bootstrap] ArUco#{aruco_id} → spawn tracker#{new_tid} "
+              f"à ({tx_px},{ty_px})px / "
+              f"target=({target_mm[0]:.0f},{target_mm[1]:.0f})mm "
+              f"offset=({offset_x:.0f},{offset_y:.0f})mm")
+
+        # Forcer le bind immédiatement dans l'identity_manager
+        # (sans attendre _match_pending qui exige MATCH_DIST_MM)
+        with identity_manager._lock:
+            ident = identity_manager._identities.get(aruco_id)
+            if ident is not None and ident.tracker_id is None:
+                ident.tracker_id    = new_tid
+                ident.state         = CupState.MATCHED
+                ident.orphan_frames = 0
+                ident.spawn_tracker_id = new_tid
+                ident.spawn_conf_count = 0
+                identity_manager._tracker_to_aruco[new_tid] = aruco_id
+                identity_manager._association_log.append(AssociationEvent(
+                    aruco_id=aruco_id, tracker_id=new_tid,
+                    event="bind_bootstrap", frame=identity_manager._frame_count))
+
+    return cups
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  Main
@@ -1254,6 +1407,42 @@ def main():
                         drift_event=event_info,
                     )
 
+        cups = list(manager._cups.values())
+
+        # ── Bootstrap : récupération des ArUco orphelins ─────────────────────────
+        cups = _try_bootstrap_orphans(
+            frame_small=frame_small,
+            manager=manager,
+            identity_manager=identity_manager,
+            converter=converter,
+            use_3d=use_3d_correction,
+            cups=cups,
+            aruco_pos=aruco_pos,
+        )
+
+        # ── Validation post-spawn (rollback si tracker a drifté) ─────────────────
+        spawns_to_rollback = []
+        for cup in cups:
+            ident = identity_manager.get_identity(cup.cup_id)
+            if ident is None or ident.spawn_tracker_id != cup.cup_id:
+                continue
+            aruco_mm = aruco_pos.get(ident.aruco_id)
+            result = identity_manager.validate_spawn(
+                aruco_id=ident.aruco_id,
+                tracker_id=cup.cup_id,
+                current_aruco_pos=aruco_mm,
+            )
+            if result == 'rollback':
+                spawns_to_rollback.append(cup.cup_id)
+                print(f"[Bootstrap] Rollback tracker#{cup.cup_id} "
+                    f"(ArUco#{ident.aruco_id} drift trop fort)")
+            elif result == 'confirmed':
+                print(f"[Bootstrap] Tracker#{cup.cup_id} confirmé "
+                    f"pour ArUco#{ident.aruco_id}")
+
+        for tid in spawns_to_rollback:
+            if tid in manager._cups:
+                del manager._cups[tid]
         cups = list(manager._cups.values())
         # ─────────────────────────────────────────────────────────────────────
         # ─────────────────────────────────────────────────────────────────────

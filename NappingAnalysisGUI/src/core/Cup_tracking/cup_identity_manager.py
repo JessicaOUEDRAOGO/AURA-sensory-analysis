@@ -71,7 +71,11 @@ ORPHAN_TTL_S       = 5.0
 # avant de confirmer une repose (anti-scintillement ArUco)
 REPOSE_CONF_FRAMES = 3
 
-
+# Nouveau paramètre — après ORPHAN_TTL_S
+ORPHAN_FRAMES_BEFORE_BOOTSTRAP = 20   # frames en PENDING sans tracker avant tentative
+SPAWN_CONF_FRAMES               = 5   # frames de stabilité post-spawn pour valider
+SPAWN_VALID_MM                  = 50  # distance max ArUco↔tracker pendant validation
+AMBIGUITY_RADIUS_MM             = 120 # si 2 ArUcos connus à moins de ça → pas de spawn
 # ──────────────────────────────────────────────────────────────────────────────
 #  États
 # ──────────────────────────────────────────────────────────────────────────────
@@ -103,6 +107,11 @@ class CupIdentity:
     # Incrémenté à chaque frame où le tag est vu proche du tracker,
     # remis à 0 si le tag disparaît ou s'éloigne.
     repose_conf_count: int = 0
+
+    # ── Bootstrap recovery ───────────────────────────────────────────────────
+    orphan_frames:    int          = 0     # frames consécutives PENDING sans tracker
+    spawn_tracker_id: Optional[int] = None  # tracker en cours de validation post-spawn
+    spawn_conf_count: int          = 0     # frames stables depuis le spawn
 
     @property
     def label(self) -> str:
@@ -164,6 +173,7 @@ class CupIdentityManager:
         tag_lost_delay:   int   = TAG_LOST_DELAY,
         tag_found_conf:   int   = TAG_FOUND_CONF,
         repose_conf_frames: int = REPOSE_CONF_FRAMES,
+        
     ):
         self._lock = threading.RLock()
 
@@ -309,6 +319,79 @@ class CupIdentityManager:
                         lst.append(ev.tracker_id)
             return history
 
+    # Dans CupIdentityManager — nouvelle méthode publique
+    def get_orphan_aruco_ids(
+        self,
+        min_frames: int = ORPHAN_FRAMES_BEFORE_BOOTSTRAP,
+    ) -> List[Tuple[int, Tuple[float, float]]]:
+        """
+        Retourne les ArUco en PENDING sans tracker depuis min_frames frames.
+        Format : [(aruco_id, pos_mm), ...]
+        Utilisé par napping_lite pour décider de bootstrapper un tracker.
+        """
+        with self._lock:
+            result = []
+            for aid, ident in self._identities.items():
+                if (ident.state == CupState.PENDING
+                        and ident.tracker_id is None
+                        and ident.pos_mm is not None
+                        and ident.orphan_frames >= min_frames):
+                    result.append((aid, ident.pos_mm))
+            return result
+
+    def tick_orphan_frames(self) -> None:
+        """
+        À appeler une fois par frame depuis la boucle principale.
+        Incrémente orphan_frames pour les PENDING sans tracker,
+        remet à 0 pour les autres.
+        """
+        with self._lock:
+            for ident in self._identities.values():
+                if ident.state == CupState.PENDING and ident.tracker_id is None:
+                    ident.orphan_frames += 1
+                else:
+                    ident.orphan_frames = 0
+
+    def validate_spawn(
+        self,
+        aruco_id: int,
+        tracker_id: int,
+        current_aruco_pos: Optional[Tuple[float, float]],
+    ) -> str:
+        """
+        À appeler chaque frame après un spawn pour valider ou rollback.
+        Retourne : 'confirmed', 'pending', ou 'rollback'
+        """
+        with self._lock:
+            ident = self._identities.get(aruco_id)
+            if ident is None:
+                return 'rollback'
+
+            if current_aruco_pos is None:
+                ident.spawn_conf_count = 0
+                return 'pending'
+
+            if ident.pos_mm is None:
+                return 'rollback'
+
+            dx = ident.pos_mm[0] - current_aruco_pos[0]
+            dy = ident.pos_mm[1] - current_aruco_pos[1]
+            # On compare le tracker (via pos_mm de l'identité mise à jour)
+            # avec la position ArUco courante
+            dist = (dx*dx + dy*dy)**0.5
+
+            if dist > SPAWN_VALID_MM:
+                ident.spawn_conf_count = 0
+                ident.spawn_tracker_id = None
+                return 'rollback'
+
+            ident.spawn_conf_count += 1
+            if ident.spawn_conf_count >= SPAWN_CONF_FRAMES:
+                ident.spawn_conf_count = 0
+                ident.spawn_tracker_id = None
+                return 'confirmed'
+
+            return 'pending'
     # ──────────────────────────────────────────────────────────────────────────
     #  Reset et purge
     # ──────────────────────────────────────────────────────────────────────────
@@ -422,10 +505,7 @@ class CupIdentityManager:
     #  Logique interne — traitement trackers (inchangée)
     # ──────────────────────────────────────────────────────────────────────────
 
-    def _process_tracker_frame(
-        self,
-        tracker_positions: Dict[int, Tuple[float, float]],
-    ) -> None:
+    def _process_tracker_frame(self, tracker_positions):
         for aruco_id, ident in self._identities.items():
             if (ident.tracker_id is not None
                     and ident.tracker_id not in tracker_positions):
@@ -434,15 +514,15 @@ class CupIdentityManager:
                 ident.tracker_id = None
                 if ident.state == CupState.MATCHED:
                     ident.state = CupState.LOST
-                    # Log déliaison
                     self._association_log.append(AssociationEvent(
-                        aruco_id=aruco_id,
-                        tracker_id=old_tid,
-                        event="unbind",
-                        frame=self._frame_count,
-                    ))
-                    print(f"[Identity] {ident.label} → LOST "
-                          f"(tracker {old_tid} disparu)")
+                        aruco_id=aruco_id, tracker_id=old_tid,
+                        event="unbind", frame=self._frame_count))
+                    print(f"[Identity] {ident.label} → LOST (tracker {old_tid} disparu)")
+            # PENDING sans tracker → incrémenter orphan_frames
+            if ident.state == CupState.PENDING and ident.tracker_id is None:
+                ident.orphan_frames += 1
+            elif ident.tracker_id is not None:
+                ident.orphan_frames = 0
 
         self._match_pending(tracker_positions)
 
