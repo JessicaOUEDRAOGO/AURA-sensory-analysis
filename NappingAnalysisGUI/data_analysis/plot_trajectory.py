@@ -669,8 +669,8 @@ def _draw_one(
                marker="X", label=f"#{cup_id} arrivée",
                edgecolors="white", linewidths=0.8)
 
-    # ── Poses bottom en surligné (EMA uniquement) ─────────────────────────────
-    if show_poses and source == "ema":
+    # ── Poses bottom en surligné (ema / raw / filtered) ───────────────────────
+    if show_poses and source in {"ema", "raw", "filtered"}:
         _draw_bottom_overlay(
             ax, cup_id, cups, color,
             downsample, view, table_size,
@@ -680,10 +680,10 @@ def _draw_one(
     if show_stats:
         st = compute_stats(sub)
         bot = cups.get(cup_id, {}).get("bottom")
-        n_bot_frames = len(bot) if (show_poses and source == "ema"
+        n_bot_frames = len(bot) if (show_poses and source in {"ema", "raw", "filtered"}
                                     and bot is not None) else 0
         pose_line = (f"Bottom : {n_bot_frames} frames\n"
-                     if show_poses and source == "ema" else "")
+                     if show_poses and source in {"ema", "raw", "filtered"} else "")
         view_line = f"Vue   : {VIEW_LABELS.get(view, view)}\n"
         info = (
             f"Cup #{cup_id}  [{source}]\n"
@@ -905,9 +905,9 @@ class ControlBar(QWidget):
 
     def _on_source(self, _):
         self._source = self._combo_src.currentData()
-        is_ema = self._source == "ema"
-        self._cb_poses.setEnabled(is_ema)
-        if not is_ema:
+        can_pose = self._source in {"ema", "raw", "filtered"}
+        self._cb_poses.setEnabled(can_pose)
+        if not can_pose:
             self._cb_poses.setChecked(False)
         self._refresh()
 
