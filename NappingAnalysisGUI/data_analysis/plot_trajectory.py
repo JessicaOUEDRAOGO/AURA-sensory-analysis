@@ -125,13 +125,17 @@ def apply_view_transform(
     Repère de référence : cam_bottom (toutes les sources y sont déjà ramenées).
 
     Vue "bottom (caméra)"   → identité, aucune modification
-    Vue "expérimentateur"   → flip vertical : y_exp = table_size - y_bottom
-                              (x inchangé — l'image montre uniquement un flip Y)
+    Vue "expérimentateur"   → rotation 180° autour du centre de la table :
+                                x_exp = table_size - x_bottom
+                                y_exp = table_size - y_bottom
+                              (flip simultané sur X et Y — l'expérimentateur
+                               est de l'autre côté de la table, face à la caméra)
 
     Retourne un nouveau DataFrame (copie) avec les colonnes x, y transformées.
     """
     out = sub.copy()
     if view == VIEW_EXPERIMENTER:
+        out["x"] = table_size - out["x"]
         out["y"] = table_size - out["y"]
     # VIEW_BOTTOM : rien à faire
     return out
@@ -557,8 +561,9 @@ def _draw_poses(ax, cup_id: str, sub: pd.DataFrame,
     for k, ep in enumerate(episodes):
         mx, my = ep["cx"], ep["cy"]
 
-        # Appliquer la transformation de vue au centroïde de la pose
+        # Appliquer la transformation de vue au centroïde de la pose (rotation 180°)
         if view == VIEW_EXPERIMENTER:
+            mx = table_size - mx
             my = table_size - my
 
         count        = ep.get("count", 1)
@@ -810,7 +815,7 @@ class ControlBar(QWidget):
         self._combo_vue.setCurrentIndex(0)
         self._combo_vue.setToolTip(
             "bottom (caméra)   : repère ArUco cam_bottom — référence de mesure\n"
-            "expérimentateur   : flip vertical (y → table_size − y)\n"
+            "expérimentateur   : rotation 180° — x → table_size−x, y → table_size−y\n"
             f"                    table_size = {self._table_size:.0f} mm"
         )
         self._combo_vue.currentIndexChanged.connect(self._on_view)
