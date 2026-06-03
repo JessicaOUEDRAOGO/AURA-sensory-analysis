@@ -545,46 +545,55 @@ def _draw_time_labels(ax, sub: pd.DataFrame, color: str,
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Superposition des poses
+#  Superposition bottom en surligné (remplace les losanges)
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _draw_poses(ax, cup_id: str, sub: pd.DataFrame,
-                episodes: list[dict], cup_col: str,
-                view: str, table_size: float):
+# Constantes visuelles du surligné bottom
+BOTTOM_OVERLAY_LW    = 5.0    # épaisseur du trait surligné
+BOTTOM_OVERLAY_ALPHA = 0.45   # transparence — laisse l'EMA visible par-dessus
+BOTTOM_OVERLAY_ZORDER = 2     # sous l'EMA (zorder 3+)
+
+
+def _draw_bottom_overlay(
+    ax,
+    cup_id: str,
+    cups: dict,
+    color: str,
+    downsample: int,
+    view: str,
+    table_size: float,
+):
     """
-    Dessine les losanges de pose en appliquant la transformation de vue
-    sur les centroïdes ArUco (cx, cy) — qui sont en repère bottom.
+    Superpose la trajectoire 'bottom' (ArUco cam_bottom) en surligné épais
+    semi-transparent sous la courbe EMA.
+
+    Uniquement disponible quand source == "ema". La trajectoire bottom est
+    tracée avec la même couleur que la tasse, mais plus épaisse et transparente,
+    ce qui permet de lire d'un coup d'œil les zones de pose (où bottom est dense)
+    vs les zones de mouvement (où bottom est absent ou fragmenté).
+
+    La transformation de vue est appliquée de manière cohérente avec l'EMA.
     """
-    if not episodes:
+    bot = cups.get(cup_id, {}).get("bottom")
+    if bot is None or bot.empty:
         return
 
-    for k, ep in enumerate(episodes):
-        mx, my = ep["cx"], ep["cy"]
+    if downsample > 1:
+        bot = bot.iloc[::downsample].reset_index(drop=True)
 
-        # Appliquer la transformation de vue au centroïde de la pose (rotation 180°)
-        if view == VIEW_EXPERIMENTER:
-            mx = table_size - mx
-            my = table_size - my
+    # Transformation de vue (même repère que l'EMA affichée)
+    bot = apply_view_transform(bot, view, table_size)
 
-        count        = ep.get("count", 1)
-        label_legend = (f"#{cup_id} pose ×{len(episodes)}"
-                        if k == 0 else "_nolegend_")
-
-        ax.scatter(
-            mx, my,
-            s=POSE_MARKER_SIZE, marker="D",
-            facecolor=POSE_MARKER_COLOR,
-            edgecolors=cup_col,
-            linewidths=2.0,
-            zorder=6,
-            label=label_legend,
-        )
-
-        count_label = str(count) if count > 1 else str(k + 1)
-        ax.annotate(
-            count_label,
-            xy=(mx, my), xytext=(4, 4), textcoords="offset points",
-            fontsize=7, color=cup_col, fontweight="bold", zorder=9,
+    segments = split_continuous_segments(bot)
+    for k, seg in enumerate(segments):
+        ax.plot(
+            seg["x"].values, seg["y"].values,
+            color=color,
+            lw=BOTTOM_OVERLAY_LW,
+            alpha=BOTTOM_OVERLAY_ALPHA,
+            solid_capstyle="round",
+            zorder=BOTTOM_OVERLAY_ZORDER,
+            label=f"#{cup_id} bottom" if k == 0 else "_nolegend_",
         )
 
 
@@ -660,16 +669,21 @@ def _draw_one(
                marker="X", label=f"#{cup_id} arrivée",
                edgecolors="white", linewidths=0.8)
 
-    # ── Poses ─────────────────────────────────────────────────────────────────
-    if show_poses and source != "bottom":
-        episodes = detect_pose_episodes(cups, cup_id)
-        _draw_poses(ax, cup_id, sub, episodes, color, view, table_size)
+    # ── Poses bottom en surligné (EMA uniquement) ─────────────────────────────
+    if show_poses and source == "ema":
+        _draw_bottom_overlay(
+            ax, cup_id, cups, color,
+            downsample, view, table_size,
+        )
 
     # ── Stats ─────────────────────────────────────────────────────────────────
     if show_stats:
         st = compute_stats(sub)
-        n_poses = len(detect_pose_episodes(cups, cup_id)) if show_poses else 0
-        pose_line = f"Poses : {n_poses}\n" if show_poses else ""
+        bot = cups.get(cup_id, {}).get("bottom")
+        n_bot_frames = len(bot) if (show_poses and source == "ema"
+                                    and bot is not None) else 0
+        pose_line = (f"Bottom : {n_bot_frames} frames\n"
+                     if show_poses and source == "ema" else "")
         view_line = f"Vue   : {VIEW_LABELS.get(view, view)}\n"
         info = (
             f"Cup #{cup_id}  [{source}]\n"
@@ -874,12 +888,13 @@ class ControlBar(QWidget):
         layout.addWidget(vline())
 
         # ── Poses ─────────────────────────────────────────────────────────────
-        self._cb_poses = QCheckBox("Poses ◆")
+        self._cb_poses = QCheckBox("Poses bottom")
         self._cb_poses.setStyleSheet(checkbox_style("#F0C040"))
         self._cb_poses.setChecked(False)
         self._cb_poses.setToolTip(
-            "Épisodes où la tasse est posée (cam bottom)\n"
-            "◆ = centroïde  |  chiffre = nb de poses fusionnées"
+            "Superpose la trajectoire bottom (ArUco) en surligné épais\n"
+            "sous la courbe EMA — disponible uniquement en source 'ema'.\n"
+            "Les zones denses = tasse posée, les zones vides = tasse en mouvement."
         )
         self._cb_poses.stateChanged.connect(self._on_poses)
         layout.addWidget(self._cb_poses)
@@ -890,9 +905,9 @@ class ControlBar(QWidget):
 
     def _on_source(self, _):
         self._source = self._combo_src.currentData()
-        is_bottom = self._source == "bottom"
-        self._cb_poses.setEnabled(not is_bottom)
-        if is_bottom:
+        is_ema = self._source == "ema"
+        self._cb_poses.setEnabled(is_ema)
+        if not is_ema:
             self._cb_poses.setChecked(False)
         self._refresh()
 
