@@ -1,10 +1,20 @@
 # -*- coding: utf-8 -*-
 """
-plot_trajectory.py  –  v6
+plot_trajectory.py  –  v7
 =========================
 Visualisation multi-tasses / multi-sources — tout dans l'interface.
 
-Nouveautés v6 :
+Nouveautés v7 :
+  • Vue expérimentateur : flip vertical (y → TABLE_SIZE - y) depuis repère bottom
+  • Sélecteur de vue : "bottom (caméra)" | "expérimentateur" dans la barre de contrôle
+  • TABLE_SIZE configurable (défaut 597 mm, modifiable via --table-size)
+  • Les axes X/Y sont renommés selon la vue active
+
+Transformation bottom → expérimentateur :
+  x_exp = x_bottom          (gauche-droite inchangé)
+  y_exp = TABLE_SIZE - y_bottom   (flip vertical)
+
+Héritage v6 :
   • Couleur unique par tasse (par défaut), dégradé temporel en option
   • Flèches directionnelles activées par défaut, densité adaptative
   • Numérotation temporelle progressive (t1, t2, …) le long de la trajectoire
@@ -14,6 +24,7 @@ Usage :
     python plot_trajectory.py chemin/vers/fichier.csv
     python plot_trajectory.py fichier.csv --output img.png
     python plot_trajectory.py fichier.csv --downsample 3
+    python plot_trajectory.py fichier.csv --table-size 597
 """
 
 import argparse
@@ -57,6 +68,19 @@ TEXT_MAIN = "#E8EEF4"
 TEXT_DIM  = "#7A9ABF"
 SEP_COLOR = "#1E3A5C"
 
+# ── Taille de la table (mm) — overridable via --table-size ────────────────────
+TABLE_SIZE_MM_DEFAULT = 597.0
+
+# ── Vues disponibles ─────────────────────────────────────────────────────────
+VIEW_BOTTOM = "bottom"
+VIEW_EXPERIMENTER = "expérimentateur"
+VIEWS = [VIEW_BOTTOM, VIEW_EXPERIMENTER]
+
+VIEW_LABELS = {
+    VIEW_BOTTOM:       "bottom (caméra)",
+    VIEW_EXPERIMENTER: "expérimentateur",
+}
+
 # ── Poses ─────────────────────────────────────────────────────────────────────
 POSE_MARKER_COLOR  = "#FFFFFF"
 POSE_MARKER_SIZE   = 120
@@ -84,6 +108,40 @@ def cup_color(cup_id: str) -> str:
     except ValueError:
         idx = abs(hash(cup_id))
     return CUP_COLORS[idx % len(CUP_COLORS)]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  Transformation de vue
+# ──────────────────────────────────────────────────────────────────────────────
+
+def apply_view_transform(
+    sub: pd.DataFrame,
+    view: str,
+    table_size: float,
+) -> pd.DataFrame:
+    """
+    Transforme les coordonnées (x, y) d'un DataFrame selon la vue choisie.
+
+    Repère de référence : cam_bottom (toutes les sources y sont déjà ramenées).
+
+    Vue "bottom (caméra)"   → identité, aucune modification
+    Vue "expérimentateur"   → flip vertical : y_exp = table_size - y_bottom
+                              (x inchangé — l'image montre uniquement un flip Y)
+
+    Retourne un nouveau DataFrame (copie) avec les colonnes x, y transformées.
+    """
+    out = sub.copy()
+    if view == VIEW_EXPERIMENTER:
+        out["y"] = table_size - out["y"]
+    # VIEW_BOTTOM : rien à faire
+    return out
+
+
+def axis_labels(view: str) -> tuple[str, str]:
+    """Retourne (xlabel, ylabel) selon la vue active."""
+    if view == VIEW_EXPERIMENTER:
+        return "X — vue expérimentateur (mm)", "Y — vue expérimentateur (mm)"
+    return "X (mm)", "Y (mm)"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -195,7 +253,6 @@ def extract_cups(df: pd.DataFrame) -> dict:
             sub.columns = ["frame", "x", "y"]
 
             if source in QUALITY_AFFECTED:
-                # ── Nouvelle colonne quality (prioritaire) ────────────────
                 quality_col = f"ID_{cup_id}_quality"
                 hijack_col  = f"ID_{cup_id}_hijack"
 
@@ -204,7 +261,6 @@ def extract_cups(df: pd.DataFrame) -> dict:
                     n_bad = int(bad.sum())
                     if n_bad:
                         sub.loc[bad.values, ["x", "y"]] = np.nan
-                        # Détail par code pour le log
                         counts = df.loc[bad, quality_col].value_counts().sort_index()
                         detail = ", ".join(
                             f"q{int(k)}×{int(v)}"
@@ -214,7 +270,6 @@ def extract_cups(df: pd.DataFrame) -> dict:
                               f"→ {n_bad} frame(s) masquée(s)  ({detail})")
 
                 elif hijack_col in df.columns:
-                    # ── Rétrocompatibilité anciens CSV sans quality ────────
                     bad = df[hijack_col].fillna(0).astype(int) == 1
                     n_bad = int(bad.sum())
                     if n_bad:
@@ -294,9 +349,6 @@ def detect_pose_episodes(cups: dict, cup_id: str,
     """
     Retourne une liste d'épisodes fusionnés :
         [{ "frames": [...], "cx": float, "cy": float, "count": int }, …]
-
-    Fusion : si deux épisodes consécutifs ont leurs centroïdes à moins de
-    POSE_MERGE_MM, ils sont regroupés en un seul marqueur (count > 1).
     """
     b = cups[cup_id].get("_bottom_full", pd.DataFrame())
     if b.empty:
@@ -308,7 +360,6 @@ def detect_pose_episodes(cups: dict, cup_id: str,
 
     frames = sorted(valid["frame"].astype(int).tolist())
 
-    # Segmenter en épisodes bruts
     raw_episodes = []
     current = [frames[0]]
     for f in frames[1:]:
@@ -319,7 +370,6 @@ def detect_pose_episodes(cups: dict, cup_id: str,
             current = [f]
     raw_episodes.append(current)
 
-    # Calculer centroïde de chaque épisode brut
     enriched = []
     for ep in raw_episodes:
         ep_rows = valid[valid["frame"].isin(ep)]
@@ -327,13 +377,11 @@ def detect_pose_episodes(cups: dict, cup_id: str,
         cy = float(ep_rows["y"].mean())
         enriched.append({"frames": ep, "cx": cx, "cy": cy, "count": 1})
 
-    # ── Fusion des poses proches ──────────────────────────────────────────────
     merged = [enriched[0]]
     for ep in enriched[1:]:
         prev = merged[-1]
         dist = np.sqrt((ep["cx"] - prev["cx"])**2 + (ep["cy"] - prev["cy"])**2)
         if dist < POSE_MERGE_MM:
-            # Fusionner : recalculer centroïde pondéré par nb de frames
             n1 = len(prev["frames"])
             n2 = len(ep["frames"])
             total = n1 + n2
@@ -391,14 +439,6 @@ def compute_stats(sub: pd.DataFrame) -> dict:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _draw_direction_arrows(ax, sub: pd.DataFrame, color: str):
-    """
-    Flèches directionnelles courtes et tangentes à la courbe.
-
-    Espacement par distance cumulée (mm) → densité uniforme.
-    Direction : tangente locale (fenêtre ±ARROW_TANGENT_WIN points).
-    Longueur   : ARROW_LENGTH_MM en unités données — flèche ancrée au point,
-                 pas une corde qui traverse la trajectoire.
-    """
     n = len(sub)
     if n < ARROW_TANGENT_WIN * 2 + 2:
         return
@@ -406,7 +446,6 @@ def _draw_direction_arrows(ax, sub: pd.DataFrame, color: str):
     xs = sub["x"].values
     ys = sub["y"].values
 
-    # Distance cumulée
     dxs     = np.diff(xs)
     dys     = np.diff(ys)
     dists   = np.sqrt(dxs**2 + dys**2)
@@ -422,7 +461,6 @@ def _draw_direction_arrows(ax, sub: pd.DataFrame, color: str):
         i = int(np.searchsorted(cumdist, target))
         i = max(half, min(i, n - half - 1))
 
-        # Tangente locale : direction entre i-half et i+half
         tx = xs[i + half] - xs[i - half]
         ty = ys[i + half] - ys[i - half]
         norm = np.sqrt(tx**2 + ty**2)
@@ -431,14 +469,12 @@ def _draw_direction_arrows(ax, sub: pd.DataFrame, color: str):
         tx /= norm
         ty /= norm
 
-        # Flèche courte centrée sur le point i
         half_len = ARROW_LENGTH_MM / 2.0
         x0 = xs[i] - tx * half_len
         y0 = ys[i] - ty * half_len
         x1 = xs[i] + tx * half_len
         y1 = ys[i] + ty * half_len
 
-        # Contour noir
         ax.annotate(
             "",
             xy=(x1, y1), xytext=(x0, y0),
@@ -452,7 +488,6 @@ def _draw_direction_arrows(ax, sub: pd.DataFrame, color: str):
             ),
             zorder=4,
         )
-        # Flèche colorée par-dessus
         ax.annotate(
             "",
             xy=(x1, y1), xytext=(x0, y0),
@@ -469,21 +504,15 @@ def _draw_direction_arrows(ax, sub: pd.DataFrame, color: str):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Numérotation temporelle progressive  (v6 — NOUVEAU)
+#  Numérotation temporelle progressive
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _draw_time_labels(ax, sub: pd.DataFrame, color: str,
                       n_labels: int = TIME_LABEL_COUNT):
-    """
-    Place n_labels petits repères temporels (t1, t2, …) régulièrement
-    répartis sur la trajectoire (hors premier et dernier points déjà marqués).
-    Fond semi-transparent pour rester lisible sur toute trajectoire.
-    """
     n = len(sub)
     if n < n_labels * 2:
         return
 
-    # Indices équidistants (excluant le début et la fin)
     indices = np.linspace(0, n - 1, n_labels + 2, dtype=int)[1:-1]
 
     for rank, idx in enumerate(indices, start=1):
@@ -508,7 +537,6 @@ def _draw_time_labels(ax, sub: pd.DataFrame, color: str,
                 linewidth=0.8,
             ),
         )
-        # Petit point de rattachement
         ax.scatter(x, y, s=18, color=color, zorder=7, alpha=0.9)
 
 
@@ -517,23 +545,21 @@ def _draw_time_labels(ax, sub: pd.DataFrame, color: str,
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _draw_poses(ax, cup_id: str, sub: pd.DataFrame,
-                episodes: list[dict], cup_col: str):
+                episodes: list[dict], cup_col: str,
+                view: str, table_size: float):
     """
-    Pour chaque épisode (potentiellement fusionné) :
-      • Losange ancré sur le centroïde bottom (cx, cy) — position ArUco réelle
-      • Pas de surbrillance du segment KCF : pendant une pose le tracker dérive,
-        tracer ce segment ajouterait des artefacts absents de la vraie trajectoire
-
-    sub  : trajectoire source (ema/raw/filtered) — utilisée uniquement pour
-           positionner le losange si bottom n'a pas de centroïde valide.
-    ep["cx"], ep["cy"] : centroïde bottom de l'épisode — vérité terrain.
+    Dessine les losanges de pose en appliquant la transformation de vue
+    sur les centroïdes ArUco (cx, cy) — qui sont en repère bottom.
     """
     if not episodes:
         return
 
     for k, ep in enumerate(episodes):
-        # ── Position du losange : centroïde bottom en priorité ───────────────
         mx, my = ep["cx"], ep["cy"]
+
+        # Appliquer la transformation de vue au centroïde de la pose
+        if view == VIEW_EXPERIMENTER:
+            my = table_size - my
 
         count        = ep.get("count", 1)
         label_legend = (f"#{cup_id} pose ×{len(episodes)}"
@@ -549,7 +575,6 @@ def _draw_poses(ax, cup_id: str, sub: pd.DataFrame,
             label=label_legend,
         )
 
-        # Numéro / compteur de fusion
         count_label = str(count) if count > 1 else str(k + 1)
         ax.annotate(
             count_label,
@@ -569,10 +594,15 @@ def _draw_one(
     show_direction,
     show_time_labels,
     show_stats,
+    view,
+    table_size,
 ):
     color = cup_color(cup_id)
     if downsample > 1:
         sub = sub.iloc[::downsample].reset_index(drop=True)
+
+    # ── Appliquer la transformation de vue ───────────────────────────────────
+    sub = apply_view_transform(sub, view, table_size)
 
     n = len(sub)
     if n == 0:
@@ -598,7 +628,6 @@ def _draw_one(
         cb.set_label("Frame (temps)", color="#A0B8D0", fontsize=9, labelpad=6)
         cb.ax.yaxis.set_tick_params(color="#A0B8D0", labelsize=8)
         plt.setp(cb.ax.yaxis.get_ticklabels(), color="#A0B8D0")
-        # Avec le dégradé, la couleur de tracé pour les annotations est la teinte médiane
         mid_color = mcolors.to_hex(cmap(0.5))
     else:
         for k, seg in enumerate(segments):
@@ -607,7 +636,7 @@ def _draw_one(
                     label=label if k == 0 else "_nolegend_")
         mid_color = color
 
-    # ── Flèches directionnelles (sur chaque segment) ─────────────────────────
+    # ── Flèches directionnelles ───────────────────────────────────────────────
     if show_direction:
         for seg in segments:
             _draw_direction_arrows(ax, seg, color)
@@ -629,19 +658,21 @@ def _draw_one(
     # ── Poses ─────────────────────────────────────────────────────────────────
     if show_poses and source != "bottom":
         episodes = detect_pose_episodes(cups, cup_id)
-        _draw_poses(ax, cup_id, sub, episodes, color)
+        _draw_poses(ax, cup_id, sub, episodes, color, view, table_size)
 
     # ── Stats ─────────────────────────────────────────────────────────────────
     if show_stats:
         st = compute_stats(sub)
         n_poses = len(detect_pose_episodes(cups, cup_id)) if show_poses else 0
         pose_line = f"Poses : {n_poses}\n" if show_poses else ""
+        view_line = f"Vue   : {VIEW_LABELS.get(view, view)}\n"
         info = (
             f"Cup #{cup_id}  [{source}]\n"
             f"{st['n_frames']} frames\n"
             f"Dist. totale : {st['dist_totale_mm']:.0f} mm\n"
             f"Saut max     : {st['dist_max_mm']:.1f} mm\n"
             f"{pose_line}"
+            f"{view_line}"
         ).rstrip()
         ax.text(
             0.02, 0.98, info, transform=ax.transAxes,
@@ -663,14 +694,17 @@ def render(
     show_direction,
     show_time_labels,
     file_title,
+    view=VIEW_BOTTOM,
+    table_size=TABLE_SIZE_MM_DEFAULT,
 ):
     for extra in [a for a in fig.axes if a is not ax]:
         extra.remove()
     ax.clear()
 
     ax.set_facecolor("#0F1E30")
-    ax.set_xlabel("X (mm)", color="white", fontsize=11)
-    ax.set_ylabel("Y (mm)", color="white", fontsize=11)
+    xlabel, ylabel = axis_labels(view)
+    ax.set_xlabel(xlabel, color="white", fontsize=11)
+    ax.set_ylabel(ylabel, color="white", fontsize=11)
     ax.tick_params(colors="#7A9ABF")
     ax.spines[:].set_color("#1E3A5C")
     ax.grid(True, color="#172B40", lw=0.6, linestyle="--")
@@ -682,9 +716,10 @@ def render(
         return
 
     overlay = len(cup_ids) > 1
-    t = (f"{file_title} — {len(cup_ids)} tasses — {source}"
+    view_suffix = f" — {VIEW_LABELS.get(view, view)}"
+    t = (f"{file_title} — {len(cup_ids)} tasses — {source}{view_suffix}"
          if overlay else
-         f"{file_title} — Cup #{cup_ids[0]} — {source}")
+         f"{file_title} — Cup #{cup_ids[0]} — {source}{view_suffix}")
     ax.set_title(t, color="#C8D8E8", fontsize=13, pad=12)
 
     for cup_id in cup_ids:
@@ -701,6 +736,8 @@ def render(
             show_direction,
             show_time_labels,
             show_stats=(not overlay),
+            view=view,
+            table_size=table_size,
         )
 
     if not use_colormap:
@@ -711,26 +748,28 @@ def render(
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  Barre de contrôles  (v6)
+#  Barre de contrôles  (v7 — ajout sélecteur de vue)
 # ──────────────────────────────────────────────────────────────────────────────
 
 class ControlBar(QWidget):
 
-    def __init__(self, cups, fig, ax, downsample, file_title, parent=None):
+    def __init__(self, cups, fig, ax, downsample, file_title, table_size, parent=None):
         super().__init__(parent)
         self._cups           = cups
         self._fig            = fig
         self._ax             = ax
         self._downsample     = downsample
         self._file_title     = file_title
+        self._table_size     = table_size
         self._all_ids        = sorted(cups.keys(),
                                       key=lambda x: int(x) if x.isdigit() else x)
         self._source         = "ema"
         self._active_ids     = [self._all_ids[0]] if self._all_ids else []
-        self._use_colormap   = False   # couleur unique par tasse par défaut
+        self._use_colormap   = False
         self._show_poses     = False
         self._show_direction = SHOW_DIRECTION_DEFAULT
         self._show_time_labels = SHOW_TIME_LABELS_DEFAULT
+        self._view           = VIEW_BOTTOM
 
         self.setAutoFillBackground(True)
         self.setStyleSheet(f"background-color: {BG_PANEL};")
@@ -754,6 +793,28 @@ class ControlBar(QWidget):
         self._combo_src.setCurrentIndex(0)
         self._combo_src.currentIndexChanged.connect(self._on_source)
         layout.addWidget(self._combo_src)
+
+        layout.addWidget(vline())
+
+        # ── Vue ───────────────────────────────────────────────────────────────
+        lbl_vue = QLabel("Vue :")
+        lbl_vue.setStyleSheet(label_style(11))
+        layout.addWidget(lbl_vue)
+
+        self._combo_vue = QComboBox()
+        # Style légèrement plus large pour accueillir "expérimentateur"
+        vue_style = COMBO_STYLE.replace("min-width: 105px", "min-width: 160px")
+        self._combo_vue.setStyleSheet(vue_style)
+        for v in VIEWS:
+            self._combo_vue.addItem(VIEW_LABELS[v], userData=v)
+        self._combo_vue.setCurrentIndex(0)
+        self._combo_vue.setToolTip(
+            "bottom (caméra)   : repère ArUco cam_bottom — référence de mesure\n"
+            "expérimentateur   : flip vertical (y → table_size − y)\n"
+            f"                    table_size = {self._table_size:.0f} mm"
+        )
+        self._combo_vue.currentIndexChanged.connect(self._on_view)
+        layout.addWidget(self._combo_vue)
 
         layout.addWidget(vline())
 
@@ -830,6 +891,10 @@ class ControlBar(QWidget):
             self._cb_poses.setChecked(False)
         self._refresh()
 
+    def _on_view(self, _):
+        self._view = self._combo_vue.currentData()
+        self._refresh()
+
     def _on_cups(self, _):
         self._active_ids = [cid for cid, cb in self._checkboxes.items()
                             if cb.isChecked()]
@@ -863,6 +928,8 @@ class ControlBar(QWidget):
             show_direction=self._show_direction,
             show_time_labels=self._show_time_labels,
             file_title=self._file_title,
+            view=self._view,
+            table_size=self._table_size,
         )
 
 
@@ -871,7 +938,7 @@ class ControlBar(QWidget):
 # ──────────────────────────────────────────────────────────────────────────────
 
 class TrajectoryWindow(QMainWindow):
-    def __init__(self, cups, file_title, downsample):
+    def __init__(self, cups, file_title, downsample, table_size):
         super().__init__()
         self.setWindowTitle(f"Trajectoires — {file_title}")
         self.setStyleSheet(f"background-color: {BG_DARK};")
@@ -887,6 +954,8 @@ class TrajectoryWindow(QMainWindow):
             show_direction=SHOW_DIRECTION_DEFAULT,
             show_time_labels=SHOW_TIME_LABELS_DEFAULT,
             file_title=file_title,
+            view=VIEW_BOTTOM,
+            table_size=table_size,
         )
 
         canvas  = FigureCanvasQTAgg(fig)
@@ -905,7 +974,7 @@ class TrajectoryWindow(QMainWindow):
             QToolButton:pressed { background-color: #1E4A7A; }
         """)
 
-        ctrl_bar = ControlBar(cups, fig, ax, downsample, file_title, self)
+        ctrl_bar = ControlBar(cups, fig, ax, downsample, file_title, table_size, self)
 
         central = QWidget()
         central.setStyleSheet(f"background-color: {BG_DARK};")
@@ -923,7 +992,8 @@ class TrajectoryWindow(QMainWindow):
 #  Point d'entrée
 # ──────────────────────────────────────────────────────────────────────────────
 
-def plot_trajectories(cups, file_title="Trajectoires", downsample=1, output_path=None):
+def plot_trajectories(cups, file_title="Trajectoires", downsample=1,
+                      output_path=None, table_size=TABLE_SIZE_MM_DEFAULT):
     all_ids = sorted(cups.keys(), key=lambda x: int(x) if x.isdigit() else x)
     if output_path:
         fig, ax = plt.subplots(figsize=(12, 8))
@@ -935,6 +1005,8 @@ def plot_trajectories(cups, file_title="Trajectoires", downsample=1, output_path
             show_direction=True,
             show_time_labels=True,
             file_title=file_title,
+            view=VIEW_BOTTOM,
+            table_size=table_size,
         )
         plt.tight_layout()
         plt.savefig(output_path, dpi=150, bbox_inches="tight",
@@ -944,7 +1016,7 @@ def plot_trajectories(cups, file_title="Trajectoires", downsample=1, output_path
         return
 
     app = QApplication.instance() or QApplication(sys.argv)
-    win = TrajectoryWindow(cups, file_title, downsample)
+    win = TrajectoryWindow(cups, file_title, downsample, table_size)
     win.show()
     app.exec()
 
@@ -953,16 +1025,19 @@ def main():
     parser = argparse.ArgumentParser(
         description="Trajectoires de tasses — contrôles dans l'interface."
     )
-    parser.add_argument("csv",          nargs="?", default=None)
-    parser.add_argument("--downsample", type=int,  default=1,    metavar="N")
-    parser.add_argument("--output",     type=str,  default=None, metavar="FICHIER.png")
+    parser.add_argument("csv",           nargs="?", default=None)
+    parser.add_argument("--downsample",  type=int,  default=1,
+                        metavar="N")
+    parser.add_argument("--output",      type=str,  default=None,
+                        metavar="FICHIER.png")
+    parser.add_argument("--table-size",  type=float,
+                        default=TABLE_SIZE_MM_DEFAULT,
+                        metavar="MM",
+                        help=f"Taille de la table en mm (défaut : {TABLE_SIZE_MM_DEFAULT})")
     args = parser.parse_args()
 
-    # ── Sélection du fichier ──────────────────────────────────────────────────
     if args.csv is None:
-        # QApplication doit exister avant tout widget
         app = QApplication.instance() or QApplication(sys.argv)
-
         from PyQt6.QtWidgets import QFileDialog
         csv_path, _ = QFileDialog.getOpenFileName(
             None,
@@ -985,6 +1060,7 @@ def main():
         file_title  = title,
         downsample  = max(1, args.downsample),
         output_path = args.output,
+        table_size  = args.table_size,
     )
 
 
