@@ -168,13 +168,18 @@ def extract_cups(df: pd.DataFrame) -> dict:
     """
     Charge les trajectoires par tasse et par source.
 
-    Filtrage hijack : pour les sources ema / raw / filtered,
-    les frames où ID_{id}_hijack == 1 sont écartées — leurs coordonnées
-    sont potentiellement corrompues (tracker KCF sur mauvaise cible).
+    Filtrage qualité : pour les sources ema / raw / filtered,
+    les frames où ID_{id}_quality > 0 sont écartées :
+      1 = hijack   (tracker KCF sur mauvaise cible)
+      2 = airborne (tasse en l'air / occlusion)
+      3 = bootstrap_pending (tracker respawné non confirmé)
+      4 = lost     (aucune donnée fiable)
     La source 'bottom' (ArUco) est immunisée et n'est jamais filtrée.
+
+    Rétrocompatibilité : si la colonne quality est absente mais que
+    hijack existe, on l'utilise comme quality==1.
     """
-    # Sources dont les coordonnées sont invalides pendant un hijack
-    HIJACK_AFFECTED = {"ema", "raw", "filtered"}
+    QUALITY_AFFECTED = {"ema", "raw", "filtered"}
 
     cups: dict[str, dict] = {}
     for source in SOURCES:
@@ -189,16 +194,33 @@ def extract_cups(df: pd.DataFrame) -> dict:
             sub = df[["frame", col_x, col_y]].copy()
             sub.columns = ["frame", "x", "y"]
 
-            # ── Masquage des frames hijackées ─────────────────────────────────
-            if source in HIJACK_AFFECTED:
-                hijack_col = f"ID_{cup_id}_hijack"
-                if hijack_col in df.columns:
-                    hijacked = df[hijack_col].fillna(0).astype(int) == 1
-                    n_hijack = int(hijacked.sum())
-                    if n_hijack:
-                        sub.loc[hijacked.values, ["x", "y"]] = np.nan
-                        print(f"  [hijack] Tasse {cup_id:>3} / {source:>8} "
-                              f"→ {n_hijack} frame(s) masquée(s)")
+            if source in QUALITY_AFFECTED:
+                # ── Nouvelle colonne quality (prioritaire) ────────────────
+                quality_col = f"ID_{cup_id}_quality"
+                hijack_col  = f"ID_{cup_id}_hijack"
+
+                if quality_col in df.columns:
+                    bad = df[quality_col].fillna(0).astype(int).isin([1, 4])
+                    n_bad = int(bad.sum())
+                    if n_bad:
+                        sub.loc[bad.values, ["x", "y"]] = np.nan
+                        # Détail par code pour le log
+                        counts = df.loc[bad, quality_col].value_counts().sort_index()
+                        detail = ", ".join(
+                            f"q{int(k)}×{int(v)}"
+                            for k, v in counts.items()
+                        )
+                        print(f"  [quality] Tasse {cup_id:>3} / {source:>8} "
+                              f"→ {n_bad} frame(s) masquée(s)  ({detail})")
+
+                elif hijack_col in df.columns:
+                    # ── Rétrocompatibilité anciens CSV sans quality ────────
+                    bad = df[hijack_col].fillna(0).astype(int) == 1
+                    n_bad = int(bad.sum())
+                    if n_bad:
+                        sub.loc[bad.values, ["x", "y"]] = np.nan
+                        print(f"  [hijack]  Tasse {cup_id:>3} / {source:>8} "
+                              f"→ {n_bad} frame(s) masquée(s)  (colonne hijack legacy)")
 
             sub = sub.dropna().reset_index(drop=True)
             cups.setdefault(cup_id, {})[source] = sub
@@ -217,11 +239,7 @@ def extract_cups(df: pd.DataFrame) -> dict:
         else:
             cups[cup_id]["_bottom_full"] = pd.DataFrame(columns=["frame", "x", "y"])
 
-    # ── Recalage top → bottom par offset médian ─────────────────────────────
-    # Sur les frames où ema ET bottom sont simultanément disponibles,
-    # on calcule offset = médiane(bottom - ema) et on l'applique à
-    # ema / raw / filtered pour les aligner sur le référentiel bottom.
-    # La médiane est robuste aux outliers (dérives KCF ponctuelles).
+    # ── Recalage top → bottom par offset médian ──────────────────────────────
     TOP_SOURCES = {"ema", "raw", "filtered"}
 
     for cup_id, srcs in cups.items():
@@ -231,9 +249,9 @@ def extract_cups(df: pd.DataFrame) -> dict:
         if ref_ema is None or ref_bottom is None or ref_bottom.empty:
             continue
 
-        # Jointure sur frame pour trouver les frames communes
         merged = ref_ema.merge(
-            ref_bottom[["frame", "x", "y"]].rename(columns={"x": "bx", "y": "by"}),
+            ref_bottom[["frame", "x", "y"]].rename(
+                columns={"x": "bx", "y": "by"}),
             on="frame", how="inner",
         )
 
@@ -242,25 +260,22 @@ def extract_cups(df: pd.DataFrame) -> dict:
                   f"({len(merged)}) — recalage ignoré")
             continue
 
-        # Offset médian (robuste aux outliers)
         off_x = float(np.median(merged["bx"] - merged["x"]))
         off_y = float(np.median(merged["by"] - merged["y"]))
 
         if abs(off_x) < 0.5 and abs(off_y) < 0.5:
-            continue  # offset négligeable
+            continue
 
         print(f"  [offset] Tasse {cup_id:>3} : "
               f"Dx={off_x:+.1f}mm  Dy={off_y:+.1f}mm  "
               f"(sur {len(merged)} frames communes)")
 
-        # Appliquer à toutes les sources top
         for src in TOP_SOURCES:
             if src in srcs and not srcs[src].empty:
                 srcs[src] = srcs[src].copy()
                 srcs[src]["x"] = srcs[src]["x"] + off_x
                 srcs[src]["y"] = srcs[src]["y"] + off_y
 
-        # Stocker l'offset pour usage externe si besoin
         srcs["_top_offset"] = (off_x, off_y)
 
     for cid, srcs in sorted(cups.items(),
