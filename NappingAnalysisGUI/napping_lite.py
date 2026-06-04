@@ -1479,19 +1479,43 @@ def main():
             identity_manager.get_raw_aruco_positions()
 
         # ── Collecte positions + calcul offset cam_top → cam_bottom ──────────────
-        
+        #sans correction d'offset (version initiale, avant refactor)
 
+        # for cup in cups:
+        #     ident = identity_manager.get_identity(cup.cup_id)
+        #     if ident is None:
+        #         continue
+        #     aruco_id = ident.aruco_id
+        #     if cup.pos_mm is not None:
+        #         ema_by_aruco[aruco_id] = cup.pos_mm
+        #     if cup.pos_mm_raw is not None:
+        #         raw_by_aruco[aruco_id] = cup.pos_mm_raw
+        #     if cup.pos_mm_kalman is not None:
+        #         filtered_by_aruco[aruco_id] = cup.pos_mm_kalman
+
+        #     # Mise à jour offset si cam_bottom a une donnée pour cette tasse ce frame
+        #     if cup.pos_mm is not None and aruco_id in bottom_by_aruco:
+        #         bx, by = bottom_by_aruco[aruco_id]
+        #         tx, ty = cup.pos_mm
+        #         dx, dy = bx - tx, by - ty
+
+        #         if not cup._offset_init:
+        #             cup._offset_ema_x = dx
+        #             cup._offset_ema_y = dy
+        #             cup._offset_init  = True
+        #         else:
+        #             cup._offset_ema_x = OFFSET_ALPHA * dx + (1 - OFFSET_ALPHA) * cup._offset_ema_x
+        #             cup._offset_ema_y = OFFSET_ALPHA * dy + (1 - OFFSET_ALPHA) * cup._offset_ema_y
+
+        #         cup.proj_offset = (cup._offset_ema_x, cup._offset_ema_y)
+
+        # ── Collecte positions + calcul offset cam_top → cam_bottom ──────────────
+        # version refactorisée pour appliquer l'offset avant d'exporter les positions dans le CSV, sans modifier les positions internes des cups (qui restent dans le repère cam_top).
         for cup in cups:
             ident = identity_manager.get_identity(cup.cup_id)
             if ident is None:
                 continue
             aruco_id = ident.aruco_id
-            if cup.pos_mm is not None:
-                ema_by_aruco[aruco_id] = cup.pos_mm
-            if cup.pos_mm_raw is not None:
-                raw_by_aruco[aruco_id] = cup.pos_mm_raw
-            if cup.pos_mm_kalman is not None:
-                filtered_by_aruco[aruco_id] = cup.pos_mm_kalman
 
             # Mise à jour offset si cam_bottom a une donnée pour cette tasse ce frame
             if cup.pos_mm is not None and aruco_id in bottom_by_aruco:
@@ -1508,6 +1532,15 @@ def main():
                     cup._offset_ema_y = OFFSET_ALPHA * dy + (1 - OFFSET_ALPHA) * cup._offset_ema_y
 
                 cup.proj_offset = (cup._offset_ema_x, cup._offset_ema_y)
+
+            # Export CSV : appliquer l'offset pour aligner les sources top sur le repère bottom
+            ox, oy = cup.proj_offset
+            if cup.pos_mm is not None:
+                ema_by_aruco[aruco_id] = (cup.pos_mm[0] + ox, cup.pos_mm[1] + oy)
+            if cup.pos_mm_raw is not None:
+                raw_by_aruco[aruco_id] = (cup.pos_mm_raw[0] + ox, cup.pos_mm_raw[1] + oy)
+            if cup.pos_mm_kalman is not None:
+                filtered_by_aruco[aruco_id] = (cup.pos_mm_kalman[0] + ox, cup.pos_mm_kalman[1] + oy)
 
         # ── Projecteur : fond blanc + cercles ────────────────────────────
         proj_frame[:] = 255

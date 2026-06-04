@@ -299,43 +299,68 @@ def extract_cups(df: pd.DataFrame) -> dict:
             cups[cup_id]["_bottom_full"] = pd.DataFrame(columns=["frame", "x", "y"])
 
     # ── Recalage top → bottom par offset médian ──────────────────────────────
-    TOP_SOURCES = {"ema", "raw", "filtered"}
+    # TOP_SOURCES = {"ema", "raw", "filtered"}
 
-    for cup_id, srcs in cups.items():
-        ref_ema    = srcs.get("ema")
-        ref_bottom = srcs.get("bottom")
+    # for cup_id, srcs in cups.items():
+    #     ref_ema    = srcs.get("ema")
+    #     ref_bottom = srcs.get("bottom")
 
+    #     if ref_ema is None or ref_bottom is None or ref_bottom.empty:
+    #         continue
+
+    #     merged = ref_ema.merge(
+    #         ref_bottom[["frame", "x", "y"]].rename(
+    #             columns={"x": "bx", "y": "by"}),
+    #         on="frame", how="inner",
+    #     )
+
+    #     if len(merged) < 5:
+    #         print(f"  [offset] Tasse {cup_id:>3} : pas assez de frames communes "
+    #               f"({len(merged)}) — recalage ignoré")
+    #         continue
+
+    #     off_x = float(np.median(merged["bx"] - merged["x"]))
+    #     off_y = float(np.median(merged["by"] - merged["y"]))
+
+    #     if abs(off_x) < 0.5 and abs(off_y) < 0.5:
+    #         continue
+
+    #     print(f"  [offset] Tasse {cup_id:>3} : "
+    #           f"Dx={off_x:+.1f}mm  Dy={off_y:+.1f}mm  "
+    #           f"(sur {len(merged)} frames communes)")
+
+    #     for src in TOP_SOURCES:
+    #         if src in srcs and not srcs[src].empty:
+    #             srcs[src] = srcs[src].copy()
+    #             srcs[src]["x"] = srcs[src]["x"] + off_x
+    #             srcs[src]["y"] = srcs[src]["y"] + off_y
+
+    #     srcs["_top_offset"] = (off_x, off_y)
+    
+    # ── Recalage top → bottom désactivé ──────────────────────────────────────
+    # L'offset est désormais intégré directement dans le CSV par napping_lite.py
+    # (via proj_offset EMA appliqué frame par frame avant l'écriture).
+    # Un recalage médian statique ici introduirait une double correction.
+    for cup_id in cups:
+        ref_ema    = cups[cup_id].get("ema")
+        ref_bottom = cups[cup_id].get("bottom")
         if ref_ema is None or ref_bottom is None or ref_bottom.empty:
             continue
-
         merged = ref_ema.merge(
-            ref_bottom[["frame", "x", "y"]].rename(
-                columns={"x": "bx", "y": "by"}),
+            ref_bottom[["frame", "x", "y"]].rename(columns={"x": "bx", "y": "by"}),
             on="frame", how="inner",
         )
-
         if len(merged) < 5:
-            print(f"  [offset] Tasse {cup_id:>3} : pas assez de frames communes "
-                  f"({len(merged)}) — recalage ignoré")
             continue
-
-        off_x = float(np.median(merged["bx"] - merged["x"]))
-        off_y = float(np.median(merged["by"] - merged["y"]))
-
-        if abs(off_x) < 0.5 and abs(off_y) < 0.5:
-            continue
-
-        print(f"  [offset] Tasse {cup_id:>3} : "
-              f"Dx={off_x:+.1f}mm  Dy={off_y:+.1f}mm  "
-              f"(sur {len(merged)} frames communes)")
-
-        for src in TOP_SOURCES:
-            if src in srcs and not srcs[src].empty:
-                srcs[src] = srcs[src].copy()
-                srcs[src]["x"] = srcs[src]["x"] + off_x
-                srcs[src]["y"] = srcs[src]["y"] + off_y
-
-        srcs["_top_offset"] = (off_x, off_y)
+        residual_x = float(np.median(merged["bx"] - merged["x"]))
+        residual_y = float(np.median(merged["by"] - merged["y"]))
+        if abs(residual_x) > 5.0 or abs(residual_y) > 5.0:
+            print(f"  [offset-check] Tasse {cup_id:>3} : résidu médian "
+                  f"Dx={residual_x:+.1f}mm  Dy={residual_y:+.1f}mm  "
+                  f"(attendu ≈ 0 — vérifier napping_lite si > 5mm)")
+        else:
+            print(f"  [offset-check] Tasse {cup_id:>3} : résidu OK "
+                  f"({residual_x:+.1f},{residual_y:+.1f})mm")
 
     for cid, srcs in sorted(cups.items(),
                              key=lambda kv: int(kv[0]) if kv[0].isdigit() else kv[0]):
