@@ -1211,6 +1211,8 @@ def main():
 
     protocol_name  = input("Nom du protocole  : ").strip() or "PROTO_TEST"
     participant_id = input("ID participant    : ").strip() or "P001"
+    projection_on  = input("Projection cercles (o/n) [o] : ").strip().lower() not in ("n", "non", "0")
+    print(f"  → Projection {'ACTIVÉE' if projection_on else 'DÉSACTIVÉE'}\n")
 
     timestamp     = datetime.now().strftime("%Y%m%d_%H%M%S")
     session_start = datetime.now().isoformat(timespec='seconds')
@@ -1316,7 +1318,7 @@ def main():
     print(f"[Main] Détection initiale : {len(init_bboxes)} tasse(s)")
     manager.force_reset(small0, init_bboxes)
 
-    print("\nq=quitter  r=reset  +/-=seuil  c=3D  i=debug\n")
+    print("\nq=quitter  r=reset  +/-=seuil  c=3D  i=debug  p=projection\n")
 
     use_3d_correction = False
     last_det_t        = time.monotonic()
@@ -1542,33 +1544,34 @@ def main():
             if cup.pos_mm_kalman is not None:
                 filtered_by_aruco[aruco_id] = (cup.pos_mm_kalman[0] + ox, cup.pos_mm_kalman[1] + oy)
 
-        # ── Projecteur : fond blanc + cercles ────────────────────────────
+        # ── Projecteur : fond blanc + cercles (si projection activée) ────
         proj_frame[:] = 255
 
-        for cup in cups:
-            if cup.pos_mm is None:
-                continue
-            x_mm = cup.pos_mm[0] + cup.proj_offset[0]
-            y_mm = cup.pos_mm[1] + cup.proj_offset[1]
-            pt  = np.array([[[x_mm, y_mm]]], dtype=np.float32)
-            pxy = cv2.perspectiveTransform(pt, H_proj)
-            px  = int(pxy[0, 0, 0])
-            py  = int(pxy[0, 0, 1])
-            state = identity_manager.get_state(cup.cup_id)
-            color = _identity_color(state)
-            label = labels.get(cup.cup_id, f"?#{cup.cup_id}")
-            m = RING_RADIUS + RING_THICKNESS + 30
-            if m <= px <= PROJ_W - m and m <= py <= PROJ_H - m:
-                cv2.circle(proj_frame, (px, py),
-                        RING_RADIUS, color, RING_THICKNESS,
-                        lineType=cv2.LINE_AA)
-                txt_size, _ = cv2.getTextSize(
-                    label, cv2.FONT_HERSHEY_SIMPLEX, 2.5, 5)
-                tx = px - txt_size[0] // 2
-                ty = py + RING_RADIUS + 60
-                cv2.putText(proj_frame, label, (tx, ty),
-                            cv2.FONT_HERSHEY_SIMPLEX, 2.5, color, 5,
-                            cv2.LINE_AA)
+        if projection_on:
+            for cup in cups:
+                if cup.pos_mm is None:
+                    continue
+                x_mm = cup.pos_mm[0] + cup.proj_offset[0]
+                y_mm = cup.pos_mm[1] + cup.proj_offset[1]
+                pt  = np.array([[[x_mm, y_mm]]], dtype=np.float32)
+                pxy = cv2.perspectiveTransform(pt, H_proj)
+                px  = int(pxy[0, 0, 0])
+                py  = int(pxy[0, 0, 1])
+                state = identity_manager.get_state(cup.cup_id)
+                color = _identity_color(state)
+                label = labels.get(cup.cup_id, f"?#{cup.cup_id}")
+                m = RING_RADIUS + RING_THICKNESS + 30
+                if m <= px <= PROJ_W - m and m <= py <= PROJ_H - m:
+                    cv2.circle(proj_frame, (px, py),
+                            RING_RADIUS, color, RING_THICKNESS,
+                            lineType=cv2.LINE_AA)
+                    txt_size, _ = cv2.getTextSize(
+                        label, cv2.FONT_HERSHEY_SIMPLEX, 2.5, 5)
+                    tx = px - txt_size[0] // 2
+                    ty = py + RING_RADIUS + 60
+                    cv2.putText(proj_frame, label, (tx, ty),
+                                cv2.FONT_HERSHEY_SIMPLEX, 2.5, color, 5,
+                                cv2.LINE_AA)
 
         dm.display_image_on_projector_monitor(proj_frame)
 
@@ -1679,6 +1682,12 @@ def main():
             print(f"Correction 3D → {'ON' if use_3d_correction else 'OFF'}")
         elif key == ord('i'):
             print(identity_manager.debug_summary())
+        elif key == ord('p'):
+            projection_on = not projection_on
+            print(f"Projection → {'ACTIVÉE' if projection_on else 'DÉSACTIVÉE'}")
+            if not projection_on:
+                proj_frame[:] = 255
+                dm.display_image_on_projector_monitor(proj_frame)
 
     # ── Nettoyage ─────────────────────────────────────────────────────────────
     print("\n[Main] Arrêt...")
