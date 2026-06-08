@@ -7,7 +7,7 @@ os.makedirs(save_dir, exist_ok=True)
 index = 0
 
 # DirectShow = souvent plus stable et plus rapide sous Windows
-cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+cap = cv2.VideoCapture(1, cv2.CAP_DSHOW)
 
 if not cap.isOpened():
     raise RuntimeError("Impossible d'ouvrir la caméra")

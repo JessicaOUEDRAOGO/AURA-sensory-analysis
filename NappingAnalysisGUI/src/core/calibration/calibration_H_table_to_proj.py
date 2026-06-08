@@ -14,7 +14,7 @@ PROJECTOR_RES = (3840, 2160)
 
 # Rectangle "sûr" DANS l'image projecteur qui tombe sur la surface utile
 # A AJUSTER si besoin après la prévisualisation
-PROJ_SAFE_RECT = (1400, 750, 2500, 1450)   # (x_min, y_min, x_max, y_max)
+PROJ_SAFE_RECT = (1400, 870, 2500, 1380)   # (x_min, y_min, x_max, y_max)
 
 GRID_ROWS = 3
 GRID_COLS = 3
