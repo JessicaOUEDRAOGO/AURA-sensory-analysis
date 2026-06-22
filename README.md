@@ -97,16 +97,11 @@ cam_bottom (ArUco, ~22Hz)┘         (PENDING / MATCHED /        └──► CS
 
 ## Deux filtres pour deux usages différents
 
-La position brute (`x_raw`) est exacte temporellement mais bruitée (~1,5 mm).
+La position brute (`x_raw`) est temporellement exacte, avec un bruit de mesure faible — largement suffisant pour l'analyse. Mais ce bruit change de direction à chaque frame : projeté à l'écran, ce tremblement frame-à-frame est visible à l'œil même si l'écart réel est minime.
 
-Un filtre **EMA** lisse cette position pour la projection des cercles sur la table : sans lui, le cercle tremblerait visiblement à chaque petite variation de mesure. Mais ce lissage a un coût — il introduit une forme de latence : la position affichée correspond à où était la tasse quelques dizaines de millisecondes plus tôt, pas à sa position actuelle. Ce décalage est invisible à l'œil sur la projection, mais il rend l'EMA inutilisable pour l'analyse de trajectoire — il n'est donc utilisé que pour l'affichage, jamais pour l'export.
+**EMA** lisse ce tremblement pour la projection des cercles, en moyennant les positions récentes. Sa limite : ce lissage introduit un décalage temporel — la position affichée correspond à où était la tasse quelques dizaines de millisecondes plus tôt. Invisible à l'œil sur la projection, mais ça rend l'EMA inutilisable pour l'analyse de trajectoire — il n'est donc utilisé que pour l'affichage.
 
-Un filtre de **Kalman** a été ajouté pour l'export CSV. Plutôt que de moyenner les positions passées comme l'EMA, il modélise aussi la vitesse de la tasse pour estimer sa position — ce qui lui permet de réduire le bruit de mesure sans réintroduire ce décalage temporel. C'est la colonne `x_filtered`/`y_filtered` qu'il faut utiliser pour toute analyse de trajectoire.
-
-| | EMA | Kalman |
-|---|---|---|
-| Usage | Projection temps réel | Export CSV |
-| Lag mesuré (mouvement rapide) | ~24-26 mm | ~2,5 mm |
+**Kalman** est utilisé pour l'export CSV. Plutôt que de moyenner le passé comme l'EMA, il modélise aussi la vitesse de la tasse pour prédire sa position — ce qui lisse le bruit sans réintroduire le même décalage temporel. C'est la colonne `x_filtered`/`y_filtered` à utiliser pour toute analyse de trajectoire.
 
 ---
 
@@ -125,6 +120,7 @@ Chaque session produit :
 
 ## Limites connues
 
+Un écart de position (jusqu'à ~0,5 cm) subsiste entre ('cam_top') et ('cam_bottom') pour une même tasse. Il augmente avec la vitesse, surtout en trajectoire curviligne — donc lié à la désynchronisation des deux caméras (25Hz vs ~22Hz, deux threads indépendants).
 
 
 ---
