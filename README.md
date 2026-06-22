@@ -120,7 +120,7 @@ Chaque session produit :
 
 ## Limites connues
 
-Un écart de position (jusqu'à ~0,5 cm) subsiste entre ('cam_top') et ('cam_bottom') pour une même tasse. Il augmente avec la vitesse, surtout en trajectoire curviligne — donc lié à la désynchronisation des deux caméras (25Hz vs ~22Hz, deux threads indépendants).
+Un écart de position (jusqu'à ~0,5 cm) subsiste entre `cam_top` et `cam_bottom` pour une même tasse. Il augmente avec la vitesse, surtout en trajectoire curviligne — donc lié à la désynchronisation des deux caméras (25Hz vs ~22Hz, deux threads indépendants).
 
 
 ---
