@@ -1,4 +1,6 @@
-# Table RA Projetée — suivre des tasses identiques sans jamais perdre leur identité
+# AURA — Augmented Reality for Sensory Analysis
+
+*Une table de réalité augmentée projective pour observer et enrichir l'analyse des perceptions sensorielles.*
 
 Système de réalité augmentée projective pour l'analyse sensorielle du café (méthode *napping*), développé en stage à Centrale Lyon ENISE / LIRIS avec l'Institut Lyfe. La table suit en temps réel la position de tasses de café et projette directement sur le plateau l'identité de chacune — pendant que les participants évaluent le café sans rien manipuler d'autre que leur tasse.
 
