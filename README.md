@@ -25,7 +25,7 @@ Système de réalité augmentée projective pour l'analyse sensorielle du café 
 
 ## Le problème, version courte
 
-Suivre 9 tasses **strictement identiques** en temps réel, savoir laquelle est laquelle à tout moment — même quand une main la soulève, la repose, ou que deux tasses se croisent — sans jamais permuter leurs identités. Voilà le problème. Ce README raconte comment il a été résolu, par itérations successives, chacune révélant le problème suivant.
+Suivre 9 tasses **strictement identiques** en temps réel, savoir laquelle est laquelle à tout moment — même quand on la soulève, la repose, ou que deux tasses se croisent — sans jamais permuter leurs identités. Voilà le problème. Ce README raconte comment il a été résolu, par itérations successives, chacune révélant le problème suivant.
 
 ---
 
@@ -54,15 +54,13 @@ Mais deux threads indépendants ne tournent jamais à une fréquence parfaitemen
 | `cam_top` (boucle principale) | 25 Hz (40 ms/frame) |
 | `cam_bottom` (thread ArUco) | ~22 Hz (asynchrone) |
 
-Conséquence directe : au moment où une ligne du CSV est écrite, la position ArUco disponible (`x_bottom`) n'est pas forcément celle de la même frame physique — l'écart peut aller de 0 à ~45 ms. C'est ce qui explique un écart résiduel de position de ~15-20 mm entre `cam_top` et `cam_bottom`, même quand une tasse est parfaitement immobile et que tout fonctionne normalement (état `MATCHED`). Tout l'effort de cette étape a consisté à réduire au maximum cet écart temporel plutôt qu'à l'éliminer complètement (ce qui demanderait une synchronisation matérielle des deux caméras, hors de portée ici).
+Conséquence directe : au moment où une ligne du CSV est écrite, la position ArUco disponible (`x_bottom`) n'est pas forcément celle de la même frame physique — l'écart peut aller de 0 à ~45 ms. C'est ce qui explique un écart résiduel de position de ~15-20 mm entre `cam_top` et `cam_bottom`, même quand une tasse est parfaitement immobile et que tout fonctionne normalement. Tout l'effort de cette étape a consisté à réduire au maximum cet écart temporel plutôt qu'à l'éliminer complètement (ce qui demanderait une synchronisation matérielle des deux caméras, hors de portée ici).
 
 ## Itération 4 — 9 tasses à ~30 fps : KCF est trop lent
 
 Le protocole final exige de suivre jusqu'à 9 tasses simultanément à une cadence proche de 30 fps. Le tracker visuel utilisé jusque-là, **KCF**, coûte environ 8 ms par tasse suivie. Pour 2 tasses, c'est négligeable (16 ms). Pour 9 tasses, ça représente déjà ~72 ms de calcul par frame — largement incompatible avec un budget de ~33-40 ms par frame.
 
 **→ Migration vers MOSSE**, un tracker par corrélation beaucoup plus léger (sous la milliseconde par instance au lieu de 8 ms). Le gain de performance est net — mais MOSSE a une faiblesse connue : il est nettement moins robuste que KCF aux occlusions et aux changements brusques d'apparence.
-
-*(Trace de cette migration encore visible dans le code aujourd'hui : les méthodes s'appellent toujours `update_kcf()` / `reinit_kcf()`, mais créent en réalité un `cv2.legacy.TrackerMOSSE_create()`. Le nom n'a jamais été mis à jour — l'historique du projet, littéralement, dans le code.)*
 
 ## Itération 5 — MOSSE perd pied dès qu'il y a collision
 
@@ -110,8 +108,6 @@ La position brute (`x_raw`) est exacte temporellement mais bruitée (~1,5 mm). D
 | Pourquoi | Lissage visuel, pas de saccade à l'œil | Précision temporelle — quasi zéro retard |
 
 Sur une session de test, le Kalman réduit le décalage de position de **~90 %** par rapport à l'EMA en phase de mouvement rapide. L'EMA reste utile pour l'affichage (l'œil ne voit pas 2 mm de retard, mais voit une saccade), tandis que le Kalman est la colonne à utiliser pour toute analyse de trajectoire.
-
-⚠️ Le timestamp inscrit dans les CSV est pris *après* tout le traitement (EMA, Kalman, écriture), pas au moment de la capture — décalage systématique d'environ 10-15 ms. Sans impact sur les intervalles entre frames (donc sur les vitesses calculées), mais à corriger si une synchronisation externe à <15 ms est nécessaire (capter `datetime.now()` juste après `cap.read()`).
 
 ---
 
