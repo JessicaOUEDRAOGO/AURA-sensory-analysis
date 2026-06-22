@@ -4,48 +4,35 @@ cup_identity_manager.py
 ========================
 Gestionnaire d'identité des tasses.
 
-Fix v3 — cercles fantômes :
-  Le cycle rapide AIRBORNE↔MATCHED visible dans les logs est causé par
-  _try_confirm_repose() qui confirmait une repose sur un seul tag vu
-  pendant une seule frame ArUco. Or les tags scintillent naturellement
-  (détectés/perdus alternativement à ~22 fps). La solution : n'accepter
-  la repose que si le tag est vu REPOSE_CONF_FRAMES fois consécutives
-  à distance < REPOSE_DIST_MM du tracker. Le compteur est réinitialisé
-  si le tag disparaît ou si la distance dépasse le seuil.
+Fait le pont entre le tracker visuel (cam_top, sans connaissance d'identité)
+et le tag ArUco (cam_bottom, identité fiable mais vu seulement quand la tasse
+est posée). Chaque tasse a un aruco_id stable sur toute la session ; le
+tracker_id qui lui est associé peut changer plusieurs fois (à chaque
+réinitialisation du tracker visuel).
 
-  Avant (version précédente) :
-    tag vu 1 frame → MATCHED immédiat → tag perdu 1 frame → AIRBORNE
-    → tag vu 1 frame → MATCHED → ... (10+ cycles par seconde)
+États d'une tasse (CupState) :
+  PENDING  — tag vu, pas encore de tracker associé
+  MATCHED  — tracker et tag liés et cohérents
+  AIRBORNE — tasse soulevée : tag invisible, tracker continue seul
+  LOST     — tracker perdu, tag invisible depuis trop longtemps
 
-  Après :
-    tag doit être vu REPOSE_CONF_FRAMES=3 frames consécutives et stables
-    avant que la repose soit confirmée → les scintillements ArUco normaux
-    ne déclenchent plus de faux MATCHED.
+Mécanismes notables :
+  - Anti-scintillement (REPOSE_CONF_FRAMES) : les tags ArUco clignotent
+    naturellement (détectés/perdus en alternance, ~22 Hz). Une repose
+    n'est confirmée qu'après REPOSE_CONF_FRAMES détections stables
+    consécutives à moins de REPOSE_DIST_MM du tracker — sinon chaque
+    scintillement déclencherait un cycle AIRBORNE↔MATCHED.
+  - Bootstrap (get_orphan_aruco_ids / validate_spawn) : si un tag reste
+    sans tracker pendant ORPHAN_FRAMES_BEFORE_BOOTSTRAP frames, napping_lite
+    peut spawner un nouveau tracker à sa position, avec un rayon d'exclusion
+    (AMBIGUITY_RADIUS_MM) pour éviter de spawner près d'un autre tag connu.
+  - Journal des associations (AssociationEvent / get_association_log) :
+    historique complet des liaisons/déliaisons tracker↔tag (bind, unbind,
+    hijack_detected) avec frame et horodatage, utilisé pour l'export JSON
+    de fin de session.
 
-Ajout v4 — export enrichi :
-  - get_raw_aruco_positions()   : positions brutes cam_bottom ce frame
-  - get_raw_tracker_positions() : positions brutes trackers KCF ce frame
-  - get_tracker_positions_by_aruco() : positions trackers indexées par aruco_id
-    (retourne None si le tracker n'est pas encore matchéà un tag)
-  - get_association_log()       : historique complet des liaisons tracker↔tag
-    pour export JSON en fin de session
-  Ces méthodes sont thread-safe et n'altèrent aucune logique interne.
-
-Ajout :
-  purge_stale_identities() — appelée par CupTrackingPipeline toutes les
-  PURGE_EVERY_FRAMES frames pour éviter l'accumulation sur longue session.
-
-1. AssociationEvent — champ extra: Optional[dict] = None
-     Permet de stocker des données supplémentaires (drift_mm, positions, etc.)
-     sur les événements de type "hijack_detected".
-
-  2. log_hijack_event() — nouvelle méthode publique
-     Appelée depuis la boucle principale de napping_lite.py quand un hijacking
-     est confirmé par drift ArUco. Enregistre un AssociationEvent avec
-     event="hijack_detected" et les infos de drift dans extra.
-
-  3. get_association_log() — enrichi pour inclure extra
-     Les dicts retournés incluent maintenant les champs de extra quand présents.
+Toutes les méthodes publiques sont thread-safe (RLock) : ce manager est
+mis à jour depuis deux threads différents (cam_top et cam_bottom).
 """
 
 import threading
@@ -139,7 +126,7 @@ class AssociationEvent:
 
 class CupIdentityManager:
     """
-    Gère la correspondance ArUco ↔ tracker KCF.
+    Gère la correspondance ArUco ↔ tracker visuel.
 
     Utilisation typique :
         manager = CupIdentityManager()
@@ -173,7 +160,6 @@ class CupIdentityManager:
         tag_lost_delay:   int   = TAG_LOST_DELAY,
         tag_found_conf:   int   = TAG_FOUND_CONF,
         repose_conf_frames: int = REPOSE_CONF_FRAMES,
-        
     ):
         self._lock = threading.RLock()
 
@@ -238,7 +224,7 @@ class CupIdentityManager:
         return ident.state if ident else None
 
     # ──────────────────────────────────────────────────────────────────────────
-    #  Interface publique — positions brutes pour CSV enrichi (NOUVEAU)
+    #  Interface publique — positions brutes pour CSV enrichi
     # ──────────────────────────────────────────────────────────────────────────
 
     def get_raw_aruco_positions(self) -> Dict[int, Tuple[float, float]]:
@@ -254,7 +240,7 @@ class CupIdentityManager:
 
     def get_raw_tracker_positions(self) -> Dict[int, Tuple[float, float]]:
         """
-        Retourne les positions de tous les trackers KCF actifs de la dernière
+        Retourne les positions de tous les trackers visuels actifs de la dernière
         frame cam_top, indexées par tracker_id interne.
 
         Utilisé pour les colonnes ID_X_x_tracker / ID_X_y_tracker du CSV,
@@ -265,7 +251,7 @@ class CupIdentityManager:
 
     def get_tracker_positions_by_aruco(self) -> Dict[int, Tuple[float, float]]:
         """
-        Retourne les positions des trackers KCF indexées par aruco_id.
+        Retourne les positions des trackers visuels indexées par aruco_id.
 
         Ne retourne que les trackers actuellement liés à un tag ArUco connu.
         Les trackers sans identité (pas encore matchés) sont ignorés ici — leurs
@@ -454,7 +440,7 @@ class CupIdentityManager:
             ))
 
     # ──────────────────────────────────────────────────────────────────────────
-    #  Logique interne — traitement ArUco (inchangée)
+    #  Logique interne — traitement ArUco
     # ──────────────────────────────────────────────────────────────────────────
 
     def _process_aruco_frame(
@@ -502,7 +488,7 @@ class CupIdentityManager:
                       f"à ({pos[0]:.0f},{pos[1]:.0f})mm")
 
     # ──────────────────────────────────────────────────────────────────────────
-    #  Logique interne — traitement trackers (inchangée)
+    #  Logique interne — traitement trackers
     # ──────────────────────────────────────────────────────────────────────────
 
     def _process_tracker_frame(self, tracker_positions):
@@ -585,7 +571,7 @@ class CupIdentityManager:
         print(f"[Identity] MATCH : {ident.label} ↔ tracker#{tracker_id} @ {pos_str}")
 
     # ──────────────────────────────────────────────────────────────────────────
-    #  Confirmation de repose — avec compteur anti-scintillement (inchangée)
+    #  Confirmation de repose — avec compteur anti-scintillement
     # ──────────────────────────────────────────────────────────────────────────
 
     def _try_confirm_repose(
@@ -648,7 +634,7 @@ class CupIdentityManager:
         self._bind(ident, best_tid)
 
     # ──────────────────────────────────────────────────────────────────────────
-    #  Debug (inchangé)
+    #  Debug
     # ──────────────────────────────────────────────────────────────────────────
 
     def debug_summary(self) -> str:

@@ -4,33 +4,35 @@ napping_lite.py
 ===============
 Version autonome du pipeline de napping — sans Qt, sans QThread.
 
-Basée sur test_projection_identite.py (stable 15+ min, thread principal).
-
 Fonctionnalités :
-  - Tracking KCF (cam_top) + ArUco (cam_bottom) + identité stable
-  - Projecteur : fond blanc + cercles colorés (identique test_projection_identite.py)
+  - Tracking visuel (MOSSE, cam_top) + identité par tag ArUco (cam_bottom)
+  - Projecteur : cercles colorés indiquant la position et l'identité de chaque tasse
   - Fenêtre grille 700×700 à l'écran : points rouges = positions tasses, axes -10/10
-  - Export CSV enrichi — 3 sources de coordonnées par tasse :
-      · cam_top (pos_mm EMA-lissée, via tracker KCF + PoseConverter)
-      · tracker  (position brute du tracker KCF, avant EMA et avant match)
-      · cam_bottom (position brute ArUco, frame par frame)
+  - Export CSV enrichi — 4 sources de coordonnées par tasse :
+      · ema      (position lissée EMA, utilisée pour la projection)
+      · raw      (position brute du tracker, avant tout filtre)
+      · filtered (position filtrée par Kalman, recommandée pour l'analyse)
+      · bottom   (position brute ArUco, vérité terrain quand la tasse est posée)
+    + une colonne de qualité par tasse (0=OK, 1=hijack, 2=airborne,
+      3=bootstrap en validation, 4=lost)
   - Export JSON associations.json :
       · pour chaque aruco_id : liste des tracker_id successifs + log bind/unbind
   - Enregistrement vidéo cam_top via VideoWriterThread (non bloquant)
   - Saisie participant / protocole au démarrage via input()
 
-COLONNES CSV :
+COLONNES CSV (par tasse, répétées pour chaque tag dans ARUCO_CUP_IDS) :
   frame, timestamp,
-  ID_{id}_x_camtop, ID_{id}_y_camtop,   ← position EMA lissée (cam_top)
-  ID_{id}_x_tracker, ID_{id}_y_tracker,  ← position brute tracker KCF
-  ID_{id}_x_bottom, ID_{id}_y_bottom     ← position brute ArUco (cam_bottom)
+  ID_{id}_x_ema,      ID_{id}_y_ema       ← position lissée pour la projection
+  ID_{id}_x_raw,      ID_{id}_y_raw       ← position brute du tracker
+  ID_{id}_x_filtered, ID_{id}_y_filtered  ← position filtrée par Kalman
+  ID_{id}_x_bottom,   ID_{id}_y_bottom    ← position ArUco (cam_bottom)
+  ID_{id}_quality                         ← code qualité de la frame
 
-  Chaque groupe est répété pour chaque tag dans ARUCO_CUP_IDS.
   Cellule vide si la source n'a pas de donnée ce frame.
 
 TOUCHES :
   q=quitter  r=reset trackers  +/-=seuil détection
-  c=toggle correction 3D  i=debug identités
+  c=toggle correction 3D  i=debug identités  p=toggle projection
 """
 
 import csv
@@ -139,7 +141,7 @@ BOOTSTRAP_SPAWN_CONF    = 5    # frames de validation post-spawn
 BOOTSTRAP_SPAWN_VALID_MM = 50  # distance max tracker↔ArUco pendant validation
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Utilitaires géométriques  (inchangés)
+#  Utilitaires géométriques
 # ══════════════════════════════════════════════════════════════════════════════
 
 class EMAFilter:
@@ -319,7 +321,7 @@ def _identity_color(state: Optional[CupState]) -> tuple:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  PoseConverter  (inchangé)
+#  PoseConverter
 # ══════════════════════════════════════════════════════════════════════════════
 
 class PoseConverter:
@@ -397,7 +399,7 @@ def _proc_to_mm(cx_p, cy_p, converter, use_3d):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  TrackedCup  (inchangé sauf update_mm qui renvoie aussi la pos brute)
+#  TrackedCup — état et logique d'un tracker individuel
 # ══════════════════════════════════════════════════════════════════════════════
 
 @dataclass
@@ -413,25 +415,25 @@ class TrackedCup:
     lost_frames:    int   = 0
     active:         bool  = True
 
-    # Offset correction cam_top → cam_bottom (inchangé)
+    # Offset correction cam_top → cam_bottom, appris en continu (EMA)
     proj_offset:    Tuple[float, float] = (0.0, 0.0)
     _offset_ema_x:  float = 0.0
     _offset_ema_y:  float = 0.0
     _offset_init:   bool  = False
 
-    # ── NOUVEAU — contrainte taille bbox ─────────────────────────────────────
-    # Enregistrée à l'init, comparée à chaque update MOSSE.
-    # Si MOSSE retourne une bbox > BBOX_GROW_RATIO × ref → tracker invalidé.
+    # ── Contrainte de taille de bbox ─────────────────────────────────────────
+    # Enregistrée à l'init, comparée à chaque update du tracker.
+    # Si la bbox dépasse BBOX_GROW_RATIO × ref → tracker invalidé.
     bbox_ref_w:     int   = 0
     bbox_ref_h:     int   = 0
 
-    # ── NOUVEAU — compteur de drift ArUco ────────────────────────────────────
+    # ── Compteur de drift ArUco ──────────────────────────────────────────────
     # Incrémenté chaque frame où pos_mm s'éloigne de ArUco de plus de ARUCO_DRIFT_MM.
     # Remis à 0 dès que l'écart repasse sous le seuil ou que ArUco n'est pas visible.
     # Quand il atteint ARUCO_DRIFT_FRAMES → tracker invalidé.
     aruco_drift_count: int = 0
 
-    def update_kcf(self, frame: np.ndarray) -> bool:
+    def update_tracker(self, frame: np.ndarray) -> bool:
         if not self.active:
             return False
 
@@ -443,13 +445,14 @@ class TrackedCup:
         rx, ry, rw, rh = raw
         nb = (int(rx), int(ry), max(4, int(rw)), max(4, int(rh)))
 
-        # Contrainte 1 — dérive position (inchangée)
+        # Contrainte 1 — dérive de position
         if not _drift_ok(self.bbox, nb):
             self.active = False
             return False
 
-        # Contrainte 2 — bbox qui gonfle (NOUVEAU)
-        # MOSSE dont la bbox grossit a perdu sa cible et suit une zone vide.
+        # Contrainte 2 — bbox qui gonfle
+        # Le tracker dont la bbox grossit anormalement a perdu sa cible
+        # et suit une zone vide plutôt que la tasse.
         if self.bbox_ref_w > 0 and self.bbox_ref_h > 0:
             if (nb[2] > self.bbox_ref_w * BBOX_GROW_RATIO or
                     nb[3] > self.bbox_ref_h * BBOX_GROW_RATIO):
@@ -466,7 +469,7 @@ class TrackedCup:
             self,
             aruco_pos_mm: Optional[Tuple[float, float]],
         ) -> Tuple[bool, Optional[dict]]:
-            '''
+            """
             Vérifie la cohérence entre pos_mm (tracker) et aruco_pos_mm (cam_bottom).
 
             Retourne (still_valid, event_info) :
@@ -479,7 +482,7 @@ class TrackedCup:
             - ArUco présent, dist > ARUCO_DRIFT_MM → drift_count++
                 Si drift_count >= ARUCO_DRIFT_FRAMES → invalide + retourne event
             - ArUco présent, dist ok → drift_count=0
-            '''
+            """
             if aruco_pos_mm is None or self.pos_mm is None:
                 self.aruco_drift_count = 0
                 return True, None
@@ -506,7 +509,7 @@ class TrackedCup:
 
             return True, None
 
-    def reinit_kcf(self, frame: np.ndarray, bbox: tuple) -> bool:
+    def reinit_tracker(self, frame: np.ndarray, bbox: tuple) -> bool:
         fh, fw = frame.shape[:2]
         x, y, w, h = bbox
         x = max(0, min(x, fw - 1))
@@ -524,7 +527,7 @@ class TrackedCup:
             self.active           = True
             return True
         except Exception as e:
-            print(f"[KCF] reinit cup#{self.cup_id}: {e}")
+            print(f"[Tracker] reinit cup#{self.cup_id}: {e}")
             self.active = False
             return False
 
@@ -540,7 +543,7 @@ class TrackedCup:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  CupDetector  (inchangé)
+#  CupDetector
 # ══════════════════════════════════════════════════════════════════════════════
 
 class CupDetector:
@@ -591,7 +594,7 @@ class CupDetector:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  TrackingManager  (inchangé)
+#  TrackingManager
 # ══════════════════════════════════════════════════════════════════════════════
 
 class TrackingManager:
@@ -609,7 +612,7 @@ class TrackingManager:
 
     def update_tracking(self, frame):
         for cup in list(self._cups.values()):
-            ok = cup.update_kcf(frame)
+            ok = cup.update_tracker(frame)
             if ok:
                 cup.update_mm(self._conv, self._use_3d); cup.lost_frames = 0
             else:
@@ -637,7 +640,7 @@ class TrackingManager:
                 cup = cups[i]; det = detected[j]
                 cx1,cy1 = _center(cup.bbox); cx2,cy2 = _center(det)
                 if np.sqrt((cx1-cx2)**2+(cy1-cy2)**2) <  MAX_DRIFT_PX:
-                    cup.reinit_kcf(frame, det)
+                    cup.reinit_tracker(frame, det)
                     cup.update_mm(self._conv, self._use_3d)
                     cup.lost_frames = 0
                 used_cups.add(i); used_dets.add(j)
@@ -670,21 +673,20 @@ class TrackingManager:
         try:
             t.init(frame, (x, y, w, h))
         except Exception as e:
-            print(f"[Manager] init KCF: {e}"); return
+            print(f"[Manager] init tracker: {e}"); return
         cid = self._next_id; self._next_id += 1
         cup = TrackedCup(cup_id=cid, ema=EMAFilter(), kalman_csv=KalmanFilter2D(),
                          cv_tracker=t, bbox=(x, y, w, h))
         cup.update_mm(self._conv, self._use_3d)
-        # ── NOUVEAU — enregistrer taille de référence ──────────────────────
+        # Enregistrer la taille de référence pour la contrainte BBOX_GROW_RATIO
         cup.bbox_ref_w = w
         cup.bbox_ref_h = h
-        # ──────────────────────────────────────────────────────────────────
         self._cups[cid] = cup
         print(f"[Manager] Nouveau cup#{cid}  bbox=({x},{y},{w},{h})")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Grille fenêtre PC  (inchangée)
+#  Grille fenêtre PC
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _build_grid_background() -> np.ndarray:
@@ -808,25 +810,22 @@ def _draw_grid_frame(
 
 class CsvWriter:
     """
-    4 sources de coordonnées + colonne hijack par tasse.
+    4 sources de coordonnées + colonne de qualité par tasse.
 
     Colonnes par tasse :
         ID_{id}_x_ema,       ID_{id}_y_ema       ← EMA lissée
-        ID_{id}_x_raw,       ID_{id}_y_raw       ← brut KCF
+        ID_{id}_x_raw,       ID_{id}_y_raw       ← brut tracker
         ID_{id}_x_filtered,  ID_{id}_y_filtered  ← Kalman
         ID_{id}_x_bottom,    ID_{id}_y_bottom    ← ArUco cam_bottom
-        ID_{id}_hijack                           ← 1 si frame contaminée, 0 sinon
+        ID_{id}_quality                          ← code qualité de la frame
 
-    hijack=1 : x_ema/x_raw/x_filtered potentiellement faux ce frame.
+    Codes quality : 0=OK, 1=hijack détecté, 2=airborne,
+                     3=bootstrap en validation, 4=lost.
+    quality != 0 : x_ema/x_raw/x_filtered potentiellement faux ce frame.
     x_bottom reste fiable si disponible.
     """
 
     def __init__(self, output_path: str, cup_ids: list):
-        import csv
-        from datetime import datetime
-
-        self._csv         = csv
-        self._dt          = datetime
         self._cup_ids     = list(cup_ids)
         self._frame_index = 0
         self._buffer: list = []
@@ -854,7 +853,7 @@ class CsvWriter:
         )
         self._writer.writeheader()
         self._file.flush()
-        print(f"[CSV] créé — {len(cup_ids)} tasse(s) × 5 sources (+ hijack)")
+        print(f"[CSV] créé — {len(cup_ids)} tasse(s) × 4 sources (+ quality)")
 
     def push(
         self,
@@ -1184,7 +1183,9 @@ def _try_bootstrap_orphans(
               f"offset=({offset_x:.0f},{offset_y:.0f})mm")
 
         # Forcer le bind immédiatement dans l'identity_manager
-        # (sans attendre _match_pending qui exige MATCH_DIST_MM)
+        # (sans attendre _match_pending qui exige MATCH_DIST_MM).
+        # Accès direct aux attributs privés : volontaire, pour bind immédiat
+        # sans repasser par le cycle normal de matching.
         with identity_manager._lock:
             ident = identity_manager._identities.get(aruco_id)
             if ident is not None and ident.tracker_id is None:
@@ -1428,38 +1429,9 @@ def main():
             if tid in manager._cups:
                 del manager._cups[tid]
         cups = list(manager._cups.values())
-        # ─────────────────────────────────────────────────────────────────────
-        # ─────────────────────────────────────────────────────────────────────
-        
-        # if frame_count % 300 == 0 and len(manager._cups) > 0:
-        # Cette condition est vraie toutes les 300 frames, soit environ toutes les 12 secondes à 25 FPS.
-        # On vérifie qu’il y a au moins une tasse suivie avant de lancer la mise à jour.
-        
-            # t0 = time.monotonic()
-        #On enregistre le temps de départ pour mesurer la durée dexécution du bloc.
 
-            # for cup in manager._cups.values():
-            #     cup.update_kcf(frame_small)
-        #Pour chaque tasse, on appelle la méthode update_kcf() qui met à jour le tracker KCF avec la nouvelle image (frame_small).
-
-            # kcf_ms = (time.monotonic() - t0) * 1000
-        # On calcule le temps total d’exécution en millisecondes
-            # print(f"[BENCH] {len(manager._cups)} trackers KCF : {kcf_ms:.1f}ms  ({kcf_ms/len(manager._cups):.1f}ms/tracker)")
-            
-        
-        # if frame_count % 300 == 0 and len(manager._cups) > 0:
-        #     import time as _t
-        #     N = 10  # répéter 10 fois pour avoir une mesure stable
-        #     t0 = _t.perf_counter()  # perf_counter > monotonic sur Windows
-        #     for _ in range(N):
-        #         for cup in manager._cups.values():
-        #             cup.cv_tracker.update(frame_small)
-        #     elapsed_ms = (_t.perf_counter() - t0) * 1000 / N
-        #     n = len(manager._cups)
-        #     print(f"[BENCH] {n} trackers MOSSE : {elapsed_ms:.2f}ms total  "
-        #         f"({elapsed_ms/n:.2f}ms/tracker)  →  max théorique {1000/elapsed_ms:.0f} FPS")
-
-        #Depuis la dernière détection, si plus de DETECT_INTERVAL_S secondes se sont écoulées, on lance une nouvelle détection sur l’image réduite (frame_small) et on met à jour le manager avec les nouvelles détections. On récupère ensuite la liste des tasses suivies (cups) et on met à jour le temps de la dernière détection (last_det_t).
+        # Re-détection périodique (toutes les DETECT_INTERVAL_S secondes) :
+        # recale les trackers sur les blobs détectés et en spawne de nouveaux.
         now = time.monotonic()
         if now - last_det_t >= DETECT_INTERVAL_S:
             det_bboxes, _ = detector.detect(frame_small)
@@ -1480,39 +1452,11 @@ def main():
         bottom_by_aruco:   Dict[int, Tuple[float, float]] = \
             identity_manager.get_raw_aruco_positions()
 
-        # ── Collecte positions + calcul offset cam_top → cam_bottom ──────────────
-        #sans correction d'offset (version initiale, avant refactor)
-
-        # for cup in cups:
-        #     ident = identity_manager.get_identity(cup.cup_id)
-        #     if ident is None:
-        #         continue
-        #     aruco_id = ident.aruco_id
-        #     if cup.pos_mm is not None:
-        #         ema_by_aruco[aruco_id] = cup.pos_mm
-        #     if cup.pos_mm_raw is not None:
-        #         raw_by_aruco[aruco_id] = cup.pos_mm_raw
-        #     if cup.pos_mm_kalman is not None:
-        #         filtered_by_aruco[aruco_id] = cup.pos_mm_kalman
-
-        #     # Mise à jour offset si cam_bottom a une donnée pour cette tasse ce frame
-        #     if cup.pos_mm is not None and aruco_id in bottom_by_aruco:
-        #         bx, by = bottom_by_aruco[aruco_id]
-        #         tx, ty = cup.pos_mm
-        #         dx, dy = bx - tx, by - ty
-
-        #         if not cup._offset_init:
-        #             cup._offset_ema_x = dx
-        #             cup._offset_ema_y = dy
-        #             cup._offset_init  = True
-        #         else:
-        #             cup._offset_ema_x = OFFSET_ALPHA * dx + (1 - OFFSET_ALPHA) * cup._offset_ema_x
-        #             cup._offset_ema_y = OFFSET_ALPHA * dy + (1 - OFFSET_ALPHA) * cup._offset_ema_y
-
-        #         cup.proj_offset = (cup._offset_ema_x, cup._offset_ema_y)
-
-        # ── Collecte positions + calcul offset cam_top → cam_bottom ──────────────
-        # version refactorisée pour appliquer l'offset avant d'exporter les positions dans le CSV, sans modifier les positions internes des cups (qui restent dans le repère cam_top).
+        # ── Collecte positions + calcul de l'offset cam_top → cam_bottom ─────
+        # L'offset est appris en continu (EMA) par tasse, à partir de l'écart
+        # entre la position EMA du tracker et la dernière position ArUco connue.
+        # Il est appliqué uniquement à l'export CSV, jamais aux positions
+        # internes des cups (qui restent dans le repère cam_top).
         for cup in cups:
             ident = identity_manager.get_identity(cup.cup_id)
             if ident is None:

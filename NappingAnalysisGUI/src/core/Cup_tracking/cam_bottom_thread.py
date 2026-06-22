@@ -11,7 +11,7 @@ Responsabilités :
   - Exposer les positions via self.aruco_positions (dict thread-safe)
   - Notifier le CupIdentityManager à chaque frame
 
-Ce thread ne fait RIEN d'autre. Pas de projection, pas de KCF.
+Ce thread ne fait RIEN d'autre. Pas de projection, pas de tracking visuel.
 """
 
 import cv2
@@ -19,7 +19,7 @@ import json
 import numpy as np
 import threading
 import time
-from typing import Dict, Optional, Set, Tuple
+from typing import Dict, Tuple
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
