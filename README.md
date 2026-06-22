@@ -97,16 +97,16 @@ cam_bottom (ArUco, ~22Hz)┘         (PENDING / MATCHED /        └──► CS
 
 ## Deux filtres pour deux usages différents
 
-La position brute (`x_raw`) est exacte temporellement mais bruitée (~1,5 mm). Deux traitements distincts répondent à deux besoins différents :
+La position brute (`x_raw`) est exacte temporellement mais bruitée (~1,5 mm).
 
-| | EMA (α=0.35) | Kalman (modèle position+vitesse) |
+Un filtre **EMA** lisse cette position pour la projection des cercles sur la table : sans lui, le cercle tremblerait visiblement à chaque petite variation de mesure. Mais ce lissage a un coût — il introduit une forme de latence : la position affichée correspond à où était la tasse quelques dizaines de millisecondes plus tôt, pas à sa position actuelle. Ce décalage est invisible à l'œil sur la projection, mais il rend l'EMA inutilisable pour l'analyse de trajectoire — il n'est donc utilisé que pour l'affichage, jamais pour l'export.
+
+Un filtre de **Kalman** a été ajouté pour l'export CSV. Plutôt que de moyenner les positions passées comme l'EMA, il modélise aussi la vitesse de la tasse pour estimer sa position — ce qui lui permet de réduire le bruit de mesure sans réintroduire ce décalage temporel. C'est la colonne `x_filtered`/`y_filtered` qu'il faut utiliser pour toute analyse de trajectoire.
+
+| | EMA | Kalman |
 |---|---|---|
-| Usage | Projection temps réel | Export CSV pour analyse |
+| Usage | Projection temps réel | Export CSV |
 | Lag mesuré (mouvement rapide) | ~24-26 mm | ~2,5 mm |
-| Lag max mesuré | ~42 mm | ~10 mm |
-| Pourquoi | Lissage visuel, pas de saccade à l'œil | Précision temporelle — quasi zéro retard |
-
-Sur une session de test, le Kalman réduit le décalage de position de **~90 %** par rapport à l'EMA en phase de mouvement rapide. L'EMA reste utile pour l'affichage (l'œil ne voit pas 2 mm de retard, mais voit une saccade), tandis que le Kalman est la colonne à utiliser pour toute analyse de trajectoire.
 
 ---
 
