@@ -4,17 +4,22 @@ Système de réalité augmentée projective pour l'analyse sensorielle du café 
 
 > Démo vidéo et contexte du projet : [Portfolio](https://jessicaouedraogo.github.io/Portfolio)
 
+<p align="center">
+  <img src="images/prototype_vue_generale.jpg" width="48%" alt="Prototype de la table — vue d'ensemble avec les tasses et le rig caméra/projecteur" />
+  <img src="images/prototype_vue_face.jpg" width="48%" alt="Prototype de la table — vue de face" />
+</p>
+
 **`Python` `OpenCV` `Computer Vision temps réel` `Multithreading` `Filtrage de Kalman` `ArUco` `Fusion de capteurs` `Réalité augmentée projective`**
 
 ## En résumé
 
 **Le problème :** suivre 9 tasses strictement identiques en temps réel, sans jamais confondre leur identité — y compris quand on les soulève, qu'on les repose, ou qu'elles se croisent.
 
-**Pourquoi c'est dur :** une seule caméra ne peut pas à la fois suivre une tasse en l'air *et* connaître son identité. Deux caméras résolvent ça, mais tournent à des fréquences légèrement différentes sur des threads séparés — chaque source d'information (vision, identité) doit être recroisée en continu pour rester fiable, sans jamais lui faire confiance aveuglément.
+**Pourquoi c'est dur :** la caméra du dessous détecte les tags ArUco uniquement quand la tasse est posée sur la table. Dès qu'elle est soulevée, le tag n'est plus visible et toute la trajectoire du mouvement est perdue. Pour capturer le mouvement complet, il fallait une deuxième caméra qui voie la tasse même en l'air.
 
 **Ce que j'ai conçu :** l'architecture complète du pipeline — choix et migration des trackers visuels (KCF → MOSSE) sous contrainte de performance (9 tasses à 30 fps), le système d'attribution d'identité tracker↔tag ArUco, et le mécanisme auto-correctif qui détecte et corrige les dérives de tracking en temps réel (5 garde-fous combinés, détaillés plus bas) — du prototype caméra unique jusqu'à la version stable utilisée en session réelle.
 
-**Résultat mesuré :** le filtre de Kalman appliqué à l'export réduit le décalage de position de ~90 % par rapport au filtre précédent (EMA) en phase de mouvement rapide — la différence entre une trajectoire exploitable scientifiquement et une trajectoire approximative.
+**Résultat mesuré :** le système suit chaque tasse sans interruption, posée ou en l'air, en gardant toujours la bonne identité — y compris quand deux tasses se croisent ou qu'une est soulevée puis reposée.
 
 ---
 
