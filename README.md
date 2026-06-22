@@ -118,6 +118,22 @@ Chaque session produit :
 
 ---
 
+## Analyser les trajectoires (`plot_trajectory.py`)
+
+Un CSV brut de session n'est pas lisible directement — il faut un outil pour visualiser les trajectoires et vérifier que le tracking est cohérent avant d'analyser quoi que ce soit.
+
+`plot_trajectory.py` charge un CSV de session et trace, pour une ou plusieurs tasses, la trajectoire choisie parmi les 4 sources (`raw`, `ema`, `filtered`, `bottom`). Quelques points utiles :
+
+- **Filtrage automatique des frames non fiables** — les frames marquées `hijack` (tracker sur la mauvaise tasse) ou `lost` sont retirées avant le tracé, pour ne pas afficher une trajectoire fausse comme si elle était valide.
+- **Pas de trait fantôme sur les trous de données** — quand le tracking est interrompu plus de 8 frames (tasse perdue, hors champ), la trajectoire est coupée en segments plutôt que reliée par une ligne droite qui n'a jamais existé.
+- **Flèches de direction + repères temporels (t1…t8)** — un tracé de trajectoire seul ne montre pas le sens du déplacement ni l'ordre chronologique ; ces repères permettent de lire "la tasse est passée par ici, puis par là" sans deviner.
+- **Superposition de la trajectoire ArUco (`bottom`)** en surbrillance sous la courbe principale — les zones où elle est dense correspondent aux moments où la tasse était posée et détectée ; les zones vides correspondent aux phases de mouvement ou de occlusion.
+- **Vue "expérimentateur"** — rotation à 180° des coordonnées pour afficher la trajectoire du point de vue de la personne assise face à la table, plutôt que du point de vue de la caméra du dessous.
+- **Contrôle qualité intégré** — l'outil recalcule l'écart résiduel médian entre `ema` et `bottom` pour chaque tasse et signale en console si un écart dépasse 5 mm, pour repérer directement une dérive de calibration ou de synchronisation au lieu de la découvrir à l'œil sur le graphique.
+
+
+---
+
 ## Limites connues
 
 Un écart de position (jusqu'à ~0,5 cm) subsiste entre `cam_top` et `cam_bottom` pour une même tasse. Il augmente avec la vitesse, surtout en trajectoire curviligne — donc lié à la désynchronisation des deux caméras (25Hz vs ~22Hz, deux threads indépendants).
