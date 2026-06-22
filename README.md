@@ -1,6 +1,6 @@
 # Table RA Projetée — suivre des tasses identiques sans jamais perdre leur identité
 
-Système de réalité augmentée projective pour l'analyse sensorielle du café (méthode *napping*), développé en stage à Centrale Lyon ENISE / LIRIS avec l'Institut Lyfe. Une table suit en temps réel la position de tasses de café et projette directement sur le plateau l'identité de chacune — pendant que les participants évaluent le café sans rien manipuler d'autre que leur tasse.
+Système de réalité augmentée projective pour l'analyse sensorielle du café (méthode *napping*), développé en stage à Centrale Lyon ENISE / LIRIS avec l'Institut Lyfe. La table suit en temps réel la position de tasses de café et projette directement sur le plateau l'identité de chacune — pendant que les participants évaluent le café sans rien manipuler d'autre que leur tasse.
 
 > Démo vidéo et contexte du projet : [Portfolio](https://jessicaouedraogo.github.io/Portfolio)
 
@@ -15,11 +15,11 @@ Système de réalité augmentée projective pour l'analyse sensorielle du café 
 
 **Le problème :** suivre 9 tasses strictement identiques en temps réel, sans jamais confondre leur identité — y compris quand on les soulève, qu'on les repose, ou qu'elles se croisent.
 
-**Pourquoi c'est dur :** la caméra du dessous détecte les tags ArUco uniquement quand la tasse est posée sur la table. Dès qu'elle est soulevée, le tag n'est plus visible et toute la trajectoire du mouvement est perdue. Pour capturer le mouvement complet, il fallait une deuxième caméra qui voie la tasse même en l'air.
+**Problématique :** la caméra du dessous détecte les tags ArUco uniquement quand la tasse est posée sur la table. Dès qu'elle est soulevée, le tag n'est plus visible et toute la trajectoire du mouvement est perdue. Pour capturer le mouvement complet, il fallait une deuxième caméra qui voie la tasse lorsqu'elle est levée.
 
-**Ce que j'ai conçu :** l'architecture complète du pipeline — choix et migration des trackers visuels (KCF → MOSSE) sous contrainte de performance (9 tasses à 30 fps), le système d'attribution d'identité tracker↔tag ArUco, et le mécanisme auto-correctif qui détecte et corrige les dérives de tracking en temps réel (5 garde-fous combinés, détaillés plus bas) — du prototype caméra unique jusqu'à la version stable utilisée en session réelle.
+**Ce que j'ai conçu :** l'architecture complète du pipeline — choix et migration des trackers visuels (KCF → MOSSE) sous contrainte de performance (9 tasses à 30 fps), le système d'attribution d'identité tracker↔tag ArUco, et le mécanisme auto-correctif qui détecte et corrige les dérives de tracking en temps réel (5 garde-fous combinés, détaillés plus bas).
 
-**Résultat mesuré :** le système suit chaque tasse sans interruption, posée ou en l'air, en gardant toujours la bonne identité — y compris quand deux tasses se croisent ou qu'une est soulevée puis reposée.
+**Résultat mesuré :** le système suit chaque tasse sans interruption, posée ou levée, en gardant toujours la bonne identité — y compris quand deux tasses se croisent.
 
 ---
 
