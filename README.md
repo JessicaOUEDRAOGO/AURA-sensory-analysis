@@ -74,7 +74,6 @@ Conséquence prévisible du passage à MOSSE : dès que deux tasses se croisent 
 4. **Récupération des tags orphelins** (bootstrap) : si un tag ArUco reste détecté sans aucun tracker associé pendant un certain temps (tasse repérée mais jamais reliée à un suivi visuel), un nouveau tracker est spawné automatiquement à la position corrigée, avec une zone d'exclusion autour des autres tags connus pour éviter une mauvaise association, puis validé sur plusieurs frames avant confirmation.
 5. **Anti-scintillement** : les tags ArUco clignotent naturellement (détectés/perdus en alternance, normal à ~22 Hz). Sans filtrage, ça produirait des cycles `AIRBORNE ↔ MATCHED` plusieurs fois par seconde. Une repose n'est donc confirmée qu'après 3 détections stables consécutives.
 
-Résultat mesurable sur une session réelle (`ArUco #6` et `#8`, ~4500 frames) : chaque tag a connu entre 4 et 6 `tracker_id` différents au cours de la session — preuve que le système recrée des trackers en continu sans jamais perdre l'identité réelle (`aruco_id`), qui elle reste stable du début à la fin.
 
 ---
 
@@ -126,9 +125,7 @@ Chaque session produit :
 
 ## Limites connues
 
-- L'écart géométrique ~15-20 mm entre `cam_top` et `cam_bottom` est compensé (offset appris) mais pas éliminé à la source — une synchronisation matérielle des deux caméras réduirait le problème à sa racine.
-- `cam_bottom` ne corrige pas la distorsion fisheye avant détection ArUco, source d'erreur en périphérie de table.
-- La séparation de tasses qui se touchent (blobs fusionnés) reste à traiter proprement dans la version d'analyse sur photo statique (`cup_detect_photo.py`, en cours).
+
 
 ---
 
