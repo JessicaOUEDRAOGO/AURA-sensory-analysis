@@ -56,7 +56,7 @@ Mais deux threads indépendants ne tournent jamais à une fréquence parfaitemen
 | `cam_top` (boucle principale) | 25 Hz (40 ms/frame) |
 | `cam_bottom` (thread ArUco) | ~22 Hz (asynchrone) |
 
-Conséquence directe : au moment où une ligne du CSV est écrite, la position ArUco disponible (`x_bottom`) n'est pas forcément celle de la même frame physique — l'écart peut aller de 0 à ~45 ms. C'est ce qui explique un écart résiduel de position de ~15-20 mm entre `cam_top` et `cam_bottom`, même quand une tasse est parfaitement immobile et que tout fonctionne normalement. Tout l'effort de cette étape a consisté à réduire au maximum cet écart temporel plutôt qu'à l'éliminer complètement (ce qui demanderait une synchronisation matérielle des deux caméras, hors de portée ici).
+Conséquence directe : au moment où une ligne du CSV est écrite, la position ArUco disponible (`x_bottom`) n'est pas forcément celle de la même frame physique — l'écart peut aller de 0 à ~45 ms. C'est ce qui explique un écart résiduel de position de ~5-15 mm entre `cam_top` et `cam_bottom`, même quand une tasse est parfaitement immobile et que tout fonctionne normalement. Tout l'effort de cette étape a consisté à réduire au maximum cet écart temporel plutôt qu'à l'éliminer complètement (ce qui demanderait une synchronisation matérielle des deux caméras, hors de portée ici).
 
 ## Itération 4 — 9 tasses à ~30 fps : KCF est trop lent
 
@@ -138,7 +138,7 @@ Un CSV brut de session n'est pas lisible directement — il faut un outil pour v
 
 ## Limites connues
 
-Un écart de position (jusqu'à ~0,5 cm) subsiste entre `cam_top` et `cam_bottom` pour une même tasse. Il augmente avec la vitesse, surtout en trajectoire curviligne — donc lié à la désynchronisation des deux caméras (25Hz vs ~22Hz, deux threads indépendants).
+Un écart de position (jusqu'à ~1,5 cm) subsiste entre `cam_top` et `cam_bottom` pour une même tasse. Il augmente avec la vitesse, surtout en trajectoire curviligne — donc lié à la désynchronisation des deux caméras (25Hz vs ~22Hz, deux threads indépendants).
 
 
 ---
